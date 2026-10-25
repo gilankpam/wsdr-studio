@@ -112,6 +112,7 @@ export class Display {
   // Layout change (window resize, a strip appearing): keep the waterfall's history, rescaled to the
   // new width and anchored at the top (newest rows).
   resize() {
+    this.frozen = null; // the Stop snapshot no longer matches the canvas size
     const oldDpr = this.dpr;
     this.dpr = window.devicePixelRatio || 1;
     let keep: HTMLCanvasElement | null = null;
@@ -289,9 +290,11 @@ export class Display {
     return Math.min(this.opts.dbMax - 10, Math.max(this.opts.dbMin, this.opts.wfFloor));
   }
 
+  // The floor maps to a dark blue (index 30), not black: rows without any frame stay visible as
+  // "quiet", and only values well under the floor fade to black.
   private colour(db: number) {
     const lo = this.wfLo(), hi = this.opts.dbMax;
-    return TURBO[Math.max(0, Math.min(255, Math.round(((db - lo) * 255) / Math.max(1, hi - lo))))];
+    return TURBO[Math.max(0, Math.min(255, Math.round(30 + ((db - lo) * 225) / Math.max(1, hi - lo))))];
   }
 
   // Left gutter of the waterfall: colour bar (scale) and time ticks.
@@ -305,7 +308,7 @@ export class Display {
       const img = c.createImageData(barW, Math.round(barH));
       const px = new Uint32Array(img.data.buffer);
       for (let y = 0; y < img.height; y++) {
-        const v = TURBO[Math.round(255 * (1 - y / Math.max(1, img.height - 1)))];
+        const v = TURBO[Math.round(255 - (225 * y) / Math.max(1, img.height - 1))]; // as colour(): floor = 30
         for (let x = 0; x < barW; x++) px[y * barW + x] = v;
       }
       c.putImageData(img, Math.round(4 * d), Math.round(y0));
@@ -522,17 +525,19 @@ export class Display {
           const sm = this.smoothed[r.path] ?? r.avg;
           const pk = this.hold[r.path] ?? r.max;
           // over the waterfall: frequency and age (the levels shown live are not that row's)
-          const older = this.hoverWfY >= 0 && this.sepRows >= 0 && this.hoverWfY * d > this.sepRows;
-          const age = this.hoverWfY >= 0 ? (this.hoverWfY * d) / this.rowsPerS : 0;
+          const wy = this.hoverWfY * d;
+          const older = this.hoverWfY >= 0 && this.sepRows >= 0 && wy > this.sepRows;
+          const beforeStop = this.hoverWfY >= 0 && (this.opts.dim || (this.stopRows >= 0 && wy > this.stopRows));
           const txt = older
             ? 'older rows: another frequency/span (see the label at the line)'
             : this.hoverWfY >= 0
-              ? `${(f / 1e6).toFixed(3)} MHz · ${age.toFixed(1)} s ago`
+              ? `${(f / 1e6).toFixed(3)} MHz · ${beforeStop ? 'before Stop' : `${(wy / this.rowsPerS).toFixed(1)} s ago`}`
               : `${(f / 1e6).toFixed(3)} MHz · avg ${sm[b].toFixed(1)} · peak ${pk[b].toFixed(1)} dBFS`;
           c.font = `${12 * d}px system-ui, sans-serif`;
           const tw = c.measureText(txt).width + 12 * d;
           const tx = Math.min(W - tw, x + 8 * d);
-          const ty = T + (this.opts.overlay ? 72 : 30) * d; // below the overlay message when there is one
+          // over the waterfall: just above the frequency axis (nearest the pointer); else below any overlay
+          const ty = this.hoverWfY >= 0 ? ph - 24 * d : T + (this.opts.overlay ? 72 : 30) * d;
           c.fillStyle = 'rgba(20,26,34,0.92)';
           c.fillRect(tx, ty, tw, 20 * d);
           c.fillStyle = '#e0e6ee';

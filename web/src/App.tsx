@@ -34,9 +34,10 @@ const LOCKED = 'End the recording to change tuning or gain';
 // Per-viewer preferences (display only); storage may be unavailable.
 const PREFS_KEY = 'wsdr-studio.prefs';
 type Scale = { dbMin: number; dbMax: number; wfFloor: number };
-type Prefs = { smooth: number; wfMode: 'max' | 'avg'; scale: Scale | null; retuned: boolean };
+type Tuning = { freq: number; rate_sel: number; gain_db: number; agc: boolean };
+type Prefs = { smooth: number; wfMode: 'max' | 'avg'; scale: Scale | null; retuned: boolean; tuning: Tuning | null };
 function loadPrefs(): Prefs {
-  const d: Prefs = { smooth: 0.7, wfMode: 'max', scale: null, retuned: false };
+  const d: Prefs = { smooth: 0.7, wfMode: 'max', scale: null, retuned: false, tuning: null };
   try {
     return { ...d, ...JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') };
   } catch {
@@ -98,7 +99,8 @@ export default function App() {
   const [selKey, setSelKey] = useState<string | null>(null);
   const [caps, setCaps] = useState<Caps>({ open: false });
   const [rx, setRx] = useState<RxSettings | null>(null); // live settings (adapter open)
-  const [draft, setDraft] = useState<RxSettings>({ freq: 5180e6, rate_sel: 4, wide: true, agc: false, gain_db: 30 });
+  // the last tuning (remembered across launches) is the first draft
+  const [draft, setDraft] = useState<RxSettings>(() => ({ freq: 5180e6, rate_sel: 4, agc: false, gain_db: 30, ...loadPrefs().tuning, wide: true }));
   const [dsp, setDsp] = useState<DspSettings>({ fft: 8192, rows_per_s: 25, paths: 'a', dc_remove: true });
   const [status, setStatus] = useState<Status | null>(null);
   const [banners, setBanners] = useState<Banner[]>([]);
@@ -119,6 +121,7 @@ export default function App() {
       return n;
     });
   const setUserScale = (s: Scale) => {
+    autoOn.current = false; // at once: a row arriving before the effect must not refit over it
     const dbMin = Math.min(s.dbMin, s.dbMax - 10);
     const n = { dbMin, dbMax: Math.max(s.dbMax, dbMin + 10), wfFloor: s.wfFloor };
     setScale(n);
@@ -155,8 +158,10 @@ export default function App() {
     let autoRun = -1; // run count to wait for (-1: none)
     const autoAgain = (rx: boolean) => {
       if (!autoOn.current) return;
-      if (rx) autoRun = d.runCount() + 1;
-      else {
+      if (rx) {
+        autoRun = d.runCount() + 1;
+        autoAt = -1; // rows still counting toward an earlier trigger may be of the old run
+      } else {
         d.resetPeaks();
         autoAt = d.rowsSeen() + 25;
       }
@@ -188,9 +193,10 @@ export default function App() {
         c.onRow = (r) => {
           d.push(r);
           const runDone = autoRun >= 0 && d.runCount() >= autoRun && d.runRows() >= 25;
-          if (runDone || (autoAt >= 0 && d.rowsSeen() >= autoAt)) {
-            autoAt = -1;
-            autoRun = -1;
+          const rowsDone = autoAt >= 0 && d.rowsSeen() >= autoAt;
+          if (runDone || rowsDone) {
+            if (runDone) autoRun = -1; // clear only the trigger that fired
+            if (rowsDone) autoAt = -1;
             if (!autoOn.current) return; // the user fixed a scale meanwhile
             const s = d.suggestRange();
             if (s) setScale(s);
@@ -223,6 +229,8 @@ export default function App() {
               if (e.rx) {
                 if (lastRx && (lastRx.freq !== e.rx.freq || lastRx.rate_sel !== e.rx.rate_sel || lastRx.gain_db !== e.rx.gain_db || lastRx.agc !== e.rx.agc))
                   autoAgain(true);
+                if (lastRx && lastRx.freq !== e.rx.freq) updatePrefs({ retuned: true });
+                updatePrefs({ tuning: { freq: e.rx.freq, rate_sel: e.rx.rate_sel, gain_db: e.rx.gain_db, agc: e.rx.agc } });
                 lastRx = e.rx;
                 setRx(e.rx);
                 lastSentFreq.current = null;
@@ -230,7 +238,7 @@ export default function App() {
                 setGainUi(null);
               }
               if (e.dsp) {
-                if (lastFft && e.dsp.fft !== lastFft) autoAgain(false);
+                if (lastFft && e.dsp.fft !== lastFft && wasOpen) autoAgain(false); // stopped: keep the frozen picture
                 lastFft = e.dsp.fft;
                 if (e.dsp.paths !== lastPaths) {
                   if (!e.dsp.paths.includes('a')) d.dropPath(0);
@@ -365,6 +373,7 @@ export default function App() {
   const doStart = async () => {
     if (!sel) return;
     setStarting(true);
+    setSaved(null);
     try {
       await req('open', { pid: sel.pid, bus: sel.bus, port: sel.port, ...draft });
     } catch {

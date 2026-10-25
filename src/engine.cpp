@@ -470,11 +470,14 @@ void Engine::dsp_loop() {
       // Every file has one centre, one rate and no gaps. Banks of the run the recording belongs to go
       // in; older ones (still queued from before a retune) are skipped; a newer run, or a gap in the
       // bank sequence (the DSP fell behind and the ring dropped banks), ends the file.
+      // read _recording before _rec_id: start() bumps the id before setting _recording, so a bank that
+      // sees the recording also sees its id
+      const bool recording = _recording;
       if (_rec_id != rec_seen) { // a new recording: its first bank starts the sequence
         rec_seen = _rec_id;
         rec_next = 0;
       }
-      if (!_recording) {
+      if (!recording) {
         rec_next = 0;
       } else if (gen > _rec_gen) {
         request_stop(cfg != _rec_cfg ? "settings changed" : "the stream restarted after a fault");

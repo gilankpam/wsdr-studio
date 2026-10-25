@@ -16,8 +16,10 @@
 namespace studio {
 
 namespace {
-constexpr size_t kMaxQueued = 32u << 20; // int16 values (64 MiB) before samples are dropped
+constexpr size_t kMaxQueued = 64u << 20;    // int16 values (128 MiB) queued before samples are dropped
 constexpr uint64_t kFlushBlock = 16u << 20; // writeback granularity (bytes)
+constexpr uint64_t kFlushLag = 6;           // wait for the block this far behind (~96 MiB in flight)
+// At 40 MS/s (160 MB/s) the queue plus the blocks in flight ride out ~1.4 s of disk stall.
 }
 
 std::string Recorder::start(double fs, double centre_hz, const std::string &hw, int path, double gain_db, bool agc) {
@@ -56,11 +58,11 @@ std::string Recorder::start(double fs, double centre_hz, const std::string &hw, 
     _queued = 0;
     _quit = false;
     _fd = fd;
+    _bytes = 0; // under the lock with _base: info() never pairs the new file with the old size
+    _dropped = 0;
+    _failed = false;
   }
   write_meta(false);
-  _bytes = 0;
-  _dropped = 0;
-  _failed = false;
   _active = true;
   _t = std::thread([this] { writer(); });
   return base + ".sigmf-data";
@@ -156,16 +158,25 @@ void Recorder::writer() {
       left -= static_cast<size_t>(w);
       _bytes += static_cast<uint64_t>(w); // only what reached the file
     }
-    // Flush behind: start writeback of each finished 16 MiB block and wait for the one before it, so
-    // dirty pages stay bounded (a slow disk shows up as a full queue now, not as a huge fsync at stop).
+    // Flush behind: start writeback of each finished 16 MiB block and wait for the one kFlushLag blocks
+    // before it, so dirty pages stay bounded (no huge fsync at stop) while short stalls are absorbed.
+    // A writeback error is reported to these calls (and then not again to fsync): treat it as a write
+    // failure.
     const uint64_t done = _bytes.load() / kFlushBlock;
-    while (flushed < done) {
-      ::sync_file_range(fd, static_cast<off_t>(flushed * kFlushBlock), kFlushBlock, SYNC_FILE_RANGE_WRITE);
-      if (flushed > 0) {
-        const off_t prev = static_cast<off_t>((flushed - 1) * kFlushBlock);
-        ::sync_file_range(fd, prev, kFlushBlock,
-                          SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
-        ::posix_fadvise(fd, prev, kFlushBlock, POSIX_FADV_DONTNEED);
+    while (flushed < done && !_failed) {
+      int rc = ::sync_file_range(fd, static_cast<off_t>(flushed * kFlushBlock), kFlushBlock, SYNC_FILE_RANGE_WRITE);
+      if (rc == 0 && flushed >= kFlushLag) {
+        const off_t prev = static_cast<off_t>((flushed - kFlushLag) * kFlushBlock);
+        rc = ::sync_file_range(fd, prev, kFlushBlock,
+                               SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
+        if (rc == 0)
+          ::posix_fadvise(fd, prev, kFlushBlock, POSIX_FADV_DONTNEED);
+      }
+      if (rc != 0) {
+        std::lock_guard<std::mutex> l(_m);
+        _error = std::string("write failed: ") + std::strerror(errno);
+        _failed = true;
+        break;
       }
       flushed++;
     }

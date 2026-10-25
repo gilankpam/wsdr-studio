@@ -327,6 +327,18 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   // which one is open (a client that did not start it shows the right adapter).
   // (an adapter the other view has open is skipped, or refused when asked for by bus/port)
   const auto key = [](int b, const std::string &p) { return std::to_string(b) + "-" + p; };
+  std::unique_lock<std::mutex> serial(_claims->open_mutex); // until this slot has claimed its adapter
+  // a failure once 'opening' is shown: back to closed, with the reason (the view must not stay 'starting')
+  const auto fail = [&](const char *kind, const std::string &msg) {
+    _claims->drop(_slot);
+    {
+      std::lock_guard<std::mutex> l(_sm);
+      _state = "closed";
+      _error = msg;
+    }
+    _cb.event(status());
+    throw CmdError(kind, msg);
+  };
   DeviceInfo dev;
   bool skipped = false;
   for (const auto &d : scan_devices())
@@ -372,7 +384,8 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         for (const auto &d : scan_devices()) {
           // new: not seen before and not the device we switched; usable: udev has set its permissions
-          if (d.pid != pid || before.count(key(d)) || key(d) == key(dev) || !d.can_open)
+          if (d.pid != pid || before.count(key(d)) || key(d) == key(dev) || !d.can_open ||
+              _claims->held_by_other(std::to_string(d.bus) + "-" + d.port, _slot))
             continue;
           if (d.speed_mbps >= 5000 && (!super || d.controller == dev.controller)) {
             bus = d.bus;
@@ -384,10 +397,7 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
         }
       }
       if (!super && !back)
-      {
-        _claims->drop(_slot);
-        throw CmdError("not_found", "the 8812BU did not come back after the USB 3 switch; replug it");
-      }
+        fail("not_found", "the 8812BU did not come back after the USB 3 switch; replug it");
       _cb.event({{"type", "notice"},
                  {"text", super ? "The 8812BU now runs at USB 3 (until it is unplugged)"
                                 : "The 8812BU stayed at USB 2: this port or cable may not carry USB 3"}});
@@ -410,7 +420,9 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
     std::lock_guard<std::mutex> l(_sm);
     _cu = pid == wsdr::kPid8812cu;
   }
-  _claims->take(key(bus, port), _slot); // its bus may have changed (USB 3 switch)
+  if (!_claims->take(key(bus, port), _slot)) // its bus may have changed (USB 3 switch)
+    fail("busy", "this adapter is open in the other view");
+  serial.unlock();
   try {
     r->open(pid, hw_for(s), bus, port);
   } catch (const wsdr::OpenError &e) {

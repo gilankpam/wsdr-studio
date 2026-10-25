@@ -104,6 +104,8 @@ type StationHandle = {
   freq: () => number;
   open: () => boolean;
   suggest: (wfMode?: 'max' | 'avg') => Scale | null; // Auto scale from this view's picture
+  busy: () => string | null; // why a linked change must not touch this view now (recording, starting)
+  notice: (text: string) => void;
 };
 type ViewInfo = { fft: number; gapped: boolean; fsNow: number };
 type Link = {
@@ -542,6 +544,8 @@ function Station({ slot, dual, shared, link }: { slot: number; dual: boolean; sh
         if (wfMode) display.current?.setOpts({ wfMode });
         return display.current?.suggestRange() ?? null;
       },
+      busy: () => (recording ? 'it is recording' : opening ? 'it is starting' : null),
+      notice: (text) => addBanner(text),
     });
   });
   useEffect(() => () => link.register(slot, null), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -965,19 +969,30 @@ export default function App() {
       }),
     userSet: (slot, args) => {
       const other = dual ? handles.current[slot ^ 1] : null;
-      if (!other) return;
+      const me = handles.current[slot];
+      if (!other || !me) return;
+      const name = slot ? 'A' : 'B';
       const a: Partial<RxSettings> = {};
       // the frequency lock keeps the views' distance as it is now (same frequency: compare; one span
-      // apart: adjacent channels)
-      const here = handles.current[slot]?.freq();
-      if (locks.freq && args.freq !== undefined && here !== undefined) a.freq = args.freq + (other.freq() - here);
+      // apart: adjacent channels); the result is snapped to the tuning grid and must stay in its band
+      const here = me.freq();
+      if (locks.freq && args.freq !== undefined) {
+        const want = args.freq + (other.freq() - here);
+        const f = snap(want);
+        if (Math.abs(f - want) > 2.5e6 || want < 3.7e9 !== other.freq() < 3.7e9)
+          me.notice(`View ${name} cannot follow: ${(want / 1e6).toFixed(0)} MHz is outside its band`);
+        else a.freq = f;
+      }
       if (locks.span && args.rate_sel !== undefined) {
         a.rate_sel = args.rate_sel;
         a.wide = args.wide ?? true;
       }
       if (locks.gain && args.gain_db !== undefined) a.gain_db = args.gain_db;
       if (locks.gain && args.agc !== undefined) a.agc = args.agc;
-      if (Object.keys(a).length) other.linkedSet(a);
+      if (!Object.keys(a).length) return;
+      const why = other.busy();
+      if (why) me.notice(`View ${name} did not follow: ${why}`); // a recording must not be ended by a lock
+      else other.linkedSet(a);
     },
   };
   const setLock = (k: keyof Locks) => updatePrefs({ locks: { ...locks, [k]: !locks[k] } });

@@ -58,6 +58,7 @@ export class Display {
   private frozen: HTMLCanvasElement | null = null; // waterfall before Stop dimmed it
   private ghost: Row | null = null;           // the other view's newest row (dual mode)
   private ghostSm: Float32Array | null = null; // ... its average, smoothed like ours
+  private ghostAt = 0;                         // when it last arrived (a stopped view's trace expires)
   onHint: (text: string) => void = () => {};
   private dpr = 1;
   private off: (() => void)[] = [];
@@ -260,6 +261,7 @@ export class Display {
       if (!same || !this.ghostSm) this.ghostSm = Float32Array.from(r.avg);
       else for (let i = 0; i < r.bins; i++) this.ghostSm[i] = this.ghostSm[i] * this.opts.smooth + r.avg[i] * (1 - this.opts.smooth);
       this.ghost = r;
+      this.ghostAt = performance.now();
     }
     this.dirty = true;
   }
@@ -550,7 +552,7 @@ export class Display {
       // the other view (dual mode), when it shows the same axis
       const own = this.last[0] ?? this.last[1];
       const g = this.ghost, gs = this.ghostSm;
-      const ghostOn = !!(g && gs && own && g.bins === own.bins && Math.abs(g.f0 - own.f0) < own.df / 2 && Math.abs(g.df - own.df) < 1e-6);
+      const ghostOn = !!(g && gs && own && performance.now() - this.ghostAt < 1500 && g.bins === own.bins && Math.abs(g.f0 - own.f0) < own.df / 2 && Math.abs(g.df - own.df) < 1e-6);
       if (ghostOn && g && gs) {
         c.globalAlpha = stale || this.opts.dim ? 0.35 : 0.9;
         c.strokeStyle = GHOST;

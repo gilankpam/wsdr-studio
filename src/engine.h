@@ -34,6 +34,10 @@ using json = nlohmann::json;
 // Which adapter each engine (view slot) has open: two slots must never open the same dongle.
 class Claims {
 public:
+  // Held by an opening engine from choosing its adapter until it has claimed it (USB 3 switch
+  // included): two slots opening at once never pick, or re-find, the same dongle.
+  std::mutex open_mutex;
+
   bool take(const std::string &key, int slot) { // false: another slot holds it
     std::lock_guard<std::mutex> l(_m);
     for (auto it = _held.begin(); it != _held.end();)

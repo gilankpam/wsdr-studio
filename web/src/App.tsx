@@ -598,7 +598,7 @@ export default function App() {
         <div className={saved.error ? 'strip error' : 'strip'}>
           <span>
             {saved.error ? `Recording stopped: ${saved.error}. ` : saved.reason ? `Recording stopped (${saved.reason}). ` : ''}
-            Saved to <code title={saved.file}>{saved.file.slice(0, saved.file.lastIndexOf('/') + 1)}</code>{' '}
+            Saved to <code title={saved.file}>{saved.file.slice(0, saved.file.lastIndexOf('/') + 1).replace(/^\/home\/[^/]+\//, '~/')}</code>{' '}
             <code title={saved.file}>{baseName(saved.file)}</code> · {bytes(saved.bytes)} · {saved.seconds.toFixed(1)} s
           </span>
           <button onClick={() => copy(saved.file)}>Copy path</button>

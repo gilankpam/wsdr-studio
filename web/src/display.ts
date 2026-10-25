@@ -477,11 +477,12 @@ export class Display {
           c.font = `${12 * d}px system-ui, sans-serif`;
           const tw = c.measureText(txt).width + 12 * d;
           const tx = Math.min(W - tw, x + 8 * d);
+          const ty = T + (this.opts.overlay ? 72 : 30) * d; // below the overlay message when there is one
           c.fillStyle = 'rgba(20,26,34,0.92)';
-          c.fillRect(tx, T + 30 * d, tw, 20 * d);
+          c.fillRect(tx, ty, tw, 20 * d);
           c.fillStyle = '#e0e6ee';
           c.textAlign = 'left';
-          c.fillText(txt, tx + 6 * d, T + 40 * d);
+          c.fillText(txt, tx + 6 * d, ty + 10 * d);
         }
       }
     }

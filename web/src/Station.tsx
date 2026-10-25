@@ -9,7 +9,7 @@ import type { Hub } from './hub';
 import type { Caps, Device, DspSettings, Rate, RxSettings, Row, Status } from './protocol';
 import { Section, Seg } from './ui';
 import {
-  LOCKED, SLOT_NAME, UDEV_CMD, VIEW_COLOUR, bandOf, baseName, bytes, chanShort, devKey, devLabel, devTitle, fmtClock,
+  ANT_COLOUR, LOCKED, SLOT_NAME, UDEV_CMD, VIEW_COLOUR, bandOf, baseName, bytes, chanShort, devKey, devLabel, devTitle, fmtClock,
   fmtDur, gappedDuty, loadPrefs, mhz, ratesFor, snap, spanLabel, type Mode, type Prefs, type Scale, type Tuning,
 } from './util';
 
@@ -28,6 +28,11 @@ export type StationHandle = {
   suggest: (wfMode?: 'max' | 'avg') => Scale | null; // Auto scale from this view's picture
   busy: () => string | null; // why a linked change must not touch this view now (recording, starting)
   notice: (text: string) => void;
+  // keyboard shortcuts
+  toggleRun: () => void;
+  toggleRec: () => void;
+  spanStep: (dir: 1 | -1) => void;   // the next wider / narrower continuous span
+  typeFreq: (digit: string) => void; // start typing a frequency in this view's header
 };
 // What a view tells the shell (sidebar summary, links, band ruler).
 export type ViewInfo = {
@@ -94,6 +99,9 @@ export function Station(p: {
   const [msps, setMsps] = useState(0);
   const [dropWarn, setDropWarn] = useState<string[]>([]);
   const [hadPicture, setHadPicture] = useState(false);
+  // unplugged while running: the adapter (pid, picker key) to start again when it is back
+  const [lost, setLost] = useState<{ pid: number; key: string } | null>(null);
+  const freqInput = useRef<HTMLInputElement>(null);
 
   const rememberTuning = (t: Tuning) => updatePrefs(slot ? { tuningB: t } : { tuning: t });
   const addBanner = (text: string, kind: Banner['kind'] = 'info') => {
@@ -133,6 +141,7 @@ export function Station(p: {
     };
     d.onHint = (t) => addBanner(t);
     let wasOpen = false;
+    let opened: { pid: number; key: string } | null = null; // the adapter of the current run
     let lastRx: RxSettings | null = null;
     let lastPaths = 'a';
     let lastFft = 0;
@@ -178,7 +187,11 @@ export function Station(p: {
           }
           case 'caps':
             // the picker shows the adapter that is open, whoever opened it
-            if (e.open && e.bus !== undefined && e.bus >= 0) setSelKey(`${e.bus}-${e.port}`);
+            if (e.open && e.bus !== undefined && e.bus >= 0) {
+              setSelKey(`${e.bus}-${e.port}`);
+              opened = { pid: e.pid, key: `${e.bus}-${e.port}` };
+              setLost(null);
+            }
             if (e.open && !wasOpen) {
               lastRx = null; // the new session's first settings are not a change (Auto refits on Start)
               setSaved(null); // also when another window or script pressed Start
@@ -258,7 +271,8 @@ export function Station(p: {
             setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error });
             break;
           case 'alert':
-            addBanner(e.msg, 'error');
+            if (e.kind === 'lost' && opened) setLost(opened); // the header says it; no banner
+            else addBanner(e.msg, 'error');
             break;
           case 'error':
             addBanner(e.msg ?? 'error', 'error');
@@ -332,8 +346,8 @@ export function Station(p: {
         ? 'Starting the adapter… (about 5 s)'
         : open
           ? null
-          : !devices.length
-            ? 'No adapter found. Plug in an RTL8812BU or RTL8812CU, then press ⟳ Rescan.'
+          : !devices.length || lost || (sel && !sel.can_open)
+            ? null // a card says it
             : hadPicture
               ? 'Stopped. Double-click the spectrum to pick a frequency; ▶ Start to resume.'
               : 'Stopped. Press ▶ Start to begin.';
@@ -347,7 +361,7 @@ export function Station(p: {
       display.current?.setOpts({
         ...scale, wfMode: prefs.wfMode, smooth: prefs.smooth, overlay, dim: !open,
         wfPath: dsp.paths === 'b' ? 1 : 0, marker, markerLabel, chipNotch, notchWide,
-        colour: VIEW_COLOUR[slot], pathColours: twoPaths ? ['#ffab70', '#8fd694'] : null, ghostColour: VIEW_COLOUR[slot ^ 1],
+        colour: VIEW_COLOUR[slot], pathColours: twoPaths ? ANT_COLOUR : null, ghostColour: VIEW_COLOUR[slot ^ 1],
         showAvg: prefs.showAvg, showPeak: prefs.showPeak,
         staleText: rxState === 'starting' ? 'Applying settings…' : 'No data from the adapter',
       }),
@@ -404,6 +418,28 @@ export function Station(p: {
       },
       busy: () => (live.current.recording ? 'it is recording' : live.current.opening || starting ? 'it is starting' : null),
       notice: (text) => addBanner(text),
+      toggleRun: () => {
+        if (open) req('close').catch(() => {});
+        else if (sel && sel.can_open && !opening && connected) void doStart();
+      },
+      toggleRec: () => {
+        if (recording || (open && rxState === 'streaming' && !gapped && !runGapped)) void toggleRecord();
+        else addBanner(gapped || runGapped ? 'Recording needs a continuous span' : 'Recording starts while streaming');
+      },
+      spanStep: (dir) => {
+        if (locked) return addBanner(LOCKED);
+        // continuous spans only: a gapped one is picked in the Span list, on purpose
+        const ok = rates.filter((r) => !r.gapped).sort((a, b) => a.fs - b.fs);
+        const i = ok.findIndex((r) => r.rate_sel === cur.rate_sel);
+        const next = ok[i < 0 ? 0 : Math.max(0, Math.min(ok.length - 1, i + dir))];
+        if (next && next.rate_sel !== cur.rate_sel) userSet({ rate_sel: next.rate_sel, wide: true });
+      },
+      typeFreq: (digit) => {
+        if (locked) return addBanner(LOCKED);
+        if (digit) setFreqText(digit);
+        freqInput.current?.focus();
+        if (!digit) freqInput.current?.select(); // Enter: the field, its text selected
+      },
     });
   });
   useEffect(() => () => link.register(slot, null), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -413,9 +449,9 @@ export function Station(p: {
     link.report(slot, {
       freq: cur.freq, fsNow, rate_sel: cur.rate_sel, fft: dsp.fft, gapped, gain_db: cur.gain_db, agc: cur.agc,
       centre, open, recording, locked, selKey,
-      src: { lo: centre - fsNow / 2, hi: centre + fsNow / 2, colour: VIEW_COLOUR[slot], marker, markerLabel, chipNotch, notchWide, dim: !open, msg },
+      src: { lo: centre - fsNow / 2, hi: centre + fsNow / 2, colour: VIEW_COLOUR[slot], pathColours: twoPaths ? ANT_COLOUR : null, marker, markerLabel, chipNotch, notchWide, dim: !open, msg },
     });
-  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey, marker, markerLabel, chipNotch, notchWide, opening, rxState, fatal, connected]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey, marker, markerLabel, chipNotch, notchWide, opening, rxState, fatal, connected, twoPaths]); // eslint-disable-line react-hooks/exhaustive-deps
   // the shared preferences reach this adapter: offset tuning when running, the FFT size at once
   useEffect(() => {
     if (caps.open) req('set', { offset_tuning: prefs.offsetTuning }).catch(() => {});
@@ -424,20 +460,37 @@ export function Station(p: {
     if (connected && dsp.fft !== prefs.fft) req('dsp', { fft: prefs.fft }).catch(() => {});
   }, [prefs.fft, connected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const doStart = async () => {
-    if (!sel) return;
+  const doStart = async (dev = sel) => {
+    if (!dev) return;
+    setLost(null);
     setStarting(true);
     setSaved(null);
     window.clearTimeout(gainTimer.current); // a gain change still waiting goes with the open
     const gain = gainUi ?? draft.gain_db;
     try {
-      await req('open', { pid: sel.pid, bus: sel.bus, port: sel.port, ...draft, gain_db: gain, offset_tuning: prefs.offsetTuning });
+      await req('open', { pid: dev.pid, bus: dev.bus, port: dev.port, ...draft, gain_db: gain, offset_tuning: prefs.offsetTuning });
     } catch {
       /* shown */
     } finally {
       setStarting(false);
     }
   };
+  // Waiting for an adapter (none found, or this one unplugged): look again every 3 s (no hotplug
+  // events). An unplugged adapter that is back (the same model; another port is fine) starts again.
+  const waiting = connected && !open && !opening && (!devices.length || !!lost);
+  useEffect(() => {
+    if (!waiting) return;
+    const t = window.setInterval(() => hub.request('scan', { slot }).catch(() => {}), 3000);
+    return () => window.clearInterval(t);
+  }, [waiting, hub, slot]);
+  useEffect(() => {
+    if (!lost || open || opening || !connected) return;
+    const back = devices.filter((d) => d.pid === lost.pid && d.can_open && devKey(d) !== p.otherOpen);
+    const d = back.find((x) => devKey(x) === lost.key) ?? back[0];
+    if (!d) return;
+    setSelKey(devKey(d));
+    void doStart(d);
+  }, [devices, lost]); // eslint-disable-line react-hooks/exhaustive-deps
   const pickChannel = (key: string) => {
     const c = CHANNELS.find((x) => channelKey(x) === key);
     if (!c) return;
@@ -505,7 +558,7 @@ export function Station(p: {
     : !open ? 'dot'
     : rxState === 'streaming' ? 'dot ok'
     : 'dot bad';
-  const stateText = fatal ? 'disconnected' : !connected ? 'connecting…' : opening ? 'starting…' : open ? rxState : 'stopped';
+  const stateText = fatal ? 'disconnected' : !connected ? 'connecting…' : opening ? 'starting…' : open ? rxState : lost ? 'unplugged' : 'stopped';
   const recRate = fsNow * 4; // bytes/s (int16 I + Q)
   const diskFree = status?.disk_free ?? 0;
   const secsLeft = diskFree / recRate;
@@ -527,7 +580,10 @@ export function Station(p: {
           aria-label={`Adapter of view ${name}`}
           value={selKey ?? ''}
           disabled={open || opening || !devices.length}
-          onChange={(e) => setSelKey(e.target.value)}
+          onChange={(e) => {
+            setSelKey(e.target.value);
+            setLost(null); // another adapter: no longer waiting for the old one
+          }}
           title={sel ? devTitle(sel) : 'Adapter'}
         >
           {!devices.length && <option value="">no adapter found</option>}
@@ -684,7 +740,7 @@ export function Station(p: {
   }
 
   return (
-    <section className={`view s${slot}${dual && selected ? ' sel' : ''}`} onMouseDown={p.onSelect} onFocusCapture={p.onSelect} aria-label={`View ${name}`}>
+    <section className={`view s${slot}${dual && selected ? ' sel' : ''}${lost ? ' lost' : ''}`} onMouseDown={p.onSelect} onFocusCapture={p.onSelect} aria-label={`View ${name}`}>
       <header className="vhead">
         {dual && <span className={`slotchip s${slot}`}>{name}</span>}
         <div className="freqbox" title={lockTitle}>
@@ -692,6 +748,7 @@ export function Station(p: {
             ‹
           </button>
           <input
+            ref={freqInput}
             className="freq"
             aria-label={`Centre frequency of view ${name}, MHz`}
             disabled={locked}
@@ -736,7 +793,7 @@ export function Station(p: {
         <span className="spacer" />
         <div className="legend">
           {legend.map(([label, colour, on, fn]) => (
-            <button key={label} className={on ? 'on' : 'off'} aria-pressed={on} aria-label={label} onClick={fn} title={on ? `Hide ${label}` : `Show ${label}`}>
+            <button key={label} className={on ? 'on' : 'off'} aria-pressed={on} aria-label={label} onClick={fn} title={`${on ? 'Hide' : 'Show'} ${label}${dual && !label.startsWith('Ant') ? ' (both views)' : ''}`}>
               <span className="swatch" style={{ background: colour }} />
               <span className="ltext">{label}</span>
             </button>
@@ -747,7 +804,7 @@ export function Station(p: {
           <span className="stext">{stateText}</span>
         </span>
         {!open ? (
-          <button disabled={!sel || opening || !connected || !sel.can_open} onClick={doStart}>
+          <button disabled={!sel || opening || !connected || !sel.can_open} onClick={() => void doStart()}>
             {opening ? 'Starting…' : '▶ Start'}
           </button>
         ) : (
@@ -786,12 +843,6 @@ export function Station(p: {
               </button>
             </div>
           )}
-          {sel && !sel.can_open && !open && (
-            <div className="strip error">
-              No permission to open the {sel.model}. Run once (in the wifi-sdr folder), then replug: <code>{UDEV_CMD}</code>
-              <button onClick={() => copy(UDEV_CMD)}>Copy command</button>
-            </div>
-          )}
           {banners
             .filter((b) => b.kind === 'error')
             .map((b) => (
@@ -803,6 +854,38 @@ export function Station(p: {
               </div>
             ))}
         </div>
+        {connected && !fatal && !open && !opening && (lost ? (
+          <div className="vcard lost" role="status">
+            <h2>Unplugged · waiting for it to come back</h2>
+            <p>
+              View {name} starts again by itself when the adapter is back
+              {saved ? ' (the recording was saved)' : ''}. The last picture stays, dimmed.
+            </p>
+            <button onClick={() => setLost(null)}>Stop waiting</button>
+          </div>
+        ) : !devices.length ? (
+          <div className="vcard" role="status">
+            <svg aria-hidden="true" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#8e99a7" strokeWidth="1.6">
+              <rect x="6" y="3" width="12" height="11" rx="2" />
+              <path d="M9 14v4h6v-4" />
+              <line x1="10" y1="21" x2="14" y2="21" />
+            </svg>
+            <h2>No adapter found</h2>
+            <p>Plug in an RTL8812BU or RTL8812CU. It appears here by itself; Rescan looks again now.</p>
+            <button onClick={() => req('scan').catch(() => {})}>⟳ Rescan</button>
+          </div>
+        ) : sel && !sel.can_open ? (
+          <div className="vcard" role="status">
+            <svg aria-hidden="true" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#e0b46a" strokeWidth="1.6">
+              <rect x="5" y="11" width="14" height="10" rx="2" />
+              <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+            </svg>
+            <h2>{sel.model} found, but this user cannot open it</h2>
+            <p>Run this once in the wifi-sdr folder (it asks for your password), then unplug and replug the adapter:</p>
+            <code className="cmd">{UDEV_CMD}</code>
+            <button onClick={() => copy(UDEV_CMD)}>Copy command</button>
+          </div>
+        ) : null)}
         <div className="toasts">
           {banners
             .filter((b) => b.kind === 'info')

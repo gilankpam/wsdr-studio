@@ -107,13 +107,16 @@ button.chip.on { border-style: solid; color: #fff; }
 .workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .views { display: flex; flex: 1; min-height: 0; }
 .views.compare { flex-direction: column; }
-.views.panorama { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-.views.panorama .view { min-width: 0; flex: none; position: relative; }
+.views.panorama { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); position: relative; }
+.views.panorama .view { min-width: 0; flex: none; }
 /* Panorama: the views keep their headers; one stitched plot spans both columns below them */
 .mode-panorama .view .plots { position: static; flex: none; }
 .mode-panorama .view .plots > canvas { display: none; }
-.mode-panorama .view .strips { top: 100%; }
-.mode-panorama .view .toasts { top: calc(100% + 56px); bottom: auto; }
+/* a view's notes sit under its header (the row grows for both); its toasts and cards over its half
+   of the plot */
+.mode-panorama .view.s0 .toasts { left: 58px; right: auto; align-items: flex-start; }
+.mode-panorama .view.s0 .vcard { left: 25%; top: 140px; }
+.mode-panorama .view.s1 .vcard { left: 75%; top: 140px; }
 .plots.pano { grid-column: 1 / -1; border-top: 1px solid var(--line); }
 .views.compare .view + .view { border-top: 1px solid var(--line); }
 .views.panorama .view + .view { border-left: 1px solid var(--line); }
@@ -128,7 +131,7 @@ button.chip.on { border-style: solid; color: #fff; }
 .vhead .spacer { flex-shrink: 1; min-width: 0; }
 .vhead .amber, .vhead .chlabel { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @container view (max-width: 540px) { .vhead .chlabel, .vhead .long { display: none; } }
-@container view (max-width: 700px) { .vhead .ltext, .vhead .stext { display: none; } }
+@container view (max-width: 700px) { .vhead .ltext, .vhead .stext, .vhead:has(.amber) .chlabel { display: none; } }
 .view.sel .vhead { background: #13202c; }
 .view.sel.s0 .vhead { border-top-color: var(--view-a); }
 .view.sel.s1 .vhead { border-top-color: var(--view-b); }
@@ -158,8 +161,6 @@ button.rec.on { background: #5a1f22; border-color: var(--bad); color: #ffd6d6; f
 .strip button.x { margin-left: auto; background: transparent; border-color: transparent; font-size: 16px; line-height: 1; }
 
 .plots { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
-/* Panorama: a view's notes float over the shared plot, under its header */
-.mode-panorama .strips { position: absolute; left: 0; right: 0; z-index: 6; }
 /* info notes float over the plot (bottom right) so the layout never jumps */
 .toasts { position: absolute; bottom: 12px; right: 12px; z-index: 5; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; pointer-events: none; }
 .toast {
@@ -184,30 +185,39 @@ canvas.waterfall { flex: 1; min-height: 100px; background: #000; cursor: crossha
 
 /* band ruler (BandRuler.tsx) */
 .ruler {
-  flex: none; display: grid; grid-template-columns: minmax(170px, 20%) 12px minmax(0, 1fr);
+  flex: none; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 10px; align-items: end;
   padding: 4px 12px 2px; background: #0e131a; border-bottom: 1px solid var(--line);
 }
 .ruler:focus-visible { outline: 2px solid var(--on-line); outline-offset: -2px; }
-.rseg { position: relative; height: 44px; cursor: crosshair; }
-.rbreak { display: flex; align-items: center; justify-content: center; color: #4a5768; font-size: 16px; }
-.rband, .rgroup { position: absolute; top: 0; height: 14px; font-size: 10px; letter-spacing: 0.06em; color: var(--muted); white-space: nowrap; overflow: hidden; }
-.rgroup { border-left: 1px solid #2a3646; padding-left: 4px; }
+.rbands { display: flex; margin-bottom: 4px; }
+.rbands button { min-height: 32px; padding: 0 9px; border-radius: 0; color: var(--muted2); font-size: 12px; }
+.rbands button + button { margin-left: -1px; }
+.rbands button:first-child { border-radius: 6px 0 0 6px; }
+.rbands button:last-child { border-radius: 0 6px 6px 0; }
+.rbands button.on { color: #fff; position: relative; z-index: 1; }
+.rtrack { position: relative; height: 56px; cursor: crosshair; }
+.rothers { display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }
+.rothers button.rtab { position: static; border-radius: 3px; }
+.rgroup {
+  position: absolute; top: 0; height: 17px; padding-left: 4px; border-left: 1px solid #3a4a5e;
+  font-size: 11px; letter-spacing: 0.04em; color: var(--muted); white-space: nowrap;
+}
 button.rcell {
-  position: absolute; top: 17px; height: 22px; min-height: 0; padding: 0; border: 1px solid #263243; border-radius: 2px;
-  background: transparent; font-size: 10px; color: var(--muted2); overflow: visible; display: flex; align-items: center; justify-content: center;
+  position: absolute; top: 20px; height: 32px; min-height: 0; padding: 0; border: 1px solid #2a3647; border-radius: 3px;
+  background: #121921; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted2); overflow: visible; display: flex; align-items: center; justify-content: center;
 }
 button.rcell > span { white-space: nowrap; pointer-events: none; }
+.rbar { position: absolute; left: 50%; bottom: 2px; height: 4px; transform: translateX(-50%); border-radius: 2px; background: #eef2f6; pointer-events: none; }
 button.rcell:disabled { opacity: 0.6; cursor: not-allowed; }
 /* a view's bracket: drawn only; its tab (label row) selects it, the cells under it stay clickable */
-.rview { position: absolute; top: 14px; height: 28px; border: 2px solid; border-radius: 4px; pointer-events: none; opacity: 0.7; }
-.rview.sel { opacity: 1; border-width: 3px; }
-.rview.s0 { background: rgba(79, 195, 247, 0.14); }
-.rview.s1 { background: rgba(199, 146, 234, 0.14); }
+.rview { position: absolute; top: 17px; height: 38px; border: 1px solid; border-radius: 4px; pointer-events: none; opacity: 0.6; }
+.rview.sel { opacity: 1; border-width: 2px; }
+.rview.s0 { background: rgba(79, 195, 247, 0.10); }
+.rview.s1 { background: rgba(199, 146, 234, 0.10); }
 .rview.gapped { border-style: dashed; }
-.rview.out { width: 6px !important; }
 button.rtab {
-  position: absolute; top: 0; height: 14px; min-height: 0; padding: 0 5px; border: none; border-radius: 3px 3px 0 0; z-index: 2;
-  font-size: 10px; font-weight: 700; line-height: 14px; color: #0b0e13; white-space: nowrap; opacity: 0.7;
+  position: absolute; top: 0; height: 17px; min-height: 0; padding: 0 6px; border: none; border-radius: 3px 3px 0 0; z-index: 2;
+  font-size: 11px; font-weight: 700; line-height: 17px; color: #0b0e13; white-space: nowrap; opacity: 0.7;
 }
 button.rtab.sel { opacity: 1; }
 button.rtab.s0 { background: var(--view-a); }
@@ -216,8 +226,37 @@ button.rtab.s1 { background: var(--view-b); }
 .rlink { color: var(--text); }
 .rlink.paused { color: var(--amber); }
 .rkey { display: flex; align-items: center; gap: 3px; }
-.rkey i { width: 14px; height: 8px; border: 1px solid #263243; border-radius: 2px; }
-.ruler.compact .rseg { height: 24px; }
-.ruler.compact button.rcell { top: 2px; height: 20px; font-size: 9px; }
-.ruler.compact .rview { top: 0; height: 24px; }
-.ruler.compact .rview.inset { top: 3px; height: 18px; }
+.rkey b { position: relative; width: 16px; height: 10px; border: 1px solid #263243; border-radius: 2px; }
+.ruler.compact .rtrack { height: 30px; }
+.ruler.compact .rbands { margin-bottom: 0; }
+.ruler.compact .rbands button { min-height: 26px; }
+.ruler.compact .rothers { margin-bottom: 0; }
+.ruler.compact button.rcell { top: 2px; height: 26px; font-size: 11px; }
+.ruler.compact .rview { top: 0; height: 30px; }
+.ruler.compact .rview.inset { top: 3px; height: 24px; }
+
+/* states in the plot area (Station.tsx): no adapter, no permission, unplugged */
+.vcard {
+  position: absolute; z-index: 5; left: 50%; top: 40px; transform: translateX(-50%); width: min(420px, calc(100% - 32px));
+  display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 20px; text-align: center;
+  background: rgba(16, 21, 28, 0.96); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px #0008;
+}
+.vcard h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.vcard p { margin: 0; color: var(--muted2); line-height: 1.5; }
+.vcard code.cmd { display: block; width: 100%; padding: 10px; text-align: left; white-space: pre-wrap; background: #0f141b; border: 1px solid var(--field-line); border-radius: 6px; }
+.vcard.lost h2 { color: #ffb4b4; }
+.view.lost .vhead { background: #2a1517; border-bottom-color: #7a3a42; }
+.view.lost .state { color: #ffb4b4; }
+
+/* keyboard sheet (App.tsx) */
+.modal-bg { position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center; background: #0009; }
+.sheet {
+  width: min(520px, calc(100% - 32px)); max-height: calc(100% - 32px); overflow-y: auto; display: flex; flex-direction: column; gap: 12px;
+  padding: 20px; background: var(--panel); border: 1px solid var(--on-line); border-radius: 8px; box-shadow: 0 10px 30px #000a;
+}
+.sheet h2 { margin: 0; font-size: 15px; }
+.sheet dl { margin: 0; display: grid; gap: 6px; }
+.sheet dl > div { display: grid; grid-template-columns: 90px 1fr; gap: 10px; }
+.sheet dt { font-family: var(--mono); color: #fff; }
+.sheet dd { margin: 0; color: var(--muted2); }
+.sheet > button { align-self: flex-end; }

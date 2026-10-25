@@ -14,16 +14,21 @@ export function Panorama(p: {
   const display = useRef<Display | null>(null);
   const retune = useRef(p.onRetune);
   const [hint, setHint] = useState<string | null>(null);
-  const stitch = p.sources.map((x) => x ?? { lo: 0, hi: 0, colour: '', marker: null, markerLabel: '', chipNotch: false, notchWide: false, dim: true, msg: null });
+  const stitch = p.sources.map(
+    (x) => x ?? { lo: 0, hi: 0, colour: '', pathColours: null, marker: null, markerLabel: '', chipNotch: false, notchWide: false, dim: true, msg: null },
+  );
   const opts = {
     ...p.scale, wfMode: p.prefs.wfMode, smooth: p.prefs.smooth, showAvg: p.prefs.showAvg, showPeak: p.prefs.showPeak,
     overlay: p.overlay, stitch, staleText: 'No data from the adapters',
   };
   const optsRef = useRef(opts);
+  const key = JSON.stringify(opts); // set when something changed, not on every render of the window
   useEffect(() => {
     optsRef.current = opts;
-    retune.current = p.onRetune;
     display.current?.setOpts(opts);
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    retune.current = p.onRetune;
   });
   useEffect(() => {
     const d = new Display(spRef.current!, wfRef.current!);

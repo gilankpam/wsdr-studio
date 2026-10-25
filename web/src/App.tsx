@@ -12,10 +12,24 @@ import { Panorama } from './Panorama';
 import { survey, type Survey } from './survey';
 import { NumField, Section } from './ui';
 import {
-  FFTS, SLOT_NAME, bandOf, baseName, bytes, loadPrefs, savePrefs, snap, spanLabel, type Locks, type Mode, type Prefs, type Scale,
+  FFTS, LOCKED, SLOT_NAME, bandOf, baseName, bytes, loadPrefs, savePrefs, snap, spanLabel, type Locks, type Mode, type Prefs, type Scale,
 } from './util';
 
 const minus = (v: number) => String(v).replace('-', '−');
+// [keys, what, two-view modes only]
+const KEYS: [string, string, boolean][] = [
+  ['← →', 'tune 5 MHz (Shift: 20 MHz)', false],
+  ['[ ]', 'narrower / wider span (continuous spans; gapped ones are picked in the Span list)', false],
+  ['0–9', 'type a frequency (Enter applies)', false],
+  ['Enter', 'go to the frequency field', false],
+  ['1 2', 'select view A / B (then digits 3–9 and 0 start a frequency, or press Enter)', true],
+  ['Space', 'Start / Stop', false],
+  ['Ctrl+R', 'Record / end the recording', false],
+  ['L', 'link the frequencies of A and B', true],
+  ['O', 'the other view’s overlay (Compare)', true],
+  ['Ctrl+B', 'sidebar', false],
+  ['?', 'this list (Esc closes)', false],
+];
 const MODES: [Mode, string, string][] = [
   ['single', 'Single', 'One view'],
   ['panorama', 'Panorama', 'Two adapters, one picture: B continues where A ends'],
@@ -44,11 +58,12 @@ export default function App() {
   const [views, setViews] = useState<(ViewInfo | null)[]>([null, null]);
   const [selSlot, setSelSlot] = useState(0);
   const [confirmSingle, setConfirmSingle] = useState(false);
+  const [help, setHelp] = useState(false); // the keyboard sheet
   const [narrow, setNarrow] = useState(() => matchMedia('(max-width: 1279px)').matches);
   const [drawer, setDrawer] = useState(false);
   const [sbEl, setSbEl] = useState<HTMLDivElement | null>(null);
   const handles = useRef<(StationHandle | null)[]>([null, null]);
-  const leaving = useRef(false); // "Stop B" sent: B's recording note goes to A
+  const leaving = useRef(0); // "Stop B" sent (and a few seconds after): B's recording note goes to A
   const [surveyMap] = useState<Survey>(() => new Map()); // grows in place; the ruler redraws it itself
   const { mode, locks } = prefs;
   const dual = mode !== 'single';
@@ -63,7 +78,7 @@ export default function App() {
         if (e.type === 'devices') setDevices(e.devices);
         else if (e.type === 'caps' && e.slot !== undefined)
           setOpenKey((k) => k.map((x, i) => (i === e.slot ? (e.open && e.bus >= 0 ? `${e.bus}-${e.port}` : null) : x)));
-        else if (e.type === 'recorded' && e.slot === 1 && (now.current.mode === 'single' || leaving.current))
+        else if (e.type === 'recorded' && e.slot === 1 && (now.current.mode === 'single' || leaving.current > 0))
           // view B ended after leaving the two-view modes: its note goes to view A
           handles.current[0]?.notice(`View B's recording saved: ${baseName(e.file)} · ${bytes(e.bytes)}`);
       },
@@ -96,16 +111,6 @@ export default function App() {
       toggle?.focus();
     };
   }, [drawerOpen]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'b') {
-        e.preventDefault();
-        toggleSidebar();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
 
   // The other view takes the linked fields of a change: the frequency at the same distance (snapped to
   // the tuning grid, in its band), a span only when its adapter shows it continuously, gain and AGC.
@@ -200,6 +205,11 @@ export default function App() {
       args.rate_sel = va.rate_sel;
       args.wide = true;
     }
+    if (mode === 'compare') {
+      // comparing one channel: the same gain too, or the quieter view just looks empty
+      args.gain_db = va.gain_db;
+      args.agc = va.agc;
+    }
     // Panorama: B's span starts where A's ends (each half of its own span from its centre)
     const want = va.freq + (mode === 'panorama' ? (va.fsNow + (sameSpan ? va.fsNow : b.fs())) / 2 : 0);
     if (Math.abs(snap(want) - want) <= 2.5e6 && bandOf(want) === bandOf(va.freq)) args.freq = snap(want);
@@ -218,13 +228,27 @@ export default function App() {
   // (B's recording note may come after the reply: it goes to A for a few seconds more)
   const stopBAndSingle = () => {
     setConfirmSingle(false);
-    leaving.current = true;
+    leaving.current++;
     const from = mode;
     hub
       .request('close', { slot: 1 })
       .then(() => now.current.mode === from && updatePrefs({ mode: 'single' })) // unless the user picked a mode meanwhile
       .catch((e: Error) => handles.current[1]?.notice(`Could not stop view B: ${e.message}`))
-      .finally(() => window.setTimeout(() => (leaving.current = false), 5000));
+      .finally(() => window.setTimeout(() => leaving.current--, 5000));
+  };
+  // n steps of the selected view along the tuning grid (5 MHz; at the 2.4 GHz edges and channel 14,
+  // the next centre)
+  const stepSel = (n: number) => {
+    const h = handles.current[sel];
+    if (!h) return;
+    if (views[sel]?.locked) return h.notice(LOCKED);
+    let f = h.freq();
+    for (let i = 0; i < Math.abs(n); i++) {
+      let next = f;
+      for (let d = 5e6; next === f && d <= 15e6; d += 5e6) next = snap(f + Math.sign(n) * d);
+      f = next;
+    }
+    h.tune(f);
   };
   const setUserScale = (sc: Scale) => {
     const dbMin = Math.min(sc.dbMin, sc.dbMax - 10);
@@ -233,6 +257,38 @@ export default function App() {
     updatePrefs({ scale: n }); // a scale the user chose survives restarts (no automatic refit)
   };
 
+  // keyboard shortcuts (see KEYS)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.altKey || e.metaKey) return; // e.g. the focused ruler took the arrows
+      const t = e.target as HTMLElement;
+      const h = handles.current[sel];
+      const k = e.key;
+      if (e.ctrlKey) {
+        if (k.toLowerCase() === 'b') toggleSidebar();
+        else if (k.toLowerCase() === 'r') h?.toggleRec();
+        else return;
+        e.preventDefault();
+        return;
+      }
+      if (k === 'Escape' && help) return setHelp(false);
+      if (t.closest('input, select, textarea, [contenteditable="true"]')) return; // typing there
+      const onButton = !!t.closest('button');
+      if (k === 'ArrowLeft' || k === 'ArrowRight') stepSel((k === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 4 : 1));
+      else if (k === '[' || k === ']') h?.spanStep(k === ']' ? 1 : -1);
+      else if (dual && (k === '1' || k === '2')) setSelSlot(Number(k) - 1);
+      else if (/^[0-9]$/.test(k)) h?.typeFreq(k);
+      else if (k === 'Enter' && !onButton) h?.typeFreq('');
+      else if (k === ' ' && !onButton) h?.toggleRun();
+      else if ((k === 'l' || k === 'L') && dual) setLock('freq');
+      else if ((k === 'o' || k === 'O') && mode === 'compare') updatePrefs({ ghost: !prefs.ghost });
+      else if (k === '?') setHelp((v) => !v);
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
   const vs = views[sel];
   const fsNow = vs?.fsNow ?? 5e6;
   const gapped = vs?.gapped ?? false;
@@ -296,6 +352,10 @@ export default function App() {
           })}
         </div>
         <span className="hint">{MODES.find((x) => x[0] === mode)![2]}</span>
+        <span className="spacer" />
+        <button className="icon" aria-label="Keyboard shortcuts (?)" title="Keyboard shortcuts (?)" aria-expanded={help} onClick={() => setHelp((v) => !v)}>
+          ?
+        </button>
         {confirmSingle && (
           <div className="confirm" role="alertdialog" aria-label="Leave the two-view mode">
             View B is {views[1]?.recording ? 'recording' : views[1]?.open ? 'running' : 'starting'}. Single stops it{views[1]?.recording ? ' and saves the recording' : ''}.
@@ -304,6 +364,25 @@ export default function App() {
           </div>
         )}
       </header>
+      {help && (
+        <div className="modal-bg" onClick={() => setHelp(false)}>
+          <div className="sheet" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={(e) => e.stopPropagation()}>
+            <h2>Keyboard</h2>
+            <dl>
+              {KEYS.filter(([, , two]) => !two || dual).map(([keys, what]) => (
+                <div key={keys}>
+                  <dt>{keys}</dt>
+                  <dd>{what}</dd>
+                </div>
+              ))}
+            </dl>
+            <p className="note">Keys act on the selected view{dual ? ' (the coloured header)' : ''}; not while typing in a field.</p>
+            <button autoFocus onClick={() => setHelp(false)}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
       <div className="body">
         {sidebarShown && (
           <>
@@ -410,18 +489,7 @@ export default function App() {
             linkLabel={dual && locks.freq && distLabel ? distLabel.slice(3) : null}
             otherBusy={dual && views[sel ^ 1]?.recording ? `${SLOT_NAME[sel ^ 1]} paused: recording` : null}
             onTune={(f) => handles.current[sel]?.tune(f)}
-            onStep={(n) => {
-              const h = handles.current[sel];
-              if (!h) return;
-              // n steps along the tuning grid (5 MHz; at the 2.4 GHz edges and channel 14 the next centre)
-              let f = h.freq();
-              for (let i = 0; i < Math.abs(n); i++) {
-                let next = f;
-                for (let d = 5e6; next === f && d <= 15e6; d += 5e6) next = snap(f + Math.sign(n) * d);
-                f = next;
-              }
-              h.tune(f);
-            }}
+            onStep={stepSel}
             onSelect={setSelSlot}
           />
           <div className={`views ${mode}`}>

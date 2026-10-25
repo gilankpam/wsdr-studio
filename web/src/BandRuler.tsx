@@ -1,15 +1,70 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// The band ruler: 2.4 GHz (compressed) and 5 GHz side by side, a cell per channel (click: tune the
-// selected view there), a bracket per view at the span it shows (its tab selects the view), and a
-// survey tint: the strongest signal seen on each channel this session, in dB above the noise.
-import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type WheelEvent } from 'react';
-import { GROUPS, HIGH, LOW, centre, tint, type Seg, type Survey } from './survey';
-import { SLOT_NAME, VIEW_COLOUR, mhz } from './util';
+// The band ruler: one band at a time at full width (2.4 | 5 GHz, following the selected view), a cell
+// per channel (click: tune the selected view there), a bracket per view at the span it shows (its tab
+// selects the view), and a survey bar: the strongest signal seen on each channel this session.
+// 5 GHz channels are equally wide, laid out by channel, not by MHz: the gaps between the UNII groups
+// (where nothing is allowed) shrink to short breaks, so every channel gets as much room as there is.
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type WheelEvent } from 'react';
+import { centre, level, type Survey } from './survey';
+import { SLOT_NAME, VIEW_COLOUR, bandOf, mhz } from './util';
 
-const pct = (s: Seg, f: number) => `${(((f - s.lo) / (s.hi - s.lo)) * 100).toFixed(3)}%`;
-const between = (s: Seg, a: number, b: number) => ({ left: pct(s, a), width: `calc(${pct(s, b)} - ${pct(s, a)})` });
+type Band = '2.4' | '5';
+type Group = { name: string; chans: number[]; half: number }; // half: a cell's half-width (Hz)
+// A piece of the axis: frequencies f0..f1 drawn over units u0..u1 (one unit = one cell).
+type Piece = { f0: number; f1: number; u0: number; u1: number };
+const GROUPS: Record<Band, Group[]> = {
+  '2.4': [{ name: '', chans: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], half: 2.5e6 }],
+  '5': [
+    { name: 'UNII-1', chans: [36, 40, 44, 48], half: 10e6 },
+    { name: 'UNII-2', chans: [52, 56, 60, 64], half: 10e6 },
+    { name: 'UNII-2e', chans: [100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144], half: 10e6 },
+    { name: 'UNII-3', chans: [149, 153, 157, 161, 165], half: 10e6 },
+    { name: '5.9', chans: [169, 173, 177], half: 10e6 },
+  ],
+};
+const EDGE: Record<Band, [number, number]> = { '2.4': [2400e6, 2490e6], '5': [5080e6, 6165e6] }; // what the radio tunes
+const BREAK = 0.6; // units for a gap between groups (or a band edge), whatever its MHz
+
+// The axis of a band: groups at one unit per cell, gaps and edges as short breaks.
+function axis(band: Band): { pieces: Piece[]; units: number } {
+  const pieces: Piece[] = [];
+  let u = 0, f = EDGE[band][0];
+  for (const g of GROUPS[band]) {
+    const lo = centre(g.chans[0]) - g.half, hi = centre(g.chans[g.chans.length - 1]) + g.half;
+    if (lo > f) {
+      const w = Math.min(BREAK, (lo - f) / (2 * g.half));
+      pieces.push({ f0: f, f1: lo, u0: u, u1: u + w });
+      u += w;
+    }
+    pieces.push({ f0: lo, f1: hi, u0: u, u1: u + g.chans.length });
+    u += g.chans.length;
+    f = hi;
+  }
+  if (EDGE[band][1] > f) {
+    pieces.push({ f0: f, f1: EDGE[band][1], u0: u, u1: u + BREAK });
+    u += BREAK;
+  }
+  return { pieces, units: u };
+}
+const AXES: Record<Band, { pieces: Piece[]; units: number }> = { '2.4': axis('2.4'), '5': axis('5') };
+// position of a frequency on a band's axis, 0..1 (clamped to the band's ends)
+function pos(band: Band, f: number) {
+  const { pieces, units } = AXES[band];
+  const p = pieces.find((x) => f <= x.f1) ?? pieces[pieces.length - 1];
+  const t = Math.min(1, Math.max(0, (f - p.f0) / (p.f1 - p.f0)));
+  return Math.min(units, Math.max(0, p.u0 + t * (p.u1 - p.u0))) / units;
+}
+function freqAt(band: Band, x: number) {
+  const { pieces, units } = AXES[band];
+  const u = x * units;
+  const p = pieces.find((q) => u <= q.u1) ?? pieces[pieces.length - 1];
+  return p.f0 + ((u - p.u0) / (p.u1 - p.u0)) * (p.f1 - p.f0);
+}
+const pc = (x: number) => `${(x * 100).toFixed(3)}%`;
+const bar = (lv: number) => ({ opacity: (0.25 + 0.75 * lv).toFixed(2), width: `${Math.round(30 + 70 * lv)}%` });
 const WHEEL_PX = 50; // wheel distance per 5 MHz step (a notch is ~50-120 px; trackpads send many small ones)
 const WHEEL_MAX = 4; // steps per burst at most
+const LABEL_PX = 26; // room a channel number needs
 
 export type RulerView = { slot: number; lo: number; hi: number; locked: boolean; gapped: boolean };
 
@@ -18,6 +73,8 @@ export function BandRuler(p: {
   onTune: (f: number) => void; onStep: (steps: number) => void; onSelect: (slot: number) => void;
 }) {
   const wheel = useRef({ px: 0, t: 0 });
+  const track = useRef<HTMLDivElement>(null);
+  const [trackPx, setTrackPx] = useState(800);
   // the survey grows in place: redraw it once a second (not the whole window)
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -28,7 +85,21 @@ export function BandRuler(p: {
       window.clearTimeout(w.t);
     };
   }, []);
-  const selLocked = p.views.find((v) => v.slot === p.sel)?.locked ?? true;
+  useLayoutEffect(() => {
+    const el = track.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setTrackPx(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const selView = p.views.find((v) => v.slot === p.sel);
+  const selLocked = selView?.locked ?? true;
+  // the band shown: the selected view's, unless the user switched it (until that view changes band)
+  const selBand = selView ? bandOf((selView.lo + selView.hi) / 2) : '5';
+  const [picked, setPicked] = useState<{ band: Band; from: Band } | null>(null);
+  const band: Band = picked && picked.from === selBand ? picked.band : selBand;
+  const showBand = (b: Band) => setPicked(b === selBand ? null : { band: b, from: selBand });
+
   const onWheel = (e: WheelEvent) => {
     if (selLocked || !e.deltaY) return;
     const w = wheel.current;
@@ -46,80 +117,16 @@ export function BandRuler(p: {
     e.preventDefault();
     p.onStep((e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 4 : 1));
   };
-  const segOf = (v: RulerView) => (v.lo < 3.7e9 ? LOW : HIGH);
-  const segment = (s: Seg, name: string) => {
-    const at = (e: MouseEvent<HTMLDivElement>) => {
-      const r = e.currentTarget.getBoundingClientRect();
-      return s.lo + ((e.clientX - r.left) / r.width) * (s.hi - s.lo);
-    };
-    return (
-      <div className={`rseg ${name}`} onClick={(e) => !selLocked && p.onTune(at(e))} title={selLocked ? undefined : 'Click to tune the selected view here'}>
-        {!p.compact && name === 'low' && <span className="rband">2.4 GHz</span>}
-        {!p.compact &&
-          name === 'high' &&
-          GROUPS.map(([g, a, b]) => (
-            <span key={g} className="rgroup" style={between(s, a, b)}>
-              {g}
-            </span>
-          ))}
-        {s.chans.map((c, i) => {
-          const db = p.survey.get(c);
-          return (
-            <button
-              key={c}
-              className="rcell"
-              tabIndex={-1}
-              disabled={selLocked}
-              style={{ ...between(s, centre(c) - s.half, centre(c) + s.half), background: tint(db) }}
-              aria-label={`Tune to channel ${c}`}
-              title={`Channel ${c} · ${mhz(centre(c), 0)} MHz${db !== undefined ? ` · strongest seen: ${db.toFixed(0)} dB over the noise` : ''}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                p.onTune(centre(c));
-              }}
-            >
-              <span>{s.label(c, i)}</span>
-            </button>
-          );
-        })}
-        {p.views
-          .filter((v) => segOf(v) === s)
-          .map((v) => {
-            // a view beyond the drawn segment (5080-5150, 5895-6165 MHz) sits at its edge
-            const out = v.hi <= s.lo ? 'left' : v.lo >= s.hi ? 'right' : null;
-            const lo = out === 'right' ? s.hi : Math.max(s.lo, v.lo);
-            const hi = out === 'left' ? s.lo : Math.min(s.hi, v.hi);
-            const inset = p.compact && v.slot === 1 && p.views.length > 1; // Compare: B inside A
-            const name = SLOT_NAME[v.slot];
-            const where = `View ${name}: ${mhz(v.lo, 0)}–${mhz(v.hi, 0)} MHz${v.gapped ? ' (gapped)' : ''}`;
-            return (
-              <span key={v.slot}>
-                <span
-                  className={`rview s${v.slot}${v.gapped ? ' gapped' : ''}${v.slot === p.sel ? ' sel' : ''}${inset ? ' inset' : ''}${out ? ' out' : ''}`}
-                  style={{ ...between(s, lo, hi), borderColor: VIEW_COLOUR[v.slot] }}
-                  title={where}
-                />
-                {!p.compact && (
-                  <button
-                    className={`rtab s${v.slot}${v.slot === p.sel ? ' sel' : ''}${out === 'right' ? ' end' : ''}`}
-                    style={out === 'right' ? { right: 0 } : { left: pct(s, lo) }}
-                    aria-label={`${where}. Edit view ${name}`}
-                    aria-pressed={v.slot === p.sel}
-                    title={`${where} · click to edit view ${name}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      p.onSelect(v.slot);
-                    }}
-                  >
-                    {out === 'left' ? `◂ ${name} ${mhz((v.lo + v.hi) / 2, 0)}` : out === 'right' ? `${name} ${mhz((v.lo + v.hi) / 2, 0)} ▸` : name}
-                  </button>
-                )}
-              </span>
-            );
-          })}
-      </div>
-    );
+  const at = (e: MouseEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return freqAt(band, (e.clientX - r.left) / r.width);
   };
+  const { units } = AXES[band];
+  const cellPx = trackPx / units;
+  // label every channel when they fit, else every 2nd or 4th (2.4 GHz: 1, 6, 11 when tight)
+  const every = band === '2.4' ? (cellPx >= LABEL_PX * 0.8 ? 1 : 5) : cellPx >= LABEL_PX ? 1 : cellPx * 2 >= LABEL_PX ? 2 : 4;
+  const others = p.views.filter((v) => bandOf((v.lo + v.hi) / 2) !== band);
+
   return (
     <div
       className={p.compact ? 'ruler compact' : 'ruler'}
@@ -129,11 +136,97 @@ export function BandRuler(p: {
       role="group"
       aria-label="Band ruler. Left and right arrows tune the selected view by 5 MHz (Shift: 20 MHz)"
     >
-      {segment(LOW, 'low')}
-      <span className="rbreak" aria-hidden="true">
-        ┃
-      </span>
-      {segment(HIGH, 'high')}
+      <div className="rbands" role="group" aria-label="Band shown">
+        {(['2.4', '5'] as Band[]).map((b) => (
+          <button key={b} className={b === band ? 'on' : ''} aria-pressed={b === band} onClick={() => showBand(b)} title={`Show the ${b} GHz channels`}>
+            {b}
+          </button>
+        ))}
+      </div>
+      <div className="rtrack" ref={track} onClick={(e) => !selLocked && p.onTune(at(e))} title={selLocked ? undefined : 'Click to tune the selected view here'}>
+        {!p.compact &&
+          GROUPS[band]
+            .filter((g) => g.name)
+            .map((g) => (
+              <span key={g.name} className="rgroup" style={{ left: pc(pos(band, centre(g.chans[0]) - g.half)) }}>
+                {g.name}
+              </span>
+            ))}
+        {GROUPS[band].flatMap((g) =>
+          g.chans.map((c) => {
+            const db = p.survey.get(c);
+            const a = pos(band, centre(c) - g.half), b = pos(band, centre(c) + g.half);
+            // which channels are numbered when there is no room for all: 1, 6, 11 / every 2nd or 4th from 36
+            const shown = band === '2.4' ? every === 1 || [1, 6, 11].includes(c) : ((c - (c > 144 ? 149 : 36)) / 4) % every === 0;
+            return (
+              <button
+                key={c}
+                className="rcell"
+                tabIndex={-1}
+                disabled={selLocked}
+                style={{ left: pc(a), width: pc(b - a) }}
+                aria-label={`Tune to channel ${c}`}
+                title={`Channel ${c} · ${mhz(centre(c), 0)} MHz${db !== undefined ? ` · strongest seen: ${db.toFixed(0)} dB over the noise` : ''}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  p.onTune(centre(c));
+                }}
+              >
+                <span>{shown ? c : ''}</span>
+                {db !== undefined && <i className="rbar" style={bar(level(db))} />}
+              </button>
+            );
+          }),
+        )}
+        {p.views
+          .filter((v) => !others.includes(v))
+          .map((v) => {
+            const a = pos(band, v.lo), b = pos(band, v.hi);
+            const inset = p.compact && v.slot === 1 && p.views.length > 1; // Compare: B inside A
+            const name = SLOT_NAME[v.slot];
+            const where = `View ${name}: ${mhz(v.lo, 0)}–${mhz(v.hi, 0)} MHz${v.gapped ? ' (gapped)' : ''}`;
+            return (
+              <span key={v.slot}>
+                <span
+                  className={`rview s${v.slot}${v.gapped ? ' gapped' : ''}${v.slot === p.sel ? ' sel' : ''}${inset ? ' inset' : ''}`}
+                  style={{ left: pc(a), width: `max(6px, ${pc(b - a)})`, borderColor: VIEW_COLOUR[v.slot] }}
+                  title={where}
+                />
+                {!p.compact && (
+                  <button
+                    className={`rtab s${v.slot}${v.slot === p.sel ? ' sel' : ''}`}
+                    // A's tab at its bracket's left end, B's at its right end: they never sit on each other
+                    style={v.slot === 1 ? { right: pc(1 - b) } : { left: pc(a) }}
+                    aria-label={`${where}. Edit view ${name}`}
+                    aria-pressed={v.slot === p.sel}
+                    title={`${where} · click to edit view ${name}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      p.onSelect(v.slot);
+                    }}
+                  >
+                    {name}
+                  </button>
+                )}
+              </span>
+            );
+          })}
+      </div>
+      {/* a view on the other band: a tab that shows that band */}
+      {others.length > 0 && (
+        <div className="rothers">
+          {others.map((v) => (
+            <button
+              key={v.slot}
+              className={`rtab s${v.slot}${v.slot === p.sel ? ' sel' : ''}`}
+              title={`View ${SLOT_NAME[v.slot]} is at ${mhz((v.lo + v.hi) / 2, 0)} MHz: show that band`}
+              onClick={() => showBand(bandOf((v.lo + v.hi) / 2))}
+            >
+              {SLOT_NAME[v.slot]} · {bandOf((v.lo + v.hi) / 2)} GHz ▸
+            </button>
+          ))}
+        </div>
+      )}
       {!p.compact && (
         <div className="rfoot">
           {p.linkLabel && (
@@ -145,12 +238,14 @@ export function BandRuler(p: {
           <span className="spacer" />
           <span className="rkey" aria-hidden="true">
             quiet
-            <i style={{ background: tint(3) }} />
-            <i style={{ background: tint(16) }} />
-            <i style={{ background: tint(30) }} />
+            {[0, 0.5, 1].map((lv) => (
+              <b key={lv}>
+                <i className="rbar" style={bar(lv)} />
+              </b>
+            ))}
             strong
           </span>
-          <span>strongest signal seen this session · wheel or ← →: 5 MHz</span>
+          <span>strongest signal seen this session · wheel / arrow keys: 5 MHz</span>
         </div>
       )}
     </div>

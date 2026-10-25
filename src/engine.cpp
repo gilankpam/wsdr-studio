@@ -283,7 +283,8 @@ json Engine::run(const json &c) {
                     : "The stream kept failing (" + st.error + "). Press Start to try again.";
     }
     _cb.event(caps());
-    _cb.event({{"type", "alert"}, {"msg", lost ? "Adapter disconnected. Plug it back in, then press Start."
+    // kind "lost": the app waits for the adapter and starts it again when it is back
+    _cb.event({{"type", "alert"}, {"kind", lost ? "lost" : "failed"}, {"msg", lost ? "Adapter disconnected. Plug it back in, then press Start."
                                                 : "The stream kept failing. Press Start to try again."}});
     _cb.event(devices_json(scan_devices()));
     return {};

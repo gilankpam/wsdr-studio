@@ -1,7 +1,9 @@
 # wsdr-studio
 
 A desktop app that turns a Realtek RTL8812BU (or RTL8812CU) USB Wi-Fi dongle into a live spectrum
-receiver: plug it in, press Start, pick a Wi-Fi channel, watch the spectrum and waterfall.
+receiver: plug it in, press Start, pick a Wi-Fi channel, watch the spectrum and waterfall. With two
+dongles it shows two views side by side on one axis (Panorama) or stacked on the same channel
+(Compare), and one dongle can sweep a whole band into a heatmap (Spectral Map).
 
 - **How it works:** it uses the receive path from [wifi-sdr](https://github.com/snokvist/wifi-sdr),
   which streams the chip's baseband sample ring (LA mode) over USB with custom on-chip code, brought
@@ -14,9 +16,11 @@ receiver: plug it in, press Start, pick a Wi-Fi channel, watch the spectrum and 
   - 8812CU (and an 8812BU left at USB 2), gapped: 10, 20 and 40 MHz spans listed as "gapped" in Span / rate. The dongle captures
     one 8192-sample slice, ships it over USB 2 (~1.5 ms), and repeats: 35 / 21 / 12 % of the time is
     sampled. Good for watching a band; short bursts can fall in the gaps, and recording needs a
-    continuous span. The 8822C notches its tuned centre (~±0.6 MHz, deeper at higher rates), so the
-    10 and 20 MHz views are cut from a 40 MHz capture tuned 10 MHz beside them (offset tuning): the
-    channel shows whole, the notch sits at its edge. At 40 MHz the notch stays in view (shaded).
+    continuous span. Gapped spans are only used when picked.
+  - The app shows what the adapter itself sees: the 8822C notches its tuned centre (~±0.6 MHz), the
+    8812BU dips at its centre at 40 MHz on 2.4 GHz; both are shaded and labelled. On the 8812CU,
+    "Avoid the chip's centre notch" (off by default) cuts the 10 and 20 MHz views from a 40 MHz
+    capture tuned beside them, so the notch sits outside the channel.
   - 8812CU: two coherent antennas (A, B, or both overlaid).
   - Fixed gain or the chip's AGC, and raw IQ recording (SigMF).
 - **Receive only.** The app never transmits.
@@ -43,7 +47,7 @@ new windows and permissions are locked down), so no outside web content is ever 
   ```sh
   sudo cp tools/99-wsdr.rules /etc/udev/rules.d/ && sudo udevadm control --reload
   ```
-  Without it the app shows a "No permission" strip with this command.
+  Without it the app shows a "cannot open it" card with this command and a Copy button.
 - **Kernel drivers:** the in-kernel drivers (rtw88_8822bu/cu) claim the dongle on plug-in; Start
   takes it over. wifi-sdr's `tools/rtw88_guard.sh on` keeps them away for good.
 - **USB 3 on the 8812BU:** this dongle enumerates at USB 2 after a plain replug. Start switches it to
@@ -54,6 +58,30 @@ new windows and permissions are locked down), so no outside web content is ever 
 Recordings go to `~/.local/share/wsdr-studio/recordings/` as `.sigmf-data` (int16 I/Q,
 12-bit samples << 4, at the hardware centre frequency) plus `.sigmf-meta`. A retune, a span change or
 a stream restart ends the current file, so each file has one centre and one rate and no gaps.
+
+## Using it
+
+The window needs at least 1280 × 720.
+
+- **Modes** (top bar): **Single** (one view), **Panorama** (two dongles, B continues where A ends:
+  one spectrum and waterfall across both; views far apart get a broken axis), **Compare** (two
+  dongles stacked on the same frequencies, each with the other's trace overlaid), **Map** (one dongle
+  sweeps a range of channels; each sweep is a row of a heatmap). The two-view modes need two
+  dongles.
+- **Each view's header**: ‹ frequency › (type a value, Enter), channel and span, a note when the
+  radio centres elsewhere than asked ("requested … · tuned …"), Start / Stop and Rec.
+- **Band ruler** (above the plots): one range at a time (2.4 GHz, 5 GHz, or the 5 GHz sections
+  36–64, 100–144, 149–177), a cell per channel (click: tune there), a bracket per view; the bar under
+  a cell is the strongest signal seen on that channel this session.
+- **Sidebar** (Ctrl+B): Editing A | B (two views), the view's adapter, span and gain (AGC), the links
+  between A and B (frequency keeps their distance, span, gain), and the display settings.
+- **Spectral Map**: pick the range and how long each step is listened to (120 ms, 250 ms, 1 s) in
+  the sidebar. Each channel is heard only while the sweep is on it; the header says how long of how
+  often. A click on a channel leaves the map onto it; leaving puts both views back as they were.
+- **Keyboard** (? shows the list): ←/→ tune 5 MHz (Shift 20), [ ] span, digits or Enter type a
+  frequency, A / B select the view, Space Start/Stop, Ctrl+R record.
+- **Unplugged** while streaming: the view says so, keeps its picture and starts again by itself when
+  the dongle is back (an 8812BU comes back at USB 3 and its span).
 
 ## Build
 
@@ -66,6 +94,9 @@ cmake -S . -B build && cmake --build build -j
 (cd web && npm ci && npm run build)
 (cd desktop && npm ci && npm start)  # the app window (Electron) on build/wsdr-studiod
 build/test_core                        # unit tests (no hardware); build/test_core --bench: DSP at 40 MS/s
+(cd web && npm test)                   # the UI's unit tests (band axis, sweep plans, survey; Node 24)
+node tests/e2e.mjs [--record]          # against the running app, view A open
+node tests/e2e-dual.mjs                # view B (a second 8812BU); B is put back as it was
 ```
 
 **Desktop shell (dev):** `cd desktop && npm ci && npm start` runs Electron on `build/wsdr-studiod`
@@ -100,10 +131,10 @@ The backend listens on 127.0.0.1 only and checks every request's `Host` header a
 | Path | What |
 |---|---|
 | `src/` | backend: `engine` (adapter, DSP thread, recorder), `dsp` (FFT), `server` (HTTP/WebSocket), `protocol`, `recorder` (SigMF), `device_scan` |
-| `web/` | React + TypeScript UI (Vite): `App.tsx` controls, `display.ts` spectrum + waterfall |
+| `web/` | React + TypeScript UI (Vite): `App.tsx` shell (modes, sidebar, links), `Station.tsx` one view, `display.ts` spectrum + waterfall (also the stitched Panorama), `BandRuler.tsx` + `bands.ts` the channel axis, `SpectralMap.tsx` the sweep, `hub.ts` the shared socket |
 | `desktop/` | Electron shell: `main.js` (starts the backend, window, lock-down), `preload.js` (token bridge) |
 | `external/wifi-sdr` | the receive core (submodule; brings devourer) |
 | `docs/` | design and build plan |
-| `tests/` | unit tests (C++) and the end-to-end check (Node) |
+| `tests/` | unit tests (C++), the end-to-end checks against a running app (`e2e.mjs` view A, `e2e-dual.mjs` view B); `web/tests` the UI's unit tests (`npm test`) |
 
 License: GPL-2.0-only (it links wifi-sdr and devourer, both GPL-2.0).

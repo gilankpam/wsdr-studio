@@ -72,6 +72,17 @@ Engine::Engine(Callbacks cb, std::string record_dir, int slot, std::shared_ptr<C
       _rec(std::move(record_dir)) {
   _cmd = std::thread([this] { cmd_loop(); });
   _dsp = std::thread([this] { dsp_loop(); });
+  // free disk space every 2 s, on a thread of its own: a slow or hung file system must stall neither
+  // the I/O thread (status) nor the DSP thread (the recording)
+  _disk = std::thread([this] {
+    std::unique_lock<std::mutex> l(_qm);
+    while (!_quit) {
+      l.unlock();
+      _disk_free = disk_free();
+      l.lock();
+      _diskcv.wait_for(l, std::chrono::seconds(2), [&] { return _quit; });
+    }
+  });
 }
 
 Engine::~Engine() {
@@ -80,8 +91,11 @@ Engine::~Engine() {
     _quit = true;
   }
   _qcv.notify_all();
+  _diskcv.notify_all();
   if (_cmd.joinable())
     _cmd.join();
+  if (_disk.joinable())
+    _disk.join(); // (a hung file system holds it: an exit then waits for it)
   close_adapter("the app closed"); // stops the recorder and the stream; the DSP thread then idles
   _dsp_quit = true;
   _ring.wake();
@@ -363,7 +377,7 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   if (bus < 0 && skipped)
     throw CmdError("busy", "every adapter of this kind is open in the other view");
   if (bus < 0)
-    throw CmdError("not_found", "no such adapter is plugged in");
+    fail("not_found", "no such adapter is plugged in");
   if (!_claims->take(key(bus, port), _slot))
     throw CmdError("busy", "this adapter is open in the other view");
   {
@@ -601,7 +615,7 @@ json Engine::status() const {
   const RecordInfo ri = _rec.info();
   j["record"] = {{"active", ri.active}, {"file", ri.path}, {"samples", ri.samples},
                  {"seconds", ri.fs > 0 ? ri.samples / ri.fs : 0.0}, {"bytes", ri.samples * 4}, {"error", ri.error}};
-  if (const double f = _disk_free; f >= 0) // (sampled by the DSP thread: a hung disk must not stall the I/O thread)
+  if (const double f = _disk_free; f >= 0) // (sampled on its own thread)
     j["disk_free"] = f;
   j["t"] = now_s();
   return j;
@@ -642,14 +656,9 @@ void Engine::dsp_loop() {
   };
   uint64_t rec_next = 0; // next bank seq expected in the file (0 = not started)
   Crop applied;          // the crop window in use, and the hardware run it belongs to
-  auto disk_at = clk::time_point{};
   while (!_dsp_quit) {
     Bank *b = _ring.pop(std::chrono::milliseconds(100));
     const auto t0 = clk::now();
-    if (t0 - disk_at > std::chrono::seconds(2)) {
-      disk_at = t0;
-      _disk_free = disk_free();
-    }
     if (b) {
       {
         std::lock_guard<std::mutex> l(_dm);

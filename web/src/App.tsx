@@ -40,7 +40,11 @@ const MODES: [Mode, string, string][] = [
   ['map', 'Map', 'One adapter sweeps the band: a heatmap of what each channel had'],
 ];
 
-type RestoreItem = { slot: number; key: string | null; pid: number | null; args?: Partial<RxSettings>; start: boolean; at: number; gappedOk: boolean };
+// afterClose: the view is being closed (stopped before the map): its tuning goes back once it is
+// (a set to the closing adapter would be lost, and the close's draft would be the sweep's last step)
+type RestoreItem = {
+  slot: number; key: string | null; pid: number | null; args?: Partial<RxSettings>; start: boolean; at: number; gappedOk: boolean; afterClose?: boolean;
+};
 
 export default function App() {
   const [prefs, setPrefs] = useState<Prefs>(() => {
@@ -303,9 +307,10 @@ export default function App() {
       const gappedOk = !!r?.gapped;
       // shown afterwards, it goes back as it was: a view stopped before the map (and started by its
       // Start) stops again, unless a channel was picked in the map
-      if ((to === 'single' && slot === 1) || (r && !r.wasOpen && f === null && handles.current[slot]?.running()))
-        hub.request('close', { slot }).catch(() => {});
-      if (!(to === 'single' && slot === 1)) items.push({ slot, key, pid: pidOf(key), args, start: !!r?.wasOpen && !!key, at, gappedOk });
+      const stopAgain = !!r && !r.wasOpen && f === null && !!handles.current[slot]?.running();
+      if ((to === 'single' && slot === 1) || stopAgain) hub.request('close', { slot }).catch(() => {});
+      if (!(to === 'single' && slot === 1))
+        items.push({ slot, key, pid: pidOf(key), args, start: !!r?.wasOpen && !!key, at, gappedOk, afterClose: stopAgain });
       if (r?.other && shownAfter(r.other.slot) && r.other.key)
         items.push({ slot: r.other.slot, key: r.other.key, pid: pidOf(r.other.key), start: true, at, gappedOk: false });
       restore.current = [...restore.current.filter((x) => !items.some((i) => i.slot === x.slot)), ...items];
@@ -323,13 +328,16 @@ export default function App() {
     restore.current = restore.current.filter((x) => {
       const v = views[x.slot], h = handles.current[x.slot];
       if (Date.now() - x.at > 15000) return false; // never settled: let it go
-      if (!h || !v?.ready || v.locked) return true; // not settled yet: keep it
+      if (!h || !v?.ready || v.locked || (x.afterClose && (v.open || h.running()))) return true; // not settled yet: keep it
       // its adapter (port and model) changed meanwhile: leave the view as it is
       const pid = devices.find((d) => devKey(d) === v.selKey)?.pid ?? null;
       if (x.key && (v.selKey !== x.key || (x.pid !== null && pid !== x.pid))) return false;
       const args = { ...x.args };
-      if (args.rate_sel !== undefined && x.gappedOk) args.allow_gapped = true; // gapped before the map: as it was
-      else if (args.rate_sel !== undefined && !h.rateOk(args.rate_sel)) delete args.rate_sel; // never gapped unless it was
+      // the span as it was: gapped only if it was before the map (else one the adapter now shows only
+      // gapped, e.g. replugged at USB 2 meanwhile, is not asked for); said explicitly either way, so no
+      // draft of a gapped sweep step carries over
+      if (args.rate_sel !== undefined && !x.gappedOk && !h.rateOk(args.rate_sel)) delete args.rate_sel;
+      args.allow_gapped = args.rate_sel !== undefined && x.gappedOk;
       if (Object.keys(args).length) h.linkedSet(args); // running: retuned; stopped: its next start
       if (x.start && !h.running()) h.startWith(args);
       return false;

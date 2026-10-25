@@ -132,7 +132,7 @@ export class Display {
         this.dirty = true;
       }
       this.raf = requestAnimationFrame(loop); // first: a failing draw must not end the loop
-      if ((window.devicePixelRatio || 1) !== this.dpr) this.resize(); // moved to a screen of another scale
+      if ((window.devicePixelRatio || 1) !== this.dpr && this.wf.clientWidth) this.resize(); // moved to a screen of another scale
       if (this.dirty) this.drawSpectrum();
     };
     this.raf = requestAnimationFrame(loop);

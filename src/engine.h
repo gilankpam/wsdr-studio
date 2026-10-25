@@ -120,7 +120,8 @@ private:
   std::condition_variable _qcv;
   std::deque<std::pair<json, std::function<void(const json &)>>> _q;
   bool _quit = false;
-  std::thread _cmd, _dsp;
+  std::condition_variable _diskcv;
+  std::thread _cmd, _dsp, _disk;
 
   mutable std::mutex _dm; // DSP settings handoff (command thread -> DSP thread)
   DspConfig _dsp_cfg;
@@ -152,7 +153,7 @@ private:
 
   std::atomic<uint64_t> _rows{0};
   std::atomic<double> _dsp_load{0};
-  std::atomic<double> _disk_free{-1}; // bytes free where recordings go (DSP thread, every 2 s)
+  std::atomic<double> _disk_free{-1}; // bytes free where recordings go (sampled every 2 s)
 };
 
 } // namespace studio

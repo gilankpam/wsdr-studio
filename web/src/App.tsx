@@ -11,7 +11,8 @@ const ratesFor = (d?: Device): Rate[] =>
   d
     ? RATES.filter((r) => r.fs <= d.max_msps * 1e6 || r.fs <= (d.gapped_msps ?? 0) * 1e6).map((r) => {
         const gapped = r.fs > d.max_msps * 1e6;
-        return { ...r, gapped, hw_fs: gapped ? 40e6 : r.fs }; // as the backend: gapped views are cut from 40 MHz
+        // as the backend: the 8812CU's gapped views are cut from an offset-tuned 40 MHz capture
+        return { ...r, gapped, hw_fs: gapped && d.chip.includes('8822C') ? 40e6 : r.fs };
       })
     : RATES;
 // Share of the time a gapped span samples: one 8192-sample bank, then ~1.48 ms shipping it over USB 2.
@@ -295,6 +296,9 @@ export default function App() {
             }
             case 'hello':
               setHome(e.home ?? '');
+              break;
+            case 'notice': // backend news for the user (e.g. the USB 3 switch)
+              addBanner(String(e.text ?? ''));
               break;
             case 'recorded':
               setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error });
@@ -610,7 +614,7 @@ export default function App() {
               set({ rate_sel: rs, wide: true, freq: f });
             }}
             title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
-              sel && sel.max_msps < 40 && sel.model === 'RTL8812BU' ? ' (10-40 MHz need USB 3)' : ''
+              sel && sel.max_msps < 40 && sel.model === 'RTL8812BU' ? ' (continuous 10-40 MHz need USB 3)' : ''
             }${
               rates.some((r) => r.gapped)
                 ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording). 10 and 20 MHz are cut from a 40 MHz capture tuned beside the channel, so the chip\'s centre notch stays out of view'

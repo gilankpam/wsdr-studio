@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "engine.h"
+#include "usbmode.h"
 
 #include <sys/statvfs.h>
 
@@ -314,13 +315,46 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   }
   // Always open one specific device (the first match when bus/port are not given), so caps can say
   // which one is open (a client that did not start it shows the right adapter).
-  if (bus < 0 || port.empty())
-    for (const auto &d : scan_devices())
-      if (d.pid == pid && (bus < 0 || d.bus == bus) && (port.empty() || d.port == port)) {
-        bus = d.bus;
-        port = d.port;
-        break;
+  DeviceInfo dev;
+  for (const auto &d : scan_devices())
+    if (d.pid == pid && (bus < 0 || d.bus == bus) && (port.empty() || d.port == port)) {
+      dev = d;
+      bus = d.bus;
+      port = d.port;
+      break;
+    }
+  // An 8812BU that came up at USB 2 (it does after a cold plug) is switched to USB 3 first, like the
+  // kernel driver does: it re-enumerates on the same controller and port, on the SuperSpeed bus.
+  const bool usb3 = c.contains("usb3") ? flag(c, "usb3") : true;
+  if (usb3 && dev.pid == wsdr::kPid8812bu && dev.speed_mbps > 0 && dev.speed_mbps < 5000) {
+    std::string why;
+    const wsdr::Usb3Switch sw = wsdr::request_usb3(pid, bus, port, &why);
+    std::fprintf(stderr, "wsdr-studiod: USB 3 switch: %s %s\n", wsdr::usb3_switch_name(sw), why.c_str());
+    if (sw == wsdr::Usb3Switch::Requested) {
+      _cb.event({{"type", "notice"}, {"text", "Switching the 8812BU to USB 3…"}});
+      bool super = false;
+      for (int i = 0; i < 40 && !super; i++) { // up to 8 s
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        for (const auto &d : scan_devices())
+          if (d.pid == pid && d.controller == dev.controller && d.port == port && d.speed_mbps >= 5000) {
+            bus = d.bus;
+            super = true;
+          }
       }
+      if (!super) // came back at USB 2 (no USB 3 lines on this port or cable?), or is still away
+        for (const auto &d : scan_devices())
+          if (d.pid == pid && d.controller == dev.controller && d.port == port)
+            bus = d.bus;
+      _cb.event({{"type", "notice"},
+                 {"text", super ? "The 8812BU now runs at USB 3 (until it is unplugged)"
+                                : "The 8812BU stayed at USB 2: this port or cable may not carry USB 3"}});
+      _cb.event(devices_json(scan_devices()));
+    } else if (sw == wsdr::Usb3Switch::AlreadyTried) {
+      _cb.event({{"type", "notice"},
+                 {"text", "The 8812BU is at USB 2; switching to USB 3 already failed once on this plug-in "
+                          "(USB 2 port or cable?). Replug it in a USB 3 port to try again."}});
+    }
+  }
   s.gain_db = c.contains("gain_db") ? num(c, "gain_db", 0, 100) : 30.0;
   s.agc = c.contains("agc") ? flag(c, "agc") : false;
   s.wide = c.contains("wide") ? flag(c, "wide") : true;

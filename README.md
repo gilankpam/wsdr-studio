@@ -9,8 +9,9 @@ receiver: plug it in, press Start, pick a Wi-Fi channel, watch the spectrum and 
   the spectrum; the UI (React) runs in a bundled Electron window. No browser needs to be installed.
 - **What you get:**
   - 8812BU on USB 3: spans of 2.5–40 MHz, and the full 40 MHz band at 40 MS/s.
-  - 8812BU on USB 2, or the 8812CU: 2.5 and 5 MHz.
-  - 8812CU, gapped: 10, 20 and 40 MHz spans listed as "gapped" in Span / rate. The dongle captures
+  - 8812BU on USB 2, or the 8812CU: 2.5 and 5 MHz continuous (the 8812BU is normally switched to USB 3
+    at Start, see below).
+  - 8812CU (and an 8812BU left at USB 2), gapped: 10, 20 and 40 MHz spans listed as "gapped" in Span / rate. The dongle captures
     one 8192-sample slice, ships it over USB 2 (~1.5 ms), and repeats: 35 / 21 / 12 % of the time is
     sampled. Good for watching a band; short bursts can fall in the gaps, and recording needs a
     continuous span. The 8822C notches its tuned centre (~±0.6 MHz, deeper at higher rates), so the
@@ -45,9 +46,10 @@ new windows and permissions are locked down), so no outside web content is ever 
   Without it the app shows a "No permission" strip with this command.
 - **Kernel drivers:** the in-kernel drivers (rtw88_8822bu/cu) claim the dongle on plug-in; Start
   takes it over. wifi-sdr's `tools/rtw88_guard.sh on` keeps them away for good.
-- **USB 3 on the 8812BU:** this dongle enumerates at USB 2 after a plain replug. Its USB 3 mode is
-  entered when a driver switches it (rtw88 does this on probe). The app shows the link speed next to
-  the adapter name, and spans above 5 MHz need USB 3.
+- **USB 3 on the 8812BU:** this dongle enumerates at USB 2 after a plain replug. Start switches it to
+  USB 3 the way the kernel driver does (a few register writes, lost when it is unplugged; nothing is
+  written to the dongle permanently). In a port or cable without USB 3 it stays at USB 2 and the app
+  says so; then 10-40 MHz spans are offered gapped. `--no-usb3` leaves it at USB 2.
 
 Recordings go to `~/.local/share/wsdr-studio/recordings/` as `.sigmf-data` (int16 I/Q,
 12-bit samples << 4, at the hardware centre frequency) plus `.sigmf-meta`. A retune, a span change or

@@ -8,6 +8,7 @@
 //       one's port and token with "attached":true and exits.
 //   wsdr-studiod [options]             server only (scripts, tests); the token is in the instance file
 //   options: [--port 8073] [--web DIR] [--pid 0xb812] [--freq 5190e6] [--rate 40] [--record-dir DIR]
+//            [--no-usb3] (leave an 8812BU at USB 2; by default Start switches it to USB 3)
 //            [--dev-origin http://localhost:5173]
 //   wsdr-studiod --headless-seconds 20 --pid 0xb812 [--freq ..] [--rate ..] [--fft 8192]
 //       engine + DSP only (no server); prints status JSON each second and a summary.
@@ -47,6 +48,7 @@ namespace {
 struct Args {
   uint16_t port = 8073;
   bool ui_pipe = false;
+  bool usb3 = true; // switch an 8812BU found at USB 2 to USB 3 at Start
   std::string web, record_dir;
   std::vector<std::string> dev_origins;
   uint16_t pid = 0;
@@ -161,6 +163,7 @@ bool parse(int argc, char **argv, Args &a) try {
       a.port = static_cast<uint16_t>(p);
     }
     else if (k == "--ui-pipe") a.ui_pipe = true;
+    else if (k == "--no-usb3") a.usb3 = false;
     else if (k == "--web") a.web = v();
     else if (k == "--record-dir") a.record_dir = v();
     else if (k == "--dev-origin") a.dev_origins.push_back(v());
@@ -190,6 +193,7 @@ json open_cmd(const Args &a) {
   // From the command line, rates the link cannot carry fall back to the fastest continuous one (the
   // 8812CU's gapped spans are chosen in the app, where they are labelled).
   c["allow_gapped"] = false;
+  c["usb3"] = a.usb3;
   if (a.pid == wsdr::kPid8812cu && a.rate_msps > 5)
     std::fprintf(stderr, "wsdr-studiod: the 8812CU streams up to 5 MS/s; wider spans (gapped) are in Span / rate\n");
   return c;
@@ -246,7 +250,7 @@ int main(int argc, char **argv) {
   Args a;
   if (!parse(argc, argv, a)) {
     std::fprintf(stderr, "usage: wsdr-studiod [--ui-pipe] [--port N] [--web DIR] [--pid 0xb812|0xc812] [--freq HZ] "
-                         "[--rate MSPS] [--record-dir DIR] | --headless-seconds N --pid ...\n");
+                         "[--rate MSPS] [--record-dir DIR] [--no-usb3] | --headless-seconds N --pid ...\n");
     return 2;
   }
   if (!a.record_dir.empty()) {

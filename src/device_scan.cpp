@@ -65,7 +65,7 @@ std::vector<DeviceInfo> scan_devices() {
     std::snprintf(node, sizeof node, "/dev/bus/usb/%03d/%03d", info.bus, libusb_get_device_address(list[i]));
     info.can_open = access(node, R_OK | W_OK) == 0;
     info.max_msps = !cu && info.speed_mbps >= 5000 ? 40 : 5;
-    info.gapped_msps = cu ? 40 : 0;
+    info.gapped_msps = cu || info.speed_mbps < 5000 ? 40 : 0; // gapped wide spans where the link is too slow
     out.push_back(info);
   }
   if (list)

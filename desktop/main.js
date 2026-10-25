@@ -4,7 +4,7 @@
 // origin. The page gets the token from the preload over IPC. Closing the window quits; the backend is
 // stopped by closing its stdin (it then finalises any recording and exits).
 //
-// Backend options given to the app are passed on: --pid --freq --rate --record-dir --fft --port.
+// Backend options given to the app are passed on: --pid --freq --rate --record-dir --fft --port, --no-usb3.
 // WSDR_STUDIOD: the backend binary. WSDR_DEV_URL: load this URL instead (Vite dev server).
 'use strict';
 const { app, BrowserWindow, Menu, dialog, ipcMain, session } = require('electron');
@@ -13,6 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const PASS = new Set(['--pid', '--freq', '--rate', '--record-dir', '--fft', '--port']);
+const PASS_FLAGS = new Set(['--no-usb3']);
 
 let backend = null; // child process (null when attached to an instance started elsewhere)
 let quitting = false;
@@ -25,6 +26,10 @@ function backendArgs() {
   const argv = process.argv.slice(app.isPackaged ? 1 : 2);
   for (let i = 0; i < argv.length; i++) {
     const [k, inline] = argv[i].split(/=(.*)/s, 2);
+    if (PASS_FLAGS.has(argv[i])) {
+      out.push(argv[i]);
+      continue;
+    }
     if (!PASS.has(k)) continue;
     const v = inline ?? (argv[i + 1]?.startsWith('--') ? undefined : argv[++i]);
     if (v !== undefined) out.push(k, v);

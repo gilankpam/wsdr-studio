@@ -108,7 +108,7 @@ export default function App() {
   const [starting, setStarting] = useState(false);
   const [scale, setScale] = useState<Scale>(prefs.scale ?? { dbMin: -110, dbMax: -20, wfFloor: -100 });
   const [showDisplay, setShowDisplay] = useState(false);
-  const [freqText, setFreqText] = useState('5180.000');
+  const [freqText, setFreqText] = useState(() => mhz(draft.freq, 3));
   const [gainUi, setGainUi] = useState<number | null>(null);
   const [msps, setMsps] = useState(0);
   const [dropWarn, setDropWarn] = useState<string[]>([]);
@@ -212,6 +212,8 @@ export default function App() {
               break;
             case 'caps':
               if (e.open && !wasOpen) {
+                lastRx = null; // the new session's first settings are not a change (Auto refits on Start)
+                setSaved(null); // also when another window or script pressed Start
                 d.newStream();
                 autoAt = autoOn.current ? 25 : -1;
                 autoRun = -1;
@@ -250,7 +252,10 @@ export default function App() {
               break;
             case 'status': {
               setStatus(e);
-              if (e.record?.active && !live.current.recording) window.clearTimeout(gainTimer.current); // controls lock now
+              if (e.record?.active && !live.current.recording) {
+                window.clearTimeout(gainTimer.current); // controls lock now
+                setSaved(null); // a new recording (from any window) replaces the old "Saved" note
+              }
               live.current.recording = e.record?.active ?? false;
               const banks = e.rx?.banks ?? 0;
               const r = rate.current;
@@ -297,6 +302,13 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A remembered 40 MHz tuning on an adapter that cannot do it (USB 2, 8812CU): clamp the draft.
+  const selMax = devices.find((d) => devKey(d) === selKey)?.max_msps ?? 40;
+  useEffect(() => {
+    if (selMax < 40)
+      setDraft((dr) => (dr.rate_sel < 4 ? { ...dr, rate_sel: 4 } : dr)); // every 40 MHz centre is also a 5 MHz step
+  }, [selMax]);
 
   // Display popover: closes on Esc or a click outside it
   useEffect(() => {
@@ -361,7 +373,11 @@ export default function App() {
   // A settings change: sent now when streaming, kept as a draft until Start otherwise.
   const set = (args: Partial<RxSettings>) => {
     if (!live.current.open) {
-      setDraft((dr) => ({ ...dr, ...args }));
+      setDraft((dr) => {
+        const n = { ...dr, ...args };
+        updatePrefs({ tuning: { freq: n.freq, rate_sel: n.rate_sel, gain_db: n.gain_db, agc: n.agc } }); // remembered too
+        return n;
+      });
       if (args.freq !== undefined) setFreqText(mhz(args.freq, 3));
       return;
     }

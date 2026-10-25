@@ -112,8 +112,8 @@ export class Display {
   // Layout change (window resize, a strip appearing): keep the waterfall's history, rescaled to the
   // new width and anchored at the top (newest rows).
   resize() {
-    this.frozen = null; // the Stop snapshot no longer matches the canvas size
     const oldDpr = this.dpr;
+    const oldFrozen = this.frozen;
     this.dpr = window.devicePixelRatio || 1;
     let keep: HTMLCanvasElement | null = null;
     const wf = this.wf;
@@ -134,10 +134,19 @@ export class Display {
     }
     this.wfCtx.fillStyle = '#000';
     this.wfCtx.fillRect(0, 0, wf.width, wf.height);
+    const oL = AXIS_W * oldDpr, L = this.plotLeft();
     if (keep) {
-      const oL = AXIS_W * oldDpr, L = this.plotLeft();
       const rows = Math.min(keep.height, wf.height);
       this.wfCtx.drawImage(keep, oL, 0, keep.width - oL, rows, L, 0, wf.width - L, rows);
+    }
+    if (oldFrozen && keep) {
+      // the undimmed Stop snapshot, rescaled the same way (Start puts it back)
+      const f = document.createElement('canvas');
+      f.width = wf.width;
+      f.height = wf.height;
+      const rows = Math.min(oldFrozen.height, wf.height);
+      f.getContext('2d')!.drawImage(oldFrozen, oL, 0, oldFrozen.width - oL, rows, L, 0, wf.width - L, rows);
+      this.frozen = f;
     }
     this.drawGutter();
     this.dirty = true;
@@ -351,7 +360,11 @@ export class Display {
       // A retune, span change or new run: a separator. The label describes the OLD rows below it (the
       // new rows above match the axis), so nothing below the line is misread.
       const d = this.dpr;
-      const label = this.stopPending ? `▼ before Stop: ${this.wfSpan}` : `▼ before: ${this.wfSpan}`;
+      const label = this.stopPending
+        ? span === this.wfSpan
+          ? '▼ Stop (gap)' // same tuning: only the time gap needs marking
+          : `▼ before Stop: ${this.wfSpan}`
+        : `▼ before: ${this.wfSpan}`;
       if (this.stopPending) this.stopRows = 0;
       if (span !== this.wfSpan) this.sepRows = 0; // a Stop at the same span keeps the frequency axis
       this.stopPending = false;
@@ -537,7 +550,7 @@ export class Display {
           const tw = c.measureText(txt).width + 12 * d;
           const tx = Math.min(W - tw, x + 8 * d);
           // over the waterfall: just above the frequency axis (nearest the pointer); else below any overlay
-          const ty = this.hoverWfY >= 0 ? ph - 24 * d : T + (this.opts.overlay ? 72 : 30) * d;
+          const ty = this.hoverWfY >= 0 ? ph - 44 * d : T + (this.opts.overlay ? 72 : 30) * d; // clear of the marker label
           c.fillStyle = 'rgba(20,26,34,0.92)';
           c.fillRect(tx, ty, tw, 20 * d);
           c.fillStyle = '#e0e6ee';

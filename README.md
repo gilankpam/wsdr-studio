@@ -13,7 +13,9 @@ receiver: plug it in, press Start, pick a Wi-Fi channel, watch the spectrum and 
   - 8812CU, gapped: 10, 20 and 40 MHz spans listed as "gapped" in Span / rate. The dongle captures
     one 8192-sample slice, ships it over USB 2 (~1.5 ms), and repeats: 35 / 21 / 12 % of the time is
     sampled. Good for watching a band; short bursts can fall in the gaps, and recording needs a
-    continuous span. The 8822C has a narrow notch at the centre (its own DC rejection).
+    continuous span. The 8822C notches its tuned centre (~±0.6 MHz, deeper at higher rates), so the
+    10 and 20 MHz views are cut from a 40 MHz capture tuned 10 MHz beside them (offset tuning): the
+    channel shows whole, the notch sits at its edge. At 40 MHz the notch stays in view (shaded).
   - 8812CU: two coherent antennas (A, B, or both overlaid).
   - Fixed gain or the chip's AGC, and raw IQ recording (SigMF).
 - **Receive only.** The app never transmits.

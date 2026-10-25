@@ -462,7 +462,8 @@ export class Display {
       // 8822C: its RX DC rejection leaves a notch at the hardware centre (in the raw samples; ~-6 dB at
       // +-1.5 % of fs). Shade it so it is not read as a missing signal.
       const mid0 = (s.f0 + s.f1) / 2;
-      if (this.opts.chipNotch && (this.last[0] ?? this.last[1])?.gapped) { // measured in gapped runs only
+      const lr = this.last[0] ?? this.last[1];
+      if (this.opts.chipNotch && lr?.gapped && !lr.offset) { // gapped runs only; offset-tuned views keep it out of view
         const hw = (s.f1 - s.f0) * 0.015;
         const x0 = xOf(mid0 - hw), x1 = xOf(mid0 + hw);
         if (x1 - x0 >= 3 * d) {

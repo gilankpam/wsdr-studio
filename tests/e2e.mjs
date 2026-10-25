@@ -61,7 +61,7 @@ let nextId = 1;
 ws.onmessage = (m) => {
   if (m.data instanceof ArrayBuffer) {
     const v = new DataView(m.data);
-    if (v.getUint32(0, true) === 0x57525357) rows.push({ path: v.getUint8(6) & 0x7f, bins: v.getUint32(12, true), f0: v.getFloat64(24, true), df: v.getFloat64(32, true), len: m.data.byteLength });
+    if (v.getUint32(0, true) === 0x57525357) rows.push({ path: v.getUint8(6) & 0x3f, bins: v.getUint32(12, true), f0: v.getFloat64(24, true), df: v.getFloat64(32, true), len: m.data.byteLength });
     return;
   }
   const e = JSON.parse(m.data);

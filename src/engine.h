@@ -59,6 +59,12 @@ private:
   void open_adapter(uint16_t pid, const json &c);
   void close_adapter();
   void stop_recording(const std::string &why);
+  // Offset tuning (8812CU 10/20 MHz views): the chip's centre notch (~+-0.6 MHz, deeper at higher
+  // rates) is kept out of view by capturing 40 MHz with the radio 10 MHz to the side and showing only
+  // the window asked for. hw_for: the radio settings for a view; set_view: remember the view and
+  // hand the crop window to the DSP thread.
+  wsdr::RxSettings hw_for(const wsdr::RxSettings &view) const;
+  void set_view(const wsdr::RxSettings &view, const wsdr::RxSettings &hw); // hw: the receiver's settings
   std::shared_ptr<wsdr::Receiver> rx() const {
     std::lock_guard<std::mutex> l(_rxm);
     return _rx;
@@ -79,6 +85,11 @@ private:
   mutable std::mutex _dm; // DSP settings handoff (command thread -> DSP thread)
   DspConfig _dsp_cfg;
   bool _dsp_dirty = true;
+  struct Crop {
+    double lo = 0, hi = 0;          // 0, 0 = whole band
+    double hw_centre = 0, hw_fs = 0; // applied from the first bank of this hardware run on
+  } _crop;
+  bool _crop_dirty = false;
   std::atomic<bool> _dsp_quit{false};
 
   std::atomic<bool> _recording{false}; // DSP thread feeds the recorder while set
@@ -89,6 +100,8 @@ private:
 
   mutable std::mutex _sm; // status strings
   std::string _state = "closed", _error, _adapter;
+  wsdr::RxSettings _view; // what the user asked for (== the radio's settings unless offset-tuned)
+  bool _cu = false;
   int _open_bus = -1;     // the open device (caps: which adapter is open)
   std::string _open_port;
   wsdr::RxCaps _caps;

@@ -156,19 +156,25 @@ json Engine::run(const json &c) {
     const auto r = rx();
     if (!r || !r->is_open())
       throw CmdError("closed", "no adapter open");
-    wsdr::RxSettings s = r->settings();
+    wsdr::RxSettings s;
+    {
+      std::lock_guard<std::mutex> l(_sm);
+      s = _view;
+    }
     if (c.contains("freq"))
       s.freq = num(c, "freq", 2.3e9, 6.2e9);
     if (c.contains("rate_sel"))
       s.rate_sel = integer(c, "rate_sel", 1, 5);
     s.allow_gapped = true; // a span picked in the app (gapped ones are labelled there)
-    if (c.contains("wide"))
-      s.wide = flag(c, "wide");
-    if (c.contains("agc"))
-      s.agc = flag(c, "agc");
     if (c.contains("gain_db"))
       s.gain_db = num(c, "gain_db", 0, 100);
-    r->set(s);
+    if (c.contains("agc"))
+      s.agc = flag(c, "agc");
+    if (c.contains("wide"))
+      s.wide = flag(c, "wide");
+    const wsdr::RxSettings hw = hw_for(s);
+    r->set(hw);
+    set_view(s, r->settings());
     _cb.event(settings());
     return {};
   }
@@ -327,8 +333,12 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   }
   _cb.event(status());
   auto r = std::make_shared<wsdr::Receiver>(std::make_shared<Logger>());
+  {
+    std::lock_guard<std::mutex> l(_sm);
+    _cu = pid == wsdr::kPid8812cu;
+  }
   try {
-    r->open(pid, s, bus, port);
+    r->open(pid, hw_for(s), bus, port);
   } catch (const wsdr::OpenError &e) {
     std::lock_guard<std::mutex> l(_sm);
     _state = "closed";
@@ -346,6 +356,7 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
       _dsp_cfg.paths = 1; // path B exists on the 8812CU only
     _dsp_dirty = true;
   }
+  set_view(s, r->settings());
   _ring.clear();
   _lost_requested = false;
   r->start([this](const uint8_t *b, size_t n, const wsdr::BankMeta &m) { _ring.push(b, n, m); });
@@ -380,10 +391,56 @@ void Engine::close_adapter() {
   _caps = {};
 }
 
+wsdr::RxSettings Engine::hw_for(const wsdr::RxSettings &v) const {
+  bool cu;
+  {
+    std::lock_guard<std::mutex> l(_sm);
+    cu = _cu;
+  }
+  if (!cu || !v.allow_gapped || (v.rate_sel != 2 && v.rate_sel != 3))
+    return v;
+  // 40 MHz capture (the 8822C's BW40 filter is flat to +-17 MHz), radio 10 MHz above the view (below
+  // at the top of a band): the view is [-20, 0] or [-15, -5] MHz from the radio's centre, the notch
+  // sits at the channel edge or outside. 40 MHz centres: 2422-2462 and 5090-6155 MHz.
+  const auto ok = [](double f) { return (f >= 2422e6 && f <= 2462e6) || (f >= 5090e6 && f <= 6155e6); };
+  const double up = std::round((v.freq + 10e6) / 5e6) * 5e6, dn = std::round((v.freq - 10e6) / 5e6) * 5e6;
+  const double c = ok(up) ? up : ok(dn) ? dn : 0;
+  if (c == 0)
+    return v; // no room (2.4 GHz channel 14): the notch stays in view
+  wsdr::RxSettings h = v;
+  h.rate_sel = 1;
+  h.wide = true;
+  h.freq = c;
+  return h;
+}
+
+void Engine::set_view(const wsdr::RxSettings &view, const wsdr::RxSettings &hw) {
+  // offset-tuned when the view maps to other radio settings (not when the receiver merely clamped)
+  const wsdr::RxSettings want = hw_for(view);
+  const bool offset = want.freq != view.freq || want.rate_sel != view.rate_sel;
+  {
+    std::lock_guard<std::mutex> l(_sm);
+    _view = offset ? view : hw; // not offset: the radio's own (clamped) settings are the view
+  }
+  const int w = wsdr::Receiver::width_of(hw, false);
+  Crop c;
+  c.hw_centre = wsdr::Receiver::centre_of(wsdr::Receiver::channel_for(hw.freq, w), w);
+  c.hw_fs = wsdr::Receiver::rate_of(hw.rate_sel);
+  if (offset) {
+    const double half = wsdr::Receiver::rate_of(view.rate_sel) / 2;
+    c.lo = view.freq - half;
+    c.hi = view.freq + half;
+  }
+  std::lock_guard<std::mutex> l(_dm);
+  _crop = c;
+  _crop_dirty = true;
+}
+
 json Engine::settings() const {
   json j = {{"type", "settings"}};
   if (const auto r = rx(); r && r->is_open()) {
-    const wsdr::RxSettings s = r->settings();
+    std::lock_guard<std::mutex> l(_sm);
+    const wsdr::RxSettings &s = _view;
     j["rx"] = {{"freq", s.freq}, {"rate_sel", s.rate_sel}, {"wide", s.wide}, {"agc", s.agc}, {"gain_db", s.gain_db}};
   }
   std::lock_guard<std::mutex> l(_dm);
@@ -399,7 +456,9 @@ json Engine::caps() const {
   if (open) {
     json rates = json::array();
     for (int r = 5; r >= std::min(_caps.min_rate_sel, _caps.gapped_min_rate_sel); r--)
-      rates.push_back({{"rate_sel", r}, {"fs", wsdr::Receiver::rate_of(r)}, {"gapped", r < _caps.min_rate_sel}});
+      // hw_fs: what the radio captures (10/20 MHz gapped views are cut from an offset-tuned 40 MHz capture)
+      rates.push_back({{"rate_sel", r}, {"fs", wsdr::Receiver::rate_of(r)}, {"gapped", r < _caps.min_rate_sel},
+                       {"hw_fs", _caps.cu && r < _caps.min_rate_sel ? 40e6 : wsdr::Receiver::rate_of(r)}});
     j["adapter"] = _adapter;
     j["pid"] = _caps.pid;
     j["bus"] = _open_bus;
@@ -428,6 +487,19 @@ json Engine::status() const {
     j["rx"] = {{"state", wsdr::rx_state_name(st.state)}, {"banks", st.banks}, {"restarts", st.restarts},
                {"channel", st.channel}, {"width", st.width}, {"centre", st.centre_hz}, {"fs", st.fs},
                {"gapped", st.gapped}, {"error", st.error}};
+    wsdr::RxSettings v;
+    {
+      std::lock_guard<std::mutex> l(_sm);
+      v = _view;
+    }
+    const wsdr::RxSettings hw = hw_for(v);
+    if (hw.freq != v.freq || hw.rate_sel != v.rate_sel) { // offset-tuned: report the view, and the radio
+      j["rx"]["offset"] = true;
+      j["rx"]["hw_centre"] = st.centre_hz;
+      j["rx"]["hw_fs"] = st.fs;
+      j["rx"]["centre"] = v.freq;
+      j["rx"]["fs"] = wsdr::Receiver::rate_of(v.rate_sel);
+    }
   }
   j["ring_dropped"] = _ring.dropped();
   j["rows"] = _rows.load();
@@ -480,6 +552,11 @@ void Engine::dsp_loop() {
         if (_dsp_dirty) {
           sp.configure(_dsp_cfg);
           _dsp_dirty = false;
+        }
+        // a new crop window applies from the first bank of the hardware run it was made for
+        if (_crop_dirty && std::abs(b->meta.centre_hz - _crop.hw_centre) < 1 && std::abs(b->meta.fs - _crop.hw_fs) < 1) {
+          sp.set_crop(_crop.lo, _crop.hi);
+          _crop_dirty = false;
         }
       }
       gen = b->meta.gen;

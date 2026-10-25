@@ -264,6 +264,39 @@ static void test_gapped() {
   CHECK(sp.fft_size() == 16384);
 }
 
+// Offset tuning: a crop window emits only its bins, with the right f0, and flags the rows.
+static void test_crop() {
+  Spectrum sp;
+  DspConfig c;
+  c.fft = 8192;
+  c.rows_per_s = 50;
+  sp.configure(c);
+  sp.set_crop(5795e6, 5815e6); // channel 161 viewed from a radio centred at 5815 MHz (40 MS/s)
+  wsdr::BankMeta m;
+  m.gen = 1;
+  m.fs = 40e6;
+  m.centre_hz = 5815e6;
+  std::vector<Row> rows;
+  for (int k = 0; k < 200; k++) {
+    auto b = tone_bank(-12e6, 40e6, 512, static_cast<uint64_t>(k) * 8192); // 5803 MHz
+    sp.process(b.data(), b.size(), m, [&](const Row &r) { rows.push_back(r); });
+  }
+  CHECK(!rows.empty());
+  if (rows.empty())
+    return;
+  const Row &r = rows.back();
+  CHECK(r.offset && r.avg.size() >= 2040 && r.avg.size() <= 2050); // 20 of 40 MHz at 4096 bins
+  CHECK(r.f0 >= 5795e6 - r.df && r.f0 <= 5795e6 + r.df);
+  int best = 0;
+  for (int i = 1; i < static_cast<int>(r.avg.size()); i++)
+    if (r.avg[i] > r.avg[best])
+      best = i;
+  CHECK(std::abs(r.f0 + best * r.df - 5803e6) <= r.df);
+  DecodedRow d;
+  const auto fr = encode_row(r, 0);
+  CHECK(decode_row(fr.data(), fr.size(), d) && d.offset && !d.gapped && d.path == 0);
+}
+
 int main(int argc, char **argv) {
   if (argc > 1 && std::string(argv[1]) == "--bench")
     return bench();
@@ -273,6 +306,7 @@ int main(int argc, char **argv) {
   test_level_vs_fft();
   test_reduce_and_frame();
   test_gapped();
+  test_crop();
   std::printf(g_fail ? "%d FAILED\n" : "all tests passed\n", g_fail);
   return g_fail ? 1 : 0;
 }

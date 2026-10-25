@@ -44,6 +44,7 @@ struct Row {
   uint32_t seq = 0;
   uint8_t gen = 0;        // low byte of the stream run (BankMeta.gen): rows of a new run differ
   bool gapped = false;    // from a gapped run (BankMeta::gapped)
+  bool offset = false;    // cropped from an offset-tuned capture (the hardware centre is outside)
   double f0 = 0, df = 0;  // Hz of bin 0 (lowest frequency) and bin spacing
   std::vector<float> avg, max; // dBFS, size bins
 };
@@ -58,6 +59,11 @@ public:
                const std::function<void(const Row &)> &emit);
   uint64_t ffts() const { return _ffts; }
   int fft_size() const { return _c.fft; } // in use (gapped runs cap it at one bank)
+  // Emit only [lo, hi] Hz of the band (offset tuning: the window the user asked for); 0, 0 = all.
+  void set_crop(double lo, double hi) {
+    _crop_lo = lo;
+    _crop_hi = hi;
+  }
   // Time source for gapped rows (seconds; tests replace it).
   std::function<double()> clock = [] {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -72,7 +78,8 @@ private:
   void rebuild();
 
   DspConfig _c;
-  int _req_fft = 8192;    // the configured size (_c.fft may be capped for a gapped run)
+  int _req_fft = 8192;
+  double _crop_lo = 0, _crop_hi = 0;    // the configured size (_c.fft may be capped for a gapped run)
   bool _gapped = false;
   uint32_t _gen = ~0u;
   double _fs = 0, _freq = 0;

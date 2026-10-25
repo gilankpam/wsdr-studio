@@ -3,7 +3,7 @@
 
 // gapped: a wide span the link cannot carry continuously (8812CU on USB 2): one 8192-sample capture,
 // then a ~1.5 ms gap while it ships. Spectrum yes, continuous IQ (recording) no.
-export type Rate = { rate_sel: number; fs: number; gapped?: boolean };
+export type Rate = { rate_sel: number; fs: number; gapped?: boolean; hw_fs?: number }; // hw_fs: captured rate (offset tuning)
 export type Device = {
   pid: number; model: string; chip: string; bus: number; port: string; speed_mbps: number;
   controller: string; driver: string; can_open: boolean; max_msps: number;
@@ -17,13 +17,14 @@ export type RxSettings = { freq: number; rate_sel: number; wide: boolean; agc: b
 export type DspSettings = { fft: number; rows_per_s: number; paths: 'a' | 'b' | 'ab'; dc_remove: boolean };
 export type Status = {
   state: string; adapter: string; error: string; t: number; rows: number; ring_dropped: number; dsp_load: number;
-  rx?: { state: string; banks: number; restarts: number; channel: number; width: number; centre: number; fs: number; gapped?: boolean; error: string };
+  rx?: { state: string; banks: number; restarts: number; channel: number; width: number; centre: number; fs: number; gapped?: boolean; error: string;
+        offset?: boolean; hw_centre?: number; hw_fs?: number }; // offset: radio tuned beside the view
   record: { active: boolean; file: string; samples: number; seconds: number; bytes: number; error: string };
   client_drops?: number;
   disk_free?: number; // bytes free where recordings go
 };
 export type Row = {
-  path: number; gapped: boolean; gen: number; seq: number; bins: number; t: number; f0: number; df: number;
+  path: number; gapped: boolean; offset: boolean; gen: number; seq: number; bins: number; t: number; f0: number; df: number;
   avg: Float32Array; max: Float32Array;
 };
 
@@ -44,7 +45,7 @@ export function decodeRow(buf: ArrayBuffer): Row | null {
     max[i] = dbMin + dbStep * u[bins + i];
   }
   return {
-    path: v.getUint8(6) & 0x7f, gapped: (v.getUint8(6) & 0x80) !== 0, gen: v.getUint8(7), seq: v.getUint32(8, true), bins, t: v.getFloat64(16, true),
+    path: v.getUint8(6) & 0x3f, gapped: (v.getUint8(6) & 0x80) !== 0, offset: (v.getUint8(6) & 0x40) !== 0, gen: v.getUint8(7), seq: v.getUint32(8, true), bins, t: v.getFloat64(16, true),
     f0: v.getFloat64(24, true), df: v.getFloat64(32, true), avg, max,
   };
 }

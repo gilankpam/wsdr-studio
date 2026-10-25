@@ -9,7 +9,10 @@ const RATES: Rate[] = [5, 4, 3, 2, 1].map((r) => ({ rate_sel: r, fs: 80e6 / (1 <
 // What an adapter offers before Start (after Start the backend's caps say it).
 const ratesFor = (d?: Device): Rate[] =>
   d
-    ? RATES.filter((r) => r.fs <= d.max_msps * 1e6 || r.fs <= (d.gapped_msps ?? 0) * 1e6).map((r) => ({ ...r, gapped: r.fs > d.max_msps * 1e6 }))
+    ? RATES.filter((r) => r.fs <= d.max_msps * 1e6 || r.fs <= (d.gapped_msps ?? 0) * 1e6).map((r) => {
+        const gapped = r.fs > d.max_msps * 1e6;
+        return { ...r, gapped, hw_fs: gapped ? 40e6 : r.fs }; // as the backend: gapped views are cut from 40 MHz
+      })
     : RATES;
 // Share of the time a gapped span samples: one 8192-sample bank, then ~1.48 ms shipping it over USB 2.
 const gappedDuty = (fs: number) => 8192 / fs / (8192 / fs + 1.48e-3);
@@ -353,7 +356,8 @@ export default function App() {
   // the selected span (follows a change at once; the footer shows the run's measured share)
   const gapped = rates.find((r) => r.rate_sel === cur.rate_sel)?.gapped ?? false;
   const run = status?.rx;
-  const gappedPct = run?.gapped && msps > 0 && run.fs ? Math.round(((msps * 1e6) / run.fs) * 100) : null;
+  const hwFs = run?.hw_fs ?? run?.fs ?? 0;
+  const gappedPct = run?.gapped && msps > 0 && hwFs ? Math.round(((msps * 1e6) / hwFs) * 100) : null;
   const tuned = status?.rx?.centre ?? 0;
   useEffect(() => {
     live.current.opening = opening;
@@ -609,14 +613,14 @@ export default function App() {
               sel && sel.max_msps < 40 && sel.model === 'RTL8812BU' ? ' (10-40 MHz need USB 3)' : ''
             }${
               rates.some((r) => r.gapped)
-                ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording)'
+                ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording). 10 and 20 MHz are cut from a 40 MHz capture tuned beside the channel, so the chip\'s centre notch stays out of view'
                 : ''
             }`}
           >
             {rates.map((r) => (
               <option key={r.rate_sel} value={r.rate_sel}>
                 {r.gapped
-                  ? `${spanLabel(r.fs)} · gapped (~${Math.round(gappedDuty(r.fs) * 100)} % sampled)`
+                  ? `${spanLabel(r.fs)} · gapped (~${Math.round(gappedDuty(r.hw_fs ?? r.fs) * 100)} % sampled)`
                   : `${spanLabel(r.fs)} · ${r.fs / 1e6} MS/s`}
               </option>
             ))}
@@ -812,6 +816,7 @@ export default function App() {
             {st.gapped && (
               <span className="muted" title="Each slice is 8192 samples; the gaps between them are the time USB 2 needs to ship one">
                 {' '}· gapped: {gappedPct !== null ? `~${gappedPct} %` : '…'} of the time sampled
+                {st.offset && st.hw_centre ? ` · radio at ${mhz(st.hw_centre)} MHz (keeps the chip notch out of view)` : ''}
               </span>
             )}
           </span>

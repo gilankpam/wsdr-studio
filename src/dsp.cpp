@@ -176,12 +176,19 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       r.gapped = _gapped;
       r.df = _fs / n * dec;
       r.f0 = _freq - _fs / 2 + (_fs / n) * (dec - 1) / 2.0;
-      r.avg.resize(bins);
-      r.max.resize(bins);
+      int b0 = 0, b1 = bins; // [b0, b1): the whole band, or the crop window
+      if (_crop_hi > _crop_lo) {
+        b0 = std::clamp(static_cast<int>(std::ceil((_crop_lo - r.f0) / r.df - 1e-6)), 0, bins);
+        b1 = std::clamp(static_cast<int>(std::floor((_crop_hi - r.f0) / r.df + 1e-6)) + 1, b0, bins);
+        r.f0 += b0 * r.df;
+        r.offset = true;
+      }
+      r.avg.resize(b1 - b0);
+      r.max.resize(b1 - b0);
       const float inv = _norm / static_cast<float>(p.count);
-      for (int b = 0; b < bins; b++) {
-        r.avg[b] = 10.f * std::log10(sum[b] * inv + 1e-20f);
-        r.max[b] = 10.f * std::log10(mx[b] * _norm + 1e-20f);
+      for (int b = b0; b < b1; b++) {
+        r.avg[b - b0] = 10.f * std::log10(sum[b] * inv + 1e-20f);
+        r.max[b - b0] = 10.f * std::log10(mx[b] * _norm + 1e-20f);
       }
       emit(r);
       std::fill(p.sum.begin(), p.sum.end(), 0.f);

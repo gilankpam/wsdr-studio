@@ -2,10 +2,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { CHANNELS, channelAt, channelKey } from './channels';
 import { Display } from './display';
-import { Client, type Caps, type Device, type DspSettings, type RxSettings, type Status } from './protocol';
+import { Client, type Caps, type Device, type DspSettings, type Rate, type RxSettings, type Status } from './protocol';
 
 const FFTS = [1024, 2048, 4096, 8192, 16384];
-const RATES = [5, 4, 3, 2, 1].map((r) => ({ rate_sel: r, fs: 80e6 / (1 << r) })); // before Start
+const RATES: Rate[] = [5, 4, 3, 2, 1].map((r) => ({ rate_sel: r, fs: 80e6 / (1 << r) }));
+// What an adapter offers before Start (after Start the backend's caps say it).
+const ratesFor = (d?: Device): Rate[] =>
+  d
+    ? RATES.filter((r) => r.fs <= d.max_msps * 1e6 || r.fs <= (d.gapped_msps ?? 0) * 1e6).map((r) => ({ ...r, gapped: r.fs > d.max_msps * 1e6 }))
+    : RATES;
+// Share of the time a gapped span samples: one 8192-sample bank, then ~1.48 ms shipping it over USB 2.
+const gappedDuty = (fs: number) => 8192 / fs / (8192 / fs + 1.48e-3);
 const mhz = (hz: number, d = 1) => (hz / 1e6).toFixed(d);
 const spanLabel = (fs: number) => `${fs / 1e6} MHz`;
 const devKey = (d: Device) => `${d.bus}-${d.port}`;
@@ -309,7 +316,8 @@ export default function App() {
   }, []);
 
   // A remembered 40 MHz tuning on an adapter that cannot do it (USB 2, 8812CU): clamp the draft.
-  const selMax = devices.find((d) => devKey(d) === selKey)?.max_msps ?? 40;
+  const selDev = devices.find((d) => devKey(d) === selKey);
+  const selMax = selDev ? Math.max(selDev.max_msps, selDev.gapped_msps ?? 0) : 40;
   useEffect(() => {
     if (selMax < 40)
       setDraft((dr) => (dr.rate_sel < 4 ? { ...dr, rate_sel: 4 } : dr)); // every 40 MHz centre is also a 5 MHz step
@@ -339,7 +347,8 @@ export default function App() {
   const fsNow = 80e6 / (1 << cur.rate_sel);
   const width = cur.rate_sel === 1 && (caps.wide_capable ?? true) ? 40 : 20;
   const chan = channelAt(cur.freq, width);
-  const rates = caps.rates ?? (sel && sel.max_msps < 40 ? RATES.filter((r) => r.fs <= 5e6) : RATES);
+  const rates = caps.rates ?? ratesFor(sel);
+  const gapped = open ? (status?.rx?.gapped ?? false) : (rates.find((r) => r.rate_sel === cur.rate_sel)?.gapped ?? false);
   const tuned = status?.rx?.centre ?? 0;
   useEffect(() => {
     live.current.opening = opening;
@@ -414,9 +423,17 @@ export default function App() {
     const c = CHANNELS.find((x) => channelKey(x) === key);
     if (!c) return;
     updatePrefs({ retuned: true }); // the tip is no longer needed
-    if (c.width === 40 && (caps.wide_capable ?? sel?.max_msps === 40)) set({ freq: c.centre, rate_sel: 1, wide: true });
+    const r40 = rates.find((r) => r.rate_sel === 1);
+    if (c.width === 40 && cur.rate_sel === 1) set({ freq: c.centre }); // already at 40 MHz
+    else if (c.width === 40 && r40 && !r40.gapped) set({ freq: c.centre, rate_sel: 1, wide: true });
     else {
-      if (c.width === 40) addBanner('40 MHz needs the 8812BU on USB 3; showing the centre at the widest span this adapter can do');
+      // gapped mode is the user's choice, never switched on by a channel pick
+      if (c.width === 40)
+        addBanner(
+          r40
+            ? 'This adapter shows 40 MHz only gapped: choose "40 MHz · gapped" in Span / rate. Showing the centre for now.'
+            : '40 MHz needs the 8812BU on USB 3; showing the centre at the widest span this adapter can do',
+        );
       set({ freq: c.centre });
     }
   };
@@ -456,7 +473,7 @@ export default function App() {
   if (open && st) {
     if (st.restarts > 0) warn.push(`${st.restarts} stream restart${st.restarts > 1 ? 's' : ''}`);
     if (status!.dsp_load > 0.8) warn.push(`DSP ${(status!.dsp_load * 100).toFixed(0)} %`);
-    if (rxState === 'streaming' && st.fs && msps > 0 && msps < 0.95 * (st.fs / 1e6)) warn.push(`input ${msps.toFixed(2)} MS/s`);
+    if (rxState === 'streaming' && st.fs && !st.gapped && msps > 0 && msps < 0.95 * (st.fs / 1e6)) warn.push(`input ${msps.toFixed(2)} MS/s`);
   }
   const dotClass =
     fatal || !connected ? 'dot bad'
@@ -498,10 +515,12 @@ export default function App() {
           {open ? (
             <button
               className={recording ? 'rec on' : 'rec'}
-              disabled={!recording && rxState !== 'streaming'}
+              disabled={!recording && (rxState !== 'streaming' || gapped)}
               onClick={toggleRecord}
               title={
-                !recording && rxState !== 'streaming'
+                !recording && gapped
+                  ? 'Recording needs a continuous span (5 MHz or less on this adapter); gapped spans sample only part of the time'
+                  : !recording && rxState !== 'streaming'
                   ? 'Available while streaming'
                   : `Record raw IQ (SigMF), about ${bytes(recRate)}/s at this span${diskFree ? `; ${bytes(diskFree)} free (~${fmtDur(diskFree / recRate)})` : ''}`
               }
@@ -569,11 +588,17 @@ export default function App() {
             }}
             title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
               sel && sel.max_msps < 40 && sel.model === 'RTL8812BU' ? ' (10-40 MHz need USB 3)' : ''
+            }${
+              rates.some((r) => r.gapped)
+                ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording)'
+                : ''
             }`}
           >
             {rates.map((r) => (
               <option key={r.rate_sel} value={r.rate_sel}>
-                {spanLabel(r.fs)} · {r.fs / 1e6} MS/s
+                {r.gapped
+                  ? `${spanLabel(r.fs)} · gapped (~${Math.round(gappedDuty(r.fs) * 100)} % of the time)`
+                  : `${spanLabel(r.fs)} · ${r.fs / 1e6} MS/s`}
               </option>
             ))}
           </select>
@@ -640,7 +665,7 @@ export default function App() {
                   FFT size
                   <select value={dsp.fft} onChange={(e) => req('dsp', { fft: Number(e.target.value) }).catch(() => {})}>
                     {FFTS.map((n) => (
-                      <option key={n} value={n}>
+                      <option key={n} value={n} disabled={gapped && n > 8192}>
                         {n <= 4096 ? `${n} (${(fsNow / n / 1e3).toFixed(1)} kHz/bin)` : `${n} (${(fsNow / 4096 / 1e3).toFixed(1)} kHz/bin, smoother noise)`}
                       </option>
                     ))}
@@ -764,6 +789,11 @@ export default function App() {
           <span>
             {chan && !offGrid ? `ch ${chan.label} · ` : ''}
             {offGrid ? `${mhz(cur.freq)} MHz requested · tuned ${mhz(tuned)} MHz (5 MHz steps)` : `${mhz(cur.freq)} MHz`} · {spanLabel(st.fs)} span
+            {st.gapped && (
+              <span className="muted" title="Each slice is 8192 samples; the gaps between them are the time USB 2 needs to ship one">
+                {' '}· gapped: {msps > 0 ? `${Math.round(((msps * 1e6) / st.fs) * 100)} %` : '…'} of the time sampled
+              </span>
+            )}
           </span>
         )}
         {warn.map((w) => (

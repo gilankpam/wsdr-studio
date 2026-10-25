@@ -220,6 +220,8 @@ json Engine::run(const json &c) {
       throw CmdError("not_streaming", "not streaming");
     if (st.settling)
       throw CmdError("busy", "settings are being applied; try again in a moment");
+    if (st.gapped)
+      throw CmdError("unsupported", "recording needs a continuous rate (gapped spans sample only part of the time)");
     const wsdr::RxSettings s = r->settings();
     int path;
     {
@@ -315,6 +317,7 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   s.gain_db = c.contains("gain_db") ? num(c, "gain_db", 0, 100) : 30.0;
   s.agc = c.contains("agc") ? flag(c, "agc") : false;
   s.wide = c.contains("wide") ? flag(c, "wide") : true;
+  s.allow_gapped = true; // the 8812CU's wide spans (the UI marks them)
   {
     std::lock_guard<std::mutex> l(_sm);
     _state = "opening";
@@ -393,8 +396,8 @@ json Engine::caps() const {
   json j = {{"type", "caps"}, {"open", open}};
   if (open) {
     json rates = json::array();
-    for (int r = 5; r >= _caps.min_rate_sel; r--)
-      rates.push_back({{"rate_sel", r}, {"fs", wsdr::Receiver::rate_of(r)}});
+    for (int r = 5; r >= std::min(_caps.min_rate_sel, _caps.gapped_min_rate_sel); r--)
+      rates.push_back({{"rate_sel", r}, {"fs", wsdr::Receiver::rate_of(r)}, {"gapped", r < _caps.min_rate_sel}});
     j["adapter"] = _adapter;
     j["pid"] = _caps.pid;
     j["bus"] = _open_bus;
@@ -405,7 +408,7 @@ json Engine::caps() const {
     j["rates"] = rates;
     j["gain_max"] = _caps.gain_max;
     j["gain_step"] = _caps.gain_step;
-    j["wide_capable"] = !_caps.cu && _caps.min_rate_sel <= 1;
+    j["wide_capable"] = std::min(_caps.min_rate_sel, _caps.gapped_min_rate_sel) <= 1; // 40 MHz width at 40 MS/s
   }
   return j;
 }
@@ -422,7 +425,7 @@ json Engine::status() const {
     const wsdr::RxStatus st = r->status();
     j["rx"] = {{"state", wsdr::rx_state_name(st.state)}, {"banks", st.banks}, {"restarts", st.restarts},
                {"channel", st.channel}, {"width", st.width}, {"centre", st.centre_hz}, {"fs", st.fs},
-               {"error", st.error}};
+               {"gapped", st.gapped}, {"error", st.error}};
   }
   j["ring_dropped"] = _ring.dropped();
   j["rows"] = _rows.load();
@@ -447,7 +450,7 @@ json Engine::devices_json(const std::vector<DeviceInfo> &d) {
   for (const auto &x : d)
     arr.push_back({{"pid", x.pid}, {"model", x.model}, {"chip", x.chip}, {"bus", x.bus}, {"port", x.port},
                    {"speed_mbps", x.speed_mbps}, {"controller", x.controller}, {"driver", x.driver},
-                   {"can_open", x.can_open}, {"max_msps", x.max_msps}});
+                   {"can_open", x.can_open}, {"max_msps", x.max_msps}, {"gapped_msps", x.gapped_msps}});
   return {{"type", "devices"}, {"devices", arr}};
 }
 

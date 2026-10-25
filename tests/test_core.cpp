@@ -48,7 +48,7 @@ static void test_channels() {
   CHECK(R::igi_for(0, false) == 0x50);
   CHECK(R::igi_for(100, false) == 0x1C);
   CHECK(R::width_of(wsdr::RxSettings{5190e6, 1, true, false, 30}, false) == 40);
-  CHECK(R::width_of(wsdr::RxSettings{5190e6, 1, true, false, 30}, true) == 20);
+  CHECK(R::width_of(wsdr::RxSettings{5190e6, 1, true, false, 30}, true) == 40); // 8822C gapped 40 MS/s
   CHECK(R::width_of(wsdr::RxSettings{5190e6, 2, true, false, 30}, false) == 20);
 }
 
@@ -219,6 +219,46 @@ static int bench() {
   return el / sig < 0.5 ? 0 : 1;
 }
 
+// Gapped runs: the FFT is capped at one bank, a tone still lands in its bin, and rows follow the clock
+// (not the sample count, which is only a fraction of fs).
+static void test_gapped() {
+  Spectrum sp;
+  double now = 0;
+  sp.clock = [&] { return now; };
+  DspConfig c;
+  c.fft = 16384;
+  c.rows_per_s = 10;
+  sp.configure(c);
+  wsdr::BankMeta m;
+  m.gen = 1;
+  m.fs = 40e6;
+  m.centre_hz = 5190e6;
+  m.gapped = true;
+  std::vector<Row> rows;
+  for (int k = 0; k < 600; k++) { // 555 banks/s, as measured at 40 MS/s: ~1.08 s
+    now = k / 555.0;
+    // each bank its own capture: the phase restarts (a gap), the tone is the same
+    auto b = tone_bank(5e6, 40e6, 512, 0);
+    sp.process(b.data(), b.size(), m, [&](const Row &r) { rows.push_back(r); });
+  }
+  CHECK(sp.fft_size() == kGappedMaxFft);
+  CHECK(rows.size() >= 9 && rows.size() <= 11); // 10 rows/s by the clock
+  if (rows.empty())
+    return;
+  const Row &r = rows.back();
+  int best = 0;
+  for (int i = 1; i < static_cast<int>(r.avg.size()); i++)
+    if (r.avg[i] > r.avg[best])
+      best = i;
+  CHECK(std::abs(r.f0 + best * r.df - (5190e6 + 5e6)) <= r.df);
+  // back to a continuous run: the configured size again
+  m.gen = 2;
+  m.gapped = false;
+  auto b = tone_bank(5e6, 40e6, 512, 0);
+  sp.process(b.data(), b.size(), m, [](const Row &) {});
+  CHECK(sp.fft_size() == 16384);
+}
+
 int main(int argc, char **argv) {
   if (argc > 1 && std::string(argv[1]) == "--bench")
     return bench();
@@ -227,6 +267,7 @@ int main(int argc, char **argv) {
   test_offgrid();
   test_level_vs_fft();
   test_reduce_and_frame();
+  test_gapped();
   std::printf(g_fail ? "%d FAILED\n" : "all tests passed\n", g_fail);
   return g_fail ? 1 : 0;
 }

@@ -10,6 +10,10 @@ receiver: plug it in, press Start, pick a Wi-Fi channel, watch the spectrum and 
 - **What you get:**
   - 8812BU on USB 3: spans of 2.5–40 MHz, and the full 40 MHz band at 40 MS/s.
   - 8812BU on USB 2, or the 8812CU: 2.5 and 5 MHz.
+  - 8812CU, gapped: 10, 20 and 40 MHz spans listed as "gapped" in Span / rate. The dongle captures
+    one 8192-sample slice, ships it over USB 2 (~1.5 ms), and repeats: 35 / 21 / 12 % of the time is
+    sampled. Good for watching a band; short bursts can fall in the gaps, and recording needs a
+    continuous span. The 8822C has a narrow notch at the centre (its own DC rejection).
   - 8812CU: two coherent antennas (A, B, or both overlaid).
   - Fixed gain or the chip's AGC, and raw IQ recording (SigMF).
 - **Receive only.** The app never transmits.

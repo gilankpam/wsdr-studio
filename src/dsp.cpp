@@ -27,6 +27,7 @@ struct Spectrum::Path {
   std::vector<float> one;         // this FFT's power per display bin
   int count = 0;                  // FFTs in the current row
   double row_samples = 0;         // samples consumed in the current row
+  double row_t0 = 0;              // gapped runs: when the current row started (clock)
 
   Path(int idx, int n) : index(idx) {
     std::lock_guard<std::mutex> l(g_fftw_plan_mutex);
@@ -59,6 +60,9 @@ void Spectrum::configure(const DspConfig &c) {
   if (!(n.paths & 3))
     n.paths = 1;
   _c = n;
+  _req_fft = n.fft;
+  if (_gapped)
+    _c.fft = std::min(_c.fft, kGappedMaxFft);
   rebuild();
 }
 
@@ -80,6 +84,13 @@ void Spectrum::rebuild() {
 }
 
 void Spectrum::reset(const wsdr::BankMeta &m) {
+  _gapped = m.gapped;
+  const int want = _gapped ? std::min(_req_fft, kGappedMaxFft) : _req_fft;
+  if (want != _c.fft) {
+    _c.fft = want;
+    rebuild();
+  }
+  const double now = clock();
   _gen = m.gen;
   _fs = m.fs;
   _freq = m.centre_hz; // hardware band; see the header
@@ -88,6 +99,7 @@ void Spectrum::reset(const wsdr::BankMeta &m) {
     p->fill = 0;
     p->count = 0;
     p->row_samples = 0;
+    p->row_t0 = now;
     std::fill(p->sum.begin(), p->sum.end(), 0.f);
     std::fill(p->max.begin(), p->max.end(), 0.f);
   }
@@ -153,7 +165,7 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
           mx[b] = one[b];
       }
       p.count++;
-      if (p.row_samples < row_len)
+      if (_gapped ? clock() - p.row_t0 < 1.0 / _c.rows_per_s : p.row_samples < row_len)
         continue;
       // Emit: dB once per display bin.
       Row r;
@@ -174,6 +186,8 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       std::fill(p.max.begin(), p.max.end(), 0.f);
       p.count = 0;
       p.row_samples = 0;
+      if (_gapped)
+        p.row_t0 = clock();
     }
   }
 }

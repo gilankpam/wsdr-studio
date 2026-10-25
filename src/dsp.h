@@ -11,8 +11,13 @@
 // the FFT bins it covers (noise in display units is then independent of the FFT size; a tone reads
 // up to +1.8 dB high, the Hann leakage into the neighbour bin) and the max of their peaks.
 // dBFS: a full-scale complex sine (|x| = 2048 LSB) reads 0 dBFS (coherent-gain normalised window).
+//
+// Gapped runs (BankMeta::gapped, 8812CU wide spans): every bank is a separate capture. The FFT is
+// capped at one bank (8192, a power of two, so frames never straddle a gap), and rows are timed by
+// the clock (samples arrive at only a fraction of fs).
 #pragma once
 
+#include <chrono>
 #include <complex>
 #include <cstdint>
 #include <functional>
@@ -25,6 +30,7 @@
 namespace studio {
 
 constexpr int kMaxBins = 4096;
+constexpr int kGappedMaxFft = 8192; // one LA bank (BankMeta::gapped)
 
 struct DspConfig {
   int fft = 8192;         // 1024 .. 16384, power of two
@@ -50,6 +56,11 @@ public:
   void process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &meta,
                const std::function<void(const Row &)> &emit);
   uint64_t ffts() const { return _ffts; }
+  int fft_size() const { return _c.fft; } // in use (gapped runs cap it at one bank)
+  // Time source for gapped rows (seconds; tests replace it).
+  std::function<double()> clock = [] {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  };
 
   // Unpack helpers (12-bit two's complement; path B lives in the upper word on the 8822C).
   static void unpack(const uint8_t *bank, size_t samples, int path, wsdr::cf *out);
@@ -60,6 +71,8 @@ private:
   void rebuild();
 
   DspConfig _c;
+  int _req_fft = 8192;    // the configured size (_c.fft may be capped for a gapped run)
+  bool _gapped = false;
   uint32_t _gen = ~0u;
   double _fs = 0, _freq = 0;
   std::vector<float> _win;

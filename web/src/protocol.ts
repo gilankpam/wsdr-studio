@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Client side of protocol v1 (src/protocol.h): JSON commands with ids, JSON events, binary rows.
 
+// gapped: a wide span the link cannot carry continuously (8812CU on USB 2): one 8192-sample capture,
+// then a ~1.5 ms gap while it ships. Spectrum yes, continuous IQ (recording) no.
+export type Rate = { rate_sel: number; fs: number; gapped?: boolean };
 export type Device = {
   pid: number; model: string; chip: string; bus: number; port: string; speed_mbps: number;
   controller: string; driver: string; can_open: boolean; max_msps: number;
+  gapped_msps?: number; // wider spans in gapped mode (8812CU), 0 = none
 };
 export type Caps = {
   open: boolean; adapter?: string; pid?: number; bus?: number; port?: string; chip?: string; superspeed?: boolean; paths?: number;
-  rates?: { rate_sel: number; fs: number }[]; gain_max?: number; gain_step?: number; wide_capable?: boolean;
+  rates?: Rate[]; gain_max?: number; gain_step?: number; wide_capable?: boolean;
 };
 export type RxSettings = { freq: number; rate_sel: number; wide: boolean; agc: boolean; gain_db: number };
 export type DspSettings = { fft: number; rows_per_s: number; paths: 'a' | 'b' | 'ab'; dc_remove: boolean };
 export type Status = {
   state: string; adapter: string; error: string; t: number; rows: number; ring_dropped: number; dsp_load: number;
-  rx?: { state: string; banks: number; restarts: number; channel: number; width: number; centre: number; fs: number; error: string };
+  rx?: { state: string; banks: number; restarts: number; channel: number; width: number; centre: number; fs: number; gapped?: boolean; error: string };
   record: { active: boolean; file: string; samples: number; seconds: number; bytes: number; error: string };
   client_drops?: number;
   disk_free?: number; // bytes free where recordings go

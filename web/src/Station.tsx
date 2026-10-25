@@ -30,6 +30,8 @@ export type StationHandle = {
   notice: (text: string) => void;
   // keyboard shortcuts
   toggleRun: () => void;
+  startWith: (args: Partial<RxSettings>) => void; // open with these settings over the draft (the map, a restore)
+  running: () => boolean; // open or opening, as the events have said (not waiting for a render)
   toggleRec: () => void;
   spanStep: (dir: 1 | -1) => void;   // the next wider / narrower continuous span
   typeFreq: (digit: string) => void; // start typing a frequency in this view's header
@@ -387,7 +389,7 @@ export function Station(p: {
       live.current.freq = n.freq;
       live.current.rateSel = n.rate_sel;
       setDraft(n);
-      rememberTuning({ freq: n.freq, rate_sel: n.rate_sel, gain_db: n.gain_db, agc: n.agc }); // remembered too
+      if (!view.current.map) rememberTuning({ freq: n.freq, rate_sel: n.rate_sel, gain_db: n.gain_db, agc: n.agc }); // remembered too
       if (args.freq !== undefined) setFreqText(mhz(args.freq, 3));
       return;
     }
@@ -430,6 +432,10 @@ export function Station(p: {
       },
       busy: () => (live.current.recording ? 'it is recording' : live.current.opening || starting ? 'it is starting' : null),
       notice: (text) => addBanner(text),
+      running: () => live.current.open || live.current.opening || starting,
+      startWith: (args) => {
+        if (sel && sel.can_open && connected && !open && !opening) void doStart(sel, false, args);
+      },
       toggleRun: () => {
         if (open) req('close').catch(() => {});
         else if (sel && sel.can_open && !opening && connected) void doStart();
@@ -477,7 +483,7 @@ export function Station(p: {
   // auto: starting again after an unplug; it waits on if this fails. It asks for the span it had, but
   // never gapped: a replugged 8812BU comes back at USB 2, Start switches it to USB 3 (40 MHz again),
   // and should it stay at USB 2 the receiver opens the widest continuous span instead.
-  const doStart = async (dev = sel, auto = false) => {
+  const doStart = async (dev = sel, auto = false, extra: Partial<RxSettings> = {}) => {
     if (!dev) return;
     if (!auto) setLost(null);
     setStarting(true);
@@ -486,7 +492,7 @@ export function Station(p: {
     const gain = gainUi ?? draft.gain_db;
     try {
       await req('open', {
-        pid: dev.pid, bus: dev.bus, port: dev.port, ...draft, gain_db: gain, offset_tuning: prefs.offsetTuning, ...(auto ? { allow_gapped: false } : {}),
+        pid: dev.pid, bus: dev.bus, port: dev.port, ...draft, ...extra, gain_db: gain, offset_tuning: prefs.offsetTuning, ...(auto ? { allow_gapped: false } : {}),
       });
     } catch {
       /* shown */

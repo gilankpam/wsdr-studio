@@ -65,11 +65,17 @@ export default function App() {
   const [mapSlot, setMapSlot] = useState(0);   // Map: the view whose adapter sweeps
   const [mapRun, setMapRun] = useState(false); // Map: sweeping
   const [mapStep, setMapStep] = useState<{ c: number; fs: number } | null>(null); // where the sweep is
-  // Map: what to put back on leaving it (the sweeping view's tuning, whether it ran; the view stopped for it)
-  const mapReturn = useRef<{ mode: Mode; freq: number; rate_sel: number; wasOpen: boolean; other: number | null } | null>(null);
+  // Map: what to put back on leaving it (the sweeping view's tuning, whether it ran; the view stopped for
+  // it, with its adapter)
+  const mapReturn = useRef<{ mode: Mode; freq: number; rate_sel: number; wasOpen: boolean; other: { slot: number; key: string | null } | null } | null>(null);
   const [mapOther, setMapOther] = useState<number | null>(null); // that view stays mounted (hidden): it keeps its adapter
-  const restart = useRef<number[]>([]); // views to start again once they are ready
-  const mapOpenPending = useRef(false); // Start pressed while the adapter was still closing
+  // Views to put back once they have settled (not opening; a Stop's close done): tuning, and a start
+  // when they ran. key: the adapter it is for (a view whose adapter changed meanwhile is left alone).
+  const restore = useRef<{ slot: number; key: string | null; args?: Partial<RxSettings>; start: boolean }[]>([]);
+  const [restoreKick, setRestoreKick] = useState(0);
+  const mapClose = useRef<Promise<unknown> | null>(null); // a Stop's close in flight
+  const backTo = useRef<Mode | null>(null); // the mode the map was entered from (no new alignment going back to it)
+  const [mapNote, setMapNote] = useState<string | null>(null); // why the sweep stopped by itself
   const [help, setHelp] = useState(false); // the keyboard sheet
   const [narrow, setNarrow] = useState(() => matchMedia('(max-width: 1279px)').matches);
   const [drawer, setDrawer] = useState(false);
@@ -203,7 +209,7 @@ export default function App() {
   useEffect(() => {
     if (prevMode.current !== mode) {
       // (back from the map: the views go back where they were, no new alignment)
-      alignPending.current = isDual(mode) && prevMode.current !== 'map' ? mode : null;
+      alignPending.current = isDual(mode) && !(prevMode.current === 'map' && backTo.current === mode) ? mode : null;
       prevMode.current = mode;
     }
     const a = handles.current[0], b = handles.current[1], va = views[0];
@@ -256,7 +262,11 @@ export default function App() {
       setMapOther(stopped);
       setMapRun(false);
       const v = views[slot];
-      mapReturn.current = v ? { mode, freq: v.freq, rate_sel: v.rate_sel, wasOpen: v.open, other: stopped } : null;
+      restore.current = [];
+      setMapNote(null);
+      mapReturn.current = v
+        ? { mode, freq: v.freq, rate_sel: v.rate_sel, wasOpen: v.open, other: stopped !== null ? { slot: stopped, key: views[stopped]?.selKey ?? null } : null }
+        : null;
     } else if (mode === 'map') leaveMap(m, null);
     updatePrefs({ mode: m });
   };
@@ -264,19 +274,27 @@ export default function App() {
   // Single only view A is shown, so a sweeping B stops; a view stopped for the map starts again.
   // The span goes back too (the sweep's may be one the user never picked, gapped on USB 2).
   const leaveMap = (to: Mode, f: number | null) => {
-    const r = mapReturn.current, h = handles.current[mapSlot];
+    const r = mapReturn.current, slot = mapSlot;
+    mapReturn.current = null;
+    backTo.current = r?.mode ?? null;
     setMapRun(false);
     setMapStep(null);
     setMapOther(null);
-    mapOpenPending.current = false;
-    const dev = devices.find((d) => devKey(d) === views[mapSlot]?.selKey);
+    const dev = devices.find((d) => devKey(d) === views[slot]?.selKey);
     const rate_sel = r?.rate_sel ?? (dev ? Math.max(1, Math.ceil(Math.log2(80 / dev.max_msps))) : 4); // else the widest continuous
-    if (h) h.linkedSet({ freq: f !== null ? snap(f) : r ? r.freq : views[mapSlot]?.freq ?? 5180e6, rate_sel, wide: true });
+    const args = { freq: f !== null ? snap(f) : r ? r.freq : views[slot]?.freq ?? 5180e6, rate_sel, wide: true };
     const shownAfter = (i: number) => (isDual(to) ? true : i === 0);
-    if (to === 'single' && mapSlot === 1) hub.request('close', { slot: 1 }).catch(() => {});
-    else if (r?.wasOpen && !views[mapSlot]?.open) restart.current.push(mapSlot); // stopped in the map: back as it was
-    if (r && r.other !== null && shownAfter(r.other)) restart.current.push(r.other);
-    mapReturn.current = null;
+    const key = views[slot]?.selKey ?? null;
+    const queue = () => {
+      const items: { slot: number; key: string | null; args?: Partial<RxSettings>; start: boolean }[] = [];
+      if (to === 'single' && slot === 1) hub.request('close', { slot: 1 }).catch(() => {});
+      else items.push({ slot, key, args, start: !!r?.wasOpen });
+      if (r?.other && shownAfter(r.other.slot)) items.push({ slot: r.other.slot, key: r.other.key, start: true });
+      restore.current = [...restore.current.filter((x) => !items.some((i) => i.slot === x.slot)), ...items];
+      setRestoreKick((k) => k + 1);
+    };
+    if (mapClose.current) void mapClose.current.finally(queue); // a Stop still closing: after it
+    else queue();
   };
   const pickFromMap = (f: number) => {
     const to = mapReturn.current?.mode ?? 'single';
@@ -284,13 +302,15 @@ export default function App() {
     updatePrefs({ mode: to === 'map' ? 'single' : to });
   };
   useEffect(() => {
-    restart.current = restart.current.filter((o) => {
-      const v = views[o], h = handles.current[o];
-      if (!h || !v?.ready) return true; // not yet: keep it
-      if (!v.open && !v.locked) h.toggleRun();
+    restore.current = restore.current.filter((x) => {
+      const v = views[x.slot], h = handles.current[x.slot];
+      if (!h || !v?.ready || v.locked) return true; // not settled yet: keep it
+      if (x.key && v.selKey !== x.key) return false; // its adapter changed meanwhile: leave the view as it is
+      if (x.args) h.linkedSet(x.args); // running: retuned; stopped: its next start
+      if (x.start && !h.running()) h.startWith(x.args ?? {});
       return false;
     });
-  }, [views, mode]);
+  }, [views, mode, restoreKick]);
   // the close waits for a Start still running (the engine's queue is serial); on failure the view stays
   // (its recording note may come after the reply: it goes to a shown view for a few seconds more)
   const stopAndEnter = (to: Mode, slot: number) => {
@@ -327,28 +347,34 @@ export default function App() {
   // Map: the sweeping view's adapter; Start opens it (when stopped) and sweeps, Stop ends both
   const mapDev = inMap ? devices.find((d) => devKey(d) === views[mapSlot]?.selKey) : undefined;
   const mapPlan = inMap ? sweepPlan(prefs.mapRange, mapDev, prefs.mapGapped) : null;
+  // Start opens the adapter on the sweep's first step (not on a draft of an earlier sweep), after a
+  // Stop's close if one is still in flight; Stop closes it, opening or open.
   const mapStart = () => {
     const v = views[mapSlot];
     if (v?.recording) return handles.current[mapSlot]?.notice('End the recording first: the map retunes this adapter');
     setMapRun(true);
-    if (!v?.open && !v?.locked) handles.current[mapSlot]?.toggleRun();
-    else mapOpenPending.current = true; // still open (a Stop just sent) or starting: opened once it has closed
+    setMapNote(null);
+    const first = mapPlan ? { freq: mapPlan.centres[0], rate_sel: mapPlan.rate_sel, wide: true } : {};
+    const open = () => {
+      const h = handles.current[mapSlot];
+      if (h && !h.running()) h.startWith(first);
+    };
+    if (mapClose.current) void mapClose.current.finally(open);
+    else open();
   };
   const mapStop = () => {
     setMapRun(false);
-    mapOpenPending.current = false;
-    if (views[mapSlot]?.open) hub.request('close', { slot: mapSlot }).catch(() => {});
+    if (handles.current[mapSlot]?.running()) {
+      const p: Promise<unknown> = hub
+        .request('close', { slot: mapSlot })
+        .catch(() => {})
+        .finally(() => {
+          if (mapClose.current === p) mapClose.current = null;
+        });
+      mapClose.current = p;
+    }
   };
   const mapToggle = () => (mapRun ? mapStop() : mapDev?.can_open && mapStart());
-  useEffect(() => {
-    const v = views[mapSlot];
-    if (!mapOpenPending.current || !inMap || !v) return;
-    if (v.open) mapOpenPending.current = false; // it stayed open (or opened): the sweep runs on it
-    else if (!v.locked) {
-      mapOpenPending.current = false;
-      handles.current[mapSlot]?.toggleRun();
-    }
-  }, [views, mapSlot, inMap]);
   // keyboard shortcuts (see KEYS)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -708,6 +734,11 @@ export default function App() {
                 onStop={mapStop}
                 onPick={pickFromMap}
                 onStep={(c, fs) => setMapStep(c === null ? null : { c, fs })}
+                onFail={(why) => {
+                  setMapNote(`The sweep stopped: ${why}`);
+                  mapStop();
+                }}
+                note={mapNote}
               />
             )}
             {mode === 'panorama' && (

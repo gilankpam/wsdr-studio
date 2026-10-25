@@ -28,6 +28,8 @@ export function SpectralMap(p: {
   hub: Hub; slot: number; range: Range; dev: Device | undefined; open: boolean; opening: boolean; running: boolean;
   dwell: number; gappedOk: boolean; prefs: Prefs; updatePrefs: (x: Partial<Prefs>) => void; scale: Scale; setScale: (s: Scale) => void;
   onStart: () => void; onStop: () => void; onPick: (f: number) => void; onStep: (centre: number | null, fs: number) => void;
+  onFail: (why: string) => void; // the sweep gave up (the adapter stopped answering)
+  note: string | null;            // why the sweep stopped by itself
 }) {
   const plan = sweepPlan(p.range, p.dev, p.gappedOk);
   const spRef = useRef<HTMLCanvasElement>(null);
@@ -35,13 +37,13 @@ export function SpectralMap(p: {
   // the sweep's data and the row callback's view of it (outside React state: rows arrive 25 times a
   // second); a new range, plan or listen time mounts a new map (the shell keys it)
   const st = useRef({
-    gen: -1, inGen: 0, rowCentre: 0, collect: null as null | { c: number; into: Float32Array },
+    gen: -1, inGen: [0, 0], rowCentre: 0, collect: null as null | { c: number; rows: number },
     sweeps: [] as Sweep[], partial: plan ? fresh(plan.n) : null, latest: plan ? fresh(plan.n) : null, step: -1, raf: 0,
   });
   const [info, setInfo] = useState({ sweeps: 0, last: 0 }); // sweeps done, the last one's seconds
   const [hover, setHover] = useState<{ x: number; y: number; text: string; left: boolean } | null>(null);
   // what the sweep and the drawing read (the sweep runs on across renders)
-  const current = () => ({ scale: p.scale, prefs: p.prefs, setScale: p.setScale, range: p.range, plan, onStep: p.onStep });
+  const current = () => ({ scale: p.scale, prefs: p.prefs, setScale: p.setScale, range: p.range, plan, onStep: p.onStep, onFail: p.onFail });
   const opts = useRef(current());
   useEffect(() => {
     opts.current = current();
@@ -55,11 +57,13 @@ export function SpectralMap(p: {
         slot: p.slot,
         row: (r) => {
           const s = st.current;
-          s.inGen = r.gen === s.gen ? s.inGen + 1 : 0;
+          if (r.gen !== s.gen) s.inGen = [0, 0];
+          s.inGen[r.path & 1]++; // rows of the run per antenna (an 8812CU sends both)
           s.gen = r.gen;
           s.rowCentre = r.f0 + r.df * (r.bins / 2 - 0.5);
-          const col = s.collect, pl = opts.current.plan;
-          if (!col || !pl) return;
+          const col = s.collect, pl = opts.current.plan, into = s.partial; // (Clear replaces the partial row: the step goes on into the new one)
+          if (!col || !pl || !into) return;
+          col.rows++;
           const src = opts.current.prefs.wfMode === 'avg' ? r.avg : r.max;
           for (let i = 0; i < r.bins; i++) {
             const f = r.f0 + i * r.df;
@@ -67,8 +71,8 @@ export function SpectralMap(p: {
             const k = Math.floor((f - pl.lo) / 1e6);
             if (k < 0 || k >= pl.n) continue;
             const v = src[i];
-            if (!(col.into[k] >= v)) col.into[k] = v;
-            if (s.latest) s.latest[k] = col.into[k];
+            if (!(into[k] >= v)) into[k] = v;
+            if (s.latest) s.latest[k] = into[k];
           }
         },
       }),
@@ -95,26 +99,25 @@ export function SpectralMap(p: {
             await p.hub.request('set', { slot: p.slot, freq: c, rate_sel: plan.rate_sel, wide: true });
             failed = 0;
           } catch {
-            if (++failed >= 5) return; // closed or gone: the shell sees the adapter stop
+            if (++failed >= 5) return opts.current.onFail('the adapter did not take the sweep’s steps'); // the shell stops the map
             await sleep(500);
             continue;
           }
           const w0 = performance.now();
-          // the new run, past its first rows (or the radio was on this step already)
+          // the new run on this step, past its first rows (or the radio was on this step already)
           while (!me.stop && performance.now() - w0 < 3000) {
-            const settled = s.gen !== gen0 && s.inGen >= SETTLE;
-            const already = performance.now() - w0 > 400 && Math.abs(s.rowCentre - c) < 2.5e6 && s.inGen >= SETTLE;
+            const here = Math.abs(s.rowCentre - c) < 2.5e6, rows = Math.max(...s.inGen);
+            const settled = here && s.gen !== gen0 && rows >= SETTLE;
+            const already = here && performance.now() - w0 > 400 && rows >= SETTLE;
             if (settled || already) break;
             await sleep(10);
           }
           if (me.stop) break;
-          const into = s.partial;
-          if (!into) break;
-          const col = { c, into };
+          const col = { c, rows: 0 };
           s.collect = col;
           await sleep(p.dwell);
           if (s.collect === col) s.collect = null;
-          heard++;
+          if (col.rows) heard++;
           requestDraw();
         }
         if (me.stop) break;
@@ -169,7 +172,7 @@ export function SpectralMap(p: {
       const w = Math.max(1, Math.round(c.clientWidth * d)), h = Math.max(1, Math.round(c.clientHeight * d));
       if (c.width !== w || c.height !== h) [c.width, c.height] = [w, h];
     }
-    const L = AXIS_W * d, w = sp.width - L;
+    const L = Math.round(AXIS_W * d), w = Math.floor(sp.width - L); // whole pixels: the image rows below index by w
     if (w <= 0) return;
     // the MHz bin under each pixel column (-1: a gap between channel groups, or a range edge)
     const groups = RANGES[range].groups;
@@ -327,8 +330,8 @@ export function SpectralMap(p: {
       const sw = row > 0 ? s.sweeps[row - 1] : null;
       what = row === 0 ? `this sweep: ${db(s.partial?.[k])}` : sw ? `${db(sw.data[k])} · ${Math.round((Date.now() - sw.t) / 1000)} s ago` : '';
     } else {
-      let peak = NaN;
-      for (const sw of s.sweeps) if (!(peak >= sw.data[k])) peak = sw.data[k];
+      let peak = NaN; // as the grey line: the sweep in progress counts too
+      for (const arr of [s.partial, ...s.sweeps.map((x) => x.data)]) if (arr && !(peak >= arr[k])) peak = arr[k];
       what = `newest ${db(s.latest?.[k])} · peak ${db(peak)}`;
     }
     return { ch, text: `ch ${ch} · ${mhz(f, 0)} MHz${what ? ` · ${what}` : ''} · click: open this channel` };
@@ -361,6 +364,7 @@ export function SpectralMap(p: {
             <span className="long">: bursts between visits are missed</span>
           </span>
         )}
+        {p.note && <span className="warn-note">{p.note}</span>}
         <span className="spacer" />
         <span className="state">
           <span className={active ? 'dot ok' : p.opening ? 'dot warn' : 'dot'} />

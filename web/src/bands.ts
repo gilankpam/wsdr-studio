@@ -86,7 +86,11 @@ export function sweepPlan(range: Range, dev: Device | undefined, gappedOk: boole
   for (const [lo, hi] of stretches) {
     const n = Math.max(1, Math.ceil((hi - lo - fs) / step) + 1);
     for (let i = 0; i < n; i++) {
-      const c = snap(n === 1 ? (lo + hi) / 2 : lo + fs / 2 + (i * (hi - lo - fs)) / (n - 1));
+      const x = n === 1 ? (lo + hi) / 2 : lo + fs / 2 + (i * (hi - lo - fs)) / (n - 1);
+      let c = snap(x);
+      // the outer steps snap towards the stretch's ends, so its edge channels are heard whole
+      if (i === 0 && n > 1 && c > x && snap(c - 5e6) < c) c = snap(c - 5e6);
+      if (i === n - 1 && n > 1 && c < x && snap(c + 5e6) > c) c = snap(c + 5e6);
       if (!centres.includes(c)) centres.push(c);
     }
   }

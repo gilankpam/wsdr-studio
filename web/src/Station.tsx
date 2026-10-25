@@ -103,6 +103,9 @@ export function Station(p: {
   const [gainUi, setGainUi] = useState<number | null>(null);
   const [msps, setMsps] = useState(0);
   const [dropWarn, setDropWarn] = useState<string[]>([]);
+  // stream faults in the last minute (the core restarts the stream by itself; a fault long gone is
+  // not shown, its count since Start would stay forever)
+  const [recentFaults, setRecentFaults] = useState(0);
   const [hadPicture, setHadPicture] = useState(false);
   // unplugged while running: the adapter (pid, picker key) to start again when it is back
   // gone: a scan has shown it missing; before: the adapters there were when it was lost; tries: restarts
@@ -157,6 +160,8 @@ export function Station(p: {
     let wasOpen = false;
     let opened: { pid: number; key: string } | null = null; // the adapter of the current run
     let lastRx: RxSettings | null = null;
+    let lastRestarts = 0;
+    let faultTimes: number[] = [];
     let lastPaths = 'a';
     let lastFft = 0;
     d.onRetune = (f) => {
@@ -255,6 +260,13 @@ export function Station(p: {
             break;
           case 'status': {
             setStatus(e);
+            {
+              const n = e.rx?.restarts ?? 0, now = Date.now();
+              for (let k = lastRestarts; k < n; k++) faultTimes.push(now); // a new open starts again at 0
+              lastRestarts = n;
+              faultTimes = faultTimes.filter((t) => now - t < 60000);
+              setRecentFaults(faultTimes.length);
+            }
             if (e.record?.active && !live.current.recording) {
               window.clearTimeout(gainTimer.current); // controls lock now
               setSaved((s) => (s && s.file === e.record.file ? s : null)); // a new recording (from any window) replaces the old note
@@ -578,7 +590,7 @@ export function Station(p: {
   const st = status?.rx;
   const warn: string[] = [...dropWarn];
   if (open && st) {
-    if (st.restarts > 0) warn.push(`${st.restarts} stream restart${st.restarts > 1 ? 's' : ''}`);
+    if (recentFaults > 0) warn.push(`stream restarted after a fault (${recentFaults}× in the last minute)`);
     if (status!.dsp_load > 0.8) warn.push(`DSP ${(status!.dsp_load * 100).toFixed(0)} %`);
     if (rxState === 'streaming' && st.fs && !st.gapped && msps > 0 && msps < 0.95 * (st.fs / 1e6)) warn.push(`input ${msps.toFixed(2)} MS/s`);
   }

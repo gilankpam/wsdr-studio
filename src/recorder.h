@@ -22,7 +22,7 @@ struct RecordInfo {
   bool active = false;
   std::string path;     // data file
   uint64_t samples = 0, dropped = 0;
-  double fs = 0, centre_hz = 0;
+  double fs = 0;
   std::string error;    // write failure, if any
 };
 
@@ -32,11 +32,10 @@ public:
   ~Recorder() { stop(); }
   // Returns the data file path. Throws on I/O errors.
   std::string start(double fs, double centre_hz, const std::string &hw, int path, double gain_db, bool agc);
-  void stop();
+  bool stop(); // true if a recording was running (and is now finalised)
   // From the DSP thread: interleaved int16 I,Q.
   void push(const int16_t *iq, size_t samples);
   RecordInfo info() const;
-  bool active() const { return _active; }
   bool failed() const { return _failed; }
 
 private:

@@ -44,6 +44,8 @@ export function decodeRow(buf: ArrayBuffer): Row | null {
   };
 }
 
+const TOKEN_KEY = 'wsdr-studio.token';
+
 type Pending = { resolve: (r: any) => void; reject: (e: Error) => void };
 
 export class Client {
@@ -54,6 +56,8 @@ export class Client {
   onEvent: (e: any) => void = () => {};
   onRow: (r: Row) => void = () => {};
   onConnection: (up: boolean) => void = () => {};
+  onGiveUp: (why: string) => void = () => {};
+  private failures = 0; // connection attempts that never opened, in a row
 
   private url: string;
 
@@ -61,24 +65,57 @@ export class Client {
     this.url = url;
   }
 
-  // The session cookie (set when the launch link was opened) authenticates the socket; ?t= in the
-  // page URL is accepted too (scripts, development).
-  static fromLocation(): Client {
-    const t = new URLSearchParams(location.search).get('t');
+  // The session token: the launch link carries a single-use key in the URL fragment (#k=, never sent to
+  // the server by the browser); it is exchanged once for the token, which this tab keeps in
+  // sessionStorage (per origin, so per port, and per tab: reloads keep working). ?t= also works.
+  static async fromLocation(): Promise<Client> {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return new Client(`${proto}//${location.host}/ws${t ? `?t=${encodeURIComponent(t)}` : ''}`);
+    const url = (t: string) => `${proto}//${location.host}/ws?t=${encodeURIComponent(t)}`;
+    const key = new URLSearchParams(location.hash.slice(1)).get('k');
+    if (key) {
+      history.replaceState(null, '', location.pathname); // the key is spent either way
+      const r = await fetch(`/api/session?k=${encodeURIComponent(key)}`, { cache: 'no-store' });
+      if (r.ok) {
+        const { token } = await r.json();
+        try {
+          sessionStorage.setItem(TOKEN_KEY, token);
+        } catch {
+          /* storage blocked: this page still works until reload */
+        }
+        return new Client(url(token));
+      }
+    }
+    let t = new URLSearchParams(location.search).get('t');
+    try {
+      t = t ?? sessionStorage.getItem(TOKEN_KEY);
+    } catch {
+      /* storage blocked */
+    }
+    if (!t) throw new Error('This window has no session. Start wsdr-studio again to open a new one.');
+    return new Client(url(t));
   }
 
   connect() {
     this.closed = false;
     const ws = new WebSocket(this.url);
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => this.onConnection(true);
+    let opened = false;
+    ws.onopen = () => {
+      opened = true;
+      this.failures = 0;
+      this.onConnection(true);
+    };
     ws.onclose = () => {
       this.onConnection(false);
       for (const p of this.pending.values()) p.reject(new Error('connection closed'));
       this.pending.clear();
-      if (!this.closed) setTimeout(() => this.connect(), 1000);
+      if (this.closed) return;
+      if (!opened && ++this.failures >= 3) {
+        // refused (stale session after a restart) or nobody listening (the app has exited)
+        this.onGiveUp('Lost the connection to wsdr-studio (it was closed or restarted). Start wsdr-studio again.');
+        return;
+      }
+      setTimeout(() => this.connect(), 1000);
     };
     ws.onmessage = (m) => {
       if (m.data instanceof ArrayBuffer) {

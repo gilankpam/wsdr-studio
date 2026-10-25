@@ -153,7 +153,19 @@ std::string running_instance_url() {
   const json j = json::parse(local_get(static_cast<uint16_t>(port), "/api/launch-key?t=" + token), nullptr, false);
   if (!j.is_object() || !j.contains("key") || !j["key"].is_string())
     return {};
-  return "http://127.0.0.1:" + std::to_string(port) + "/?k=" + j["key"].get<std::string>();
+  return "http://127.0.0.1:" + std::to_string(port) + "/#k=" + j["key"].get<std::string>();
+}
+
+// Remove the instance file only if it still describes us (another instance may have replaced it).
+void remove_instance_if_ours(const std::string &token) {
+  std::ifstream f(instance_file());
+  long pid = 0;
+  unsigned port = 0;
+  std::string t;
+  if (f >> pid >> port >> t && t == token) {
+    std::error_code ec;
+    fs::remove(instance_file(), ec);
+  }
 }
 
 // Open the UI: Chrome/Chromium as an app window, else the default browser. The child gets a clean
@@ -268,6 +280,7 @@ int run_headless(const Args &a) {
   uint64_t f0 = 0;
   while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < a.headless) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
+    eng.poll();
     json s = eng.status();
     s["row_frames_per_s"] = frames - f0;
     f0 = frames;
@@ -280,7 +293,9 @@ int run_headless(const Args &a) {
               static_cast<unsigned long long>(eng.rows_emitted()), static_cast<unsigned long long>(frames.load()),
               bytes / a.headless, static_cast<unsigned long long>(eng.ring_dropped()), eng.dsp_load(),
               s["state"].dump().c_str());
-  return s["state"] == "lost" || s["state"] == "error" ? 1 : 0;
+  // A lost or failed adapter is closed by the engine, which leaves its reason in "error".
+  const bool failed = s["state"] != "open" || !s.value("error", std::string()).empty();
+  return failed ? 1 : 0;
 }
 
 } // namespace
@@ -297,9 +312,11 @@ int main(int argc, char **argv) {
 
   // Single instance: if one is already serving, open a new window on it.
   if (const std::string url = running_instance_url(); !url.empty()) {
-    std::fprintf(stderr, "wsdr-studiod: already running; opening a window on it\n");
+    std::fprintf(stderr, "wsdr-studiod: already running\n");
     if (a.browser)
       open_browser(url);
+    else
+      std::fprintf(stderr, "wsdr-studiod: open %s (single use, 60 s)\n", url.c_str());
     return 0;
   }
 
@@ -328,6 +345,13 @@ int main(int argc, char **argv) {
       srv->send_text(w, json{{"type", "error"}, {"kind", "bad_request"}, {"msg", "not a JSON object"}}.dump());
       return;
     }
+    if (cmd.contains("cmd") && cmd["cmd"].is_string() && cmd["cmd"].get<std::string>().rfind('_', 0) == 0) {
+      json e = {{"type", "error"}, {"kind", "bad_request"}, {"msg", "unknown command"}};
+      if (cmd.contains("id"))
+        e["id"] = cmd["id"];
+      srv->send_text(w, e.dump());
+      return; // internal commands (_lost, _rec_stop) are the engine's own
+    }
     eng->submit(std::move(cmd), [&srv, w](const json &r) { srv->send_text(w, r.dump()); });
   };
   std::string err;
@@ -353,9 +377,9 @@ int main(int argc, char **argv) {
   if (a.pid)
     eng->submit(open_cmd(a), nullptr);
   if (a.browser)
-    open_browser("http://127.0.0.1:" + std::to_string(srv->port()) + "/?k=" + srv->new_launch_key());
+    open_browser("http://127.0.0.1:" + std::to_string(srv->port()) + "/#k=" + srv->new_launch_key());
   else
-    std::fprintf(stderr, "wsdr-studiod: open http://127.0.0.1:%u/?k=%s (single use, 60 s)\n", srv->port(),
+    std::fprintf(stderr, "wsdr-studiod: open http://127.0.0.1:%u/#k=%s (single use, 60 s)\n", srv->port(),
                  srv->new_launch_key().c_str());
 
   net::signal_set sig(io, SIGINT, SIGTERM);
@@ -387,8 +411,7 @@ int main(int argc, char **argv) {
   on_tick();
   io.run();
 
-  std::error_code ec;
-  fs::remove(instance_file(), ec);
+  remove_instance_if_ours(so.token);
   eng.reset(); // closes the adapter before the server goes away
   srv.reset();
   return 0;

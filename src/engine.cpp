@@ -30,6 +30,13 @@ struct CmdError : std::runtime_error {
 };
 
 // Validated field access for client JSON: wrong types and out-of-range values are request errors.
+int integer(const json &c, const char *k, int lo, int hi) {
+  const json &v = c.at(k);
+  if (!v.is_number_integer() || v.get<int64_t>() < lo || v.get<int64_t>() > hi)
+    throw CmdError("bad_request", std::string(k) + " must be an integer in [" + std::to_string(lo) + ", " +
+                                      std::to_string(hi) + "]");
+  return static_cast<int>(v.get<int64_t>());
+}
 double num(const json &c, const char *k, double lo, double hi) {
   const json &v = c.at(k);
   if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() < lo || v.get<double>() > hi)
@@ -85,8 +92,10 @@ void Engine::poll() {
   const auto r = rx();
   if (!r)
     return;
-  const wsdr::RxState s = r->status().state;
-  if ((s == wsdr::RxState::Lost || s == wsdr::RxState::Error) && !_lost_requested.exchange(true))
+  // Fatal only when the worker has ended (a retune error is retried and passes).
+  const wsdr::RxStatus st = r->status();
+  if (!st.running && (st.state == wsdr::RxState::Lost || st.state == wsdr::RxState::Error) &&
+      !_lost_requested.exchange(true))
     submit({{"cmd", "_lost"}}, nullptr);
 }
 
@@ -132,8 +141,7 @@ json Engine::run(const json &c) {
     return {{"devices", d["devices"]}};
   }
   if (cmd == "open") {
-    const double pid = num(c, "pid", 0, 65535);
-    open_adapter(static_cast<uint16_t>(pid), c);
+    open_adapter(static_cast<uint16_t>(integer(c, "pid", 0, 65535)), c);
     return {};
   }
   if (cmd == "close") {
@@ -149,7 +157,7 @@ json Engine::run(const json &c) {
     if (c.contains("freq"))
       s.freq = num(c, "freq", 2.3e9, 6.2e9);
     if (c.contains("rate_sel"))
-      s.rate_sel = static_cast<int>(num(c, "rate_sel", 1, 5));
+      s.rate_sel = integer(c, "rate_sel", 1, 5);
     if (c.contains("wide"))
       s.wide = flag(c, "wide");
     if (c.contains("agc"))
@@ -167,8 +175,11 @@ json Engine::run(const json &c) {
       n = _dsp_cfg;
     }
     // validate everything first, then apply
-    if (c.contains("fft"))
-      n.fft = static_cast<int>(num(c, "fft", 1024, 16384));
+    if (c.contains("fft")) {
+      n.fft = integer(c, "fft", 1024, 16384);
+      if (n.fft & (n.fft - 1))
+        throw CmdError("bad_request", "fft must be a power of two");
+    }
     if (c.contains("rows_per_s"))
       n.rows_per_s = num(c, "rows_per_s", 1, 30);
     if (c.contains("paths")) {
@@ -199,6 +210,8 @@ json Engine::run(const json &c) {
     const auto r = rx();
     if (!r || !r->is_open())
       throw CmdError("closed", "no adapter open");
+    if (_rec.info().active)
+      throw CmdError("busy", "already recording");
     const wsdr::RxStatus st = r->status();
     if (st.state != wsdr::RxState::Streaming)
       throw CmdError("not_streaming", "not streaming");
@@ -216,6 +229,8 @@ json Engine::run(const json &c) {
     _recording = false;
     const std::string file = _rec.start(st.fs, st.centre_hz, adapter, path, s.gain_db, s.agc);
     _rec_path = path;
+    _rec_gen = st.gen; // only banks of this run (centre/fs as in st) go into the file
+    _rec_cfg = st.cfg;
     _rec_stop_requested = false;
     _recording = true;
     _cb.event(status());
@@ -225,9 +240,13 @@ json Engine::run(const json &c) {
     stop_recording(c.value("reason", ""));
     return {};
   }
-  if (cmd == "_lost") { // from poll()
+  if (cmd == "_lost") { // from poll(); re-check: the user may have pressed Stop meanwhile
     const auto r = rx();
     const wsdr::RxStatus st = r ? r->status() : wsdr::RxStatus{};
+    _lost_requested = false;
+    if (!r || st.running || (st.state != wsdr::RxState::Lost && st.state != wsdr::RxState::Error))
+      return {};
+    _lost_requested = true;
     const bool lost = st.state == wsdr::RxState::Lost;
     stop_recording(lost ? "adapter disconnected" : "stream failed");
     close_adapter();
@@ -247,9 +266,8 @@ json Engine::run(const json &c) {
 
 void Engine::stop_recording(const std::string &why) {
   _recording = false;
-  if (!_rec.info().active && !_rec.failed())
-    return;
-  _rec.stop();
+  if (!_rec.stop())
+    return; // nothing was recording
   const RecordInfo ri = _rec.info();
   json e = {{"type", "recorded"}, {"file", ri.path}, {"samples", ri.samples}, {"dropped", ri.dropped},
             {"seconds", ri.fs > 0 ? ri.samples / ri.fs : 0.0}, {"bytes", ri.samples * 4}};
@@ -267,7 +285,14 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   close_adapter();
   wsdr::RxSettings s;
   s.freq = c.contains("freq") ? num(c, "freq", 2.3e9, 6.2e9) : 5180e6;
-  s.rate_sel = c.contains("rate_sel") ? static_cast<int>(num(c, "rate_sel", 1, 5)) : (pid == wsdr::kPid8812cu ? 4 : 2);
+  s.rate_sel = c.contains("rate_sel") ? integer(c, "rate_sel", 1, 5) : (pid == wsdr::kPid8812cu ? 4 : 2);
+  const int bus = c.contains("bus") ? integer(c, "bus", 0, 255) : -1;
+  std::string port;
+  if (c.contains("port")) {
+    if (!c["port"].is_string() || c["port"].get<std::string>().size() > 32)
+      throw CmdError("bad_request", "port must be a string like \"1\" or \"1.2\"");
+    port = c["port"].get<std::string>();
+  }
   s.gain_db = c.contains("gain_db") ? num(c, "gain_db", 0, 100) : 30.0;
   s.agc = c.contains("agc") ? flag(c, "agc") : false;
   s.wide = c.contains("wide") ? flag(c, "wide") : true;
@@ -279,7 +304,7 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   _cb.event(status());
   auto r = std::make_shared<wsdr::Receiver>(std::make_shared<Logger>());
   try {
-    r->open(pid, s);
+    r->open(pid, s, bus, port);
   } catch (const wsdr::OpenError &e) {
     std::lock_guard<std::mutex> l(_sm);
     _state = "closed";
@@ -408,6 +433,7 @@ void Engine::dsp_loop() {
     if (!_rec_stop_requested.exchange(true))
       submit({{"cmd", "_rec_stop"}, {"reason", reason}}, nullptr);
   };
+  uint64_t rec_next = 0; // next bank seq expected in the file (0 = not started)
   while (!_dsp_quit) {
     Bank *b = _ring.pop(std::chrono::milliseconds(100));
     const auto t0 = clk::now();
@@ -419,18 +445,23 @@ void Engine::dsp_loop() {
           _dsp_dirty = false;
         }
       }
-      if (b->meta.gen != gen) {
-        // Every file has one centre, one rate and no gaps: a retune or a restart ends it.
-        if (_recording && gen != ~0u)
-          request_stop(b->meta.cfg != cfg ? "settings changed" : "the stream restarted after a fault");
-        gen = b->meta.gen;
-        cfg = b->meta.cfg;
-      }
+      gen = b->meta.gen;
+      cfg = b->meta.cfg;
       sp.process(b->data.data(), b->bytes, b->meta, [&](const Row &r) {
         _rows++;
         _cb.row(encode_row(r, now_s()));
       });
-      if (_recording) {
+      // Every file has one centre, one rate and no gaps. Banks of the run the recording belongs to go
+      // in; older ones (still queued from before a retune) are skipped; a newer run, or a gap in the
+      // bank sequence (the DSP fell behind and the ring dropped banks), ends the file.
+      if (!_recording) {
+        rec_next = 0;
+      } else if (gen > _rec_gen) {
+        request_stop(cfg != _rec_cfg ? "settings changed" : "the stream restarted after a fault");
+      } else if (gen == _rec_gen && rec_next && b->meta.seq != rec_next) {
+        request_stop("samples were lost (the computer could not keep up); the file ends before the gap");
+      } else if (gen == _rec_gen) {
+        rec_next = b->meta.seq + 1;
         const int path = b->meta.paths > 1 ? _rec_path.load() : 0;
         const size_t ns = b->bytes / 8;
         Spectrum::unpack(b->data.data(), ns, path, tmp.data());

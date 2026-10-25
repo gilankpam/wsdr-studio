@@ -83,6 +83,7 @@ private:
 
   std::atomic<bool> _recording{false}; // DSP thread feeds the recorder while set
   std::atomic<int> _rec_path{0};       // path fixed when the recording started
+  std::atomic<uint32_t> _rec_gen{0}, _rec_cfg{0}; // the stream run the file belongs to
   std::atomic<bool> _rec_stop_requested{false}, _lost_requested{false};
 
   mutable std::mutex _sm; // status strings

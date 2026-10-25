@@ -148,9 +148,12 @@ static void test_level_vs_fft() {
     CHECK(!rows.empty());
     if (rows.empty())
       continue;
-    float pk = -200;
+    float pk = -200, pkmax = -200;
     for (float v : rows.back().avg)
       pk = std::max(pk, v);
+    for (float v : rows.back().max)
+      pkmax = std::max(pkmax, v);
+    CHECK(std::abs(pkmax - pk) < 0.3f); // a steady tone: peak trace = average trace (same units)
     const float hi = n > 4096 ? -6.02f + 1.8f : -6.02f + 0.3f;
     if (pk < -6.32f || pk > hi)
       std::printf("  fft %d peak %.2f dBFS\n", n, pk);

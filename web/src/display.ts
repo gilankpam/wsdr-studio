@@ -8,13 +8,13 @@ import type { Row } from './protocol';
 
 export type DisplayOpts = {
   dbMin: number; dbMax: number; // spectrum scale (dBFS)
-  wfLift: number;               // the waterfall's colour scale starts this many dB above dbMin
+  wfFloor: number;              // the waterfall's colour scale starts here (dBFS; kept in dbMin..dbMax-10)
   wfMode: 'max' | 'avg';
   wfPath: number;
   smooth: number;               // 0 = off .. 0.9 = heavy averaging of the average trace across rows
-  rowsPerS: number;             // for the waterfall's time ticks
   marker: number | null;        // requested frequency (Hz), drawn when it is not the band centre
   overlay: string | null;       // message over the plot (stopped, starting, ...)
+  dim: boolean;                 // stopped: the last picture stays, faded
 };
 
 const AVG = ['#4fc3f7', '#ff8a65']; // average trace, path A / B
@@ -34,6 +34,9 @@ export class Display {
   private smoothed: (Float32Array | null)[] = [null, null];
   private wfSpan = '';
   private lastRowAt = 0;
+  private lastRowT = 0;       // server time of the previous row (s)
+  private rowsPerS = 25;      // measured row rate, for the waterfall's time ticks
+  private gutterRate = 25;    // the rate the ticks were last drawn with
   private seen = 0;
   private dirty = true;
   private raf = 0;
@@ -41,7 +44,7 @@ export class Display {
   private dpr = 1;
   private off: (() => void)[] = [];
   opts: DisplayOpts = {
-    dbMin: -110, dbMax: -20, wfLift: 0, wfMode: 'max', wfPath: 0, smooth: 0.7, rowsPerS: 25, marker: null, overlay: null,
+    dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, overlay: null, dim: false,
   };
   onRetune: (freq: number) => void = () => {};
 
@@ -65,7 +68,7 @@ export class Display {
       });
       on(c, 'dblclick', (e) => {
         const f = this.freqAt(e.offsetX);
-        if (f !== null) this.onRetune(Math.round(f / 1e5) * 1e5);
+        if (f !== null) this.onRetune(f); // the app snaps it to the radio's tuning steps
       });
     }
     let wasStale = false;
@@ -124,26 +127,28 @@ export class Display {
     this.dirty = true;
   }
 
-  // New stream (Start): forget traces and wipe the waterfall.
-  clear() {
+  // New stream (Start): forget the traces. The waterfall keeps its history below a separator.
+  newStream() {
     this.seen = 0;
+    this.lastRowT = 0;
     this.last = [null, null];
     this.hold = [null, null];
     this.smoothed = [null, null];
-    this.wfSpan = '';
-    this.wfCtx.fillStyle = '#000';
-    this.wfCtx.fillRect(0, 0, this.wf.width, this.wf.height);
-    this.drawGutter();
+    if (this.wfSpan) this.wfSpan += ' (before Stop)';
     this.dirty = true;
   }
 
-  // Stream ended (Stop): keep the picture, dimmed, for a last look.
+  // Stream ended (Stop): keep the picture, faded, for a last look.
   freeze() {
     this.seen = 0; // not "stale": stopped on purpose
     this.wfCtx.fillStyle = 'rgba(0,0,0,0.45)';
     const L = this.plotLeft();
     this.wfCtx.fillRect(L, 0, this.wf.width - L, this.wf.height);
     this.dirty = true;
+  }
+
+  hasPicture() {
+    return !!(this.last[0] ?? this.last[1]);
   }
 
   // Drop one path's traces (e.g. after switching A+B -> A).
@@ -155,7 +160,7 @@ export class Display {
   }
 
   setOpts(o: Partial<DisplayOpts>) {
-    const rescale = o.dbMin !== undefined || o.dbMax !== undefined || o.wfLift !== undefined || o.rowsPerS !== undefined;
+    const rescale = o.dbMin !== undefined || o.dbMax !== undefined || o.wfFloor !== undefined;
     this.opts = { ...this.opts, ...o };
     if (rescale) this.drawGutter();
     this.dirty = true;
@@ -166,8 +171,8 @@ export class Display {
   }
 
   // Scales fitted to the signal: the spectrum from a little under the average noise floor to a little
-  // over the strongest peak; the waterfall lifted to the floor of the data it actually draws.
-  suggestRange(): { dbMin: number; dbMax: number; wfLift: number } | null {
+  // over the strongest peak; the waterfall floor just above that noise floor.
+  suggestRange(): { dbMin: number; dbMax: number; wfFloor: number } | null {
     const r = this.last[0] ?? this.last[1];
     if (!r) return null;
     const pct = (a: Float32Array, q: number) => Float32Array.from(a).sort()[Math.floor(a.length * q)];
@@ -176,14 +181,21 @@ export class Display {
     for (const h of this.hold) if (h) for (let i = 0; i < h.length; i++) peak = Math.max(peak, h[i]);
     const dbMin = Math.floor((floor - 8) / 5) * 5;
     const dbMax = Math.max(dbMin + 30, Math.ceil((peak + 5) / 5) * 5);
-    const wfFloor = pct(this.opts.wfMode === 'max' ? r.max : r.avg, 0.2);
-    const wfLift = Math.max(0, Math.min(dbMax - dbMin - 10, Math.round(wfFloor - 2 - dbMin)));
-    return { dbMin, dbMax, wfLift };
+    // Waterfall floor just above the average noise floor: rows with no frame at all (common: 40 ms
+    // windows without traffic) then show dark blue, not black; frames stand out above them.
+    const wfFloor = Math.min(dbMax - 10, Math.max(dbMin, Math.round(floor + (this.opts.wfMode === 'max' ? 3 : 1))));
+    return { dbMin, dbMax, wfFloor };
   }
 
   push(r: Row) {
     this.seen++;
     this.lastRowAt = performance.now();
+    if (this.lastRowT && r.t > this.lastRowT && r.path === 0) {
+      const rate = 1 / (r.t - this.lastRowT);
+      this.rowsPerS = 0.9 * this.rowsPerS + 0.1 * rate;
+      if (Math.abs(this.rowsPerS - this.gutterRate) / this.gutterRate > 0.05) this.drawGutter();
+    }
+    if (r.path === 0 || !this.last[0]) this.lastRowT = r.t;
     const prev = this.last[r.path];
     if (!prev || prev.bins !== r.bins || prev.f0 !== r.f0 || prev.df !== r.df) {
       this.hold[r.path] = null;
@@ -220,8 +232,12 @@ export class Display {
     return s.f0 + (s.f1 - s.f0) * (x / w);
   }
 
+  private wfLo() {
+    return Math.min(this.opts.dbMax - 10, Math.max(this.opts.dbMin, this.opts.wfFloor));
+  }
+
   private colour(db: number) {
-    const lo = this.opts.dbMin + this.opts.wfLift, hi = this.opts.dbMax;
+    const lo = this.wfLo(), hi = this.opts.dbMax;
     return TURBO[Math.max(0, Math.min(255, Math.round(((db - lo) * 255) / Math.max(1, hi - lo))))];
   }
 
@@ -230,7 +246,7 @@ export class Display {
     const c = this.wfCtx, d = this.dpr, H = this.wf.height, L = this.plotLeft();
     c.fillStyle = '#0b0e13';
     c.fillRect(0, 0, L, H);
-    const lo = this.opts.dbMin + this.opts.wfLift, hi = this.opts.dbMax;
+    const lo = this.wfLo(), hi = this.opts.dbMax;
     const barW = Math.round(6 * d), barH = Math.min(H - 20 * d, 160 * d), y0 = 6 * d;
     if (barH > 10) {
       const img = c.createImageData(barW, Math.round(barH));
@@ -248,8 +264,9 @@ export class Display {
     c.fillText(`${Math.round(hi)}`, 13 * d, y0);
     c.textBaseline = 'bottom';
     c.fillText(`${Math.round(lo)}`, 13 * d, y0 + barH);
-    // time ticks: one row = one device pixel
-    const pxPerS = this.opts.rowsPerS;
+    // time ticks: one row = one device pixel, at the measured row rate
+    const pxPerS = this.rowsPerS;
+    this.gutterRate = pxPerS;
     const step = pxPerS * 10 > 60 * d ? 10 : 30;
     c.textAlign = 'right';
     c.textBaseline = 'middle';
@@ -268,17 +285,19 @@ export class Display {
     c.drawImage(this.wf, L, 0, w, H - 1, L, 1, w, H - 1);
     const span = `${((r.f0 + r.df * (r.bins / 2 - 0.5)) / 1e6).toFixed(1)} MHz · ${((r.df * r.bins) / 1e6).toFixed(1)} MHz span`;
     if (this.wfSpan && span !== this.wfSpan) {
-      // a retune or span change: a separator with the new setting, so old rows are not misread
+      // A retune, span change or new run: a separator. The label describes the OLD rows below it (the
+      // new rows above match the axis), so nothing below the line is misread.
       const d = this.dpr;
+      const label = `▼ before: ${this.wfSpan}`;
       c.fillStyle = '#ffffff';
       c.fillRect(L, 0, w, Math.max(1, Math.round(d)));
       c.font = `${11 * d}px system-ui, sans-serif`;
       c.textAlign = 'left';
       c.textBaseline = 'top';
-      c.fillStyle = 'rgba(0,0,0,0.6)';
-      c.fillRect(L + 4 * d, 2 * d, c.measureText(span).width + 8 * d, 15 * d);
+      c.fillStyle = 'rgba(0,0,0,0.65)';
+      c.fillRect(L + 4 * d, 2 * d, c.measureText(label).width + 8 * d, 15 * d);
       c.fillStyle = '#ffffff';
-      c.fillText(span, L + 8 * d, 4 * d);
+      c.fillText(label, L + 8 * d, 4 * d);
       this.wfSpan = span;
       return;
     }
@@ -369,8 +388,19 @@ export class Display {
         c.lineTo(x, ph);
         c.stroke();
         c.setLineDash([]);
+        const label = `requested ${(m / 1e6).toFixed(1)}`;
+        c.font = `${11 * d}px system-ui, sans-serif`;
+        const lw = c.measureText(label).width;
+        const lx = Math.min(W - lw - 4 * d, Math.max(L + 2 * d, x - lw / 2));
+        c.fillStyle = 'rgba(11,14,19,0.85)';
+        c.fillRect(lx - 3 * d, ph - 18 * d, lw + 6 * d, 15 * d);
+        c.fillStyle = '#ffd54f';
+        c.textAlign = 'left';
+        c.textBaseline = 'top';
+        c.fillText(label, lx, ph - 16 * d);
+        c.textBaseline = 'middle';
       }
-      c.globalAlpha = stale ? 0.3 : 1;
+      c.globalAlpha = stale || this.opts.dim ? 0.35 : 1;
       for (let p = 0; p < 2; p++) {
         const r = this.last[p];
         if (!r) continue;
@@ -413,7 +443,7 @@ export class Display {
         c.fillText(label, lx + 18 * d, T + 19 * d);
       }
       // hover readout
-      if (this.hover !== null && !stale) {
+      if (this.hover !== null && !stale && !this.opts.dim) {
         const f = this.freqAt(this.hover);
         const r = this.last[0] ?? this.last[1];
         if (f !== null && r) {
@@ -427,7 +457,8 @@ export class Display {
           c.globalAlpha = 1;
           const b = Math.max(0, Math.min(r.bins - 1, Math.round((f - r.f0) / r.df)));
           const sm = this.smoothed[r.path] ?? r.avg;
-          const txt = `${(f / 1e6).toFixed(3)} MHz   ${sm[b].toFixed(1)} dBFS`;
+          const pk = this.hold[r.path] ?? r.max;
+          const txt = `${(f / 1e6).toFixed(3)} MHz · avg ${sm[b].toFixed(1)} · peak ${pk[b].toFixed(1)} dBFS`;
           c.font = `${12 * d}px system-ui, sans-serif`;
           const tw = c.measureText(txt).width + 12 * d;
           const tx = Math.min(W - tw, x + 8 * d);

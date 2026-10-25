@@ -45,7 +45,6 @@ public:
   Spectrum();
   ~Spectrum();
   void configure(const DspConfig &c);
-  DspConfig config() const { return _c; }
   // One raw LA bank. Resets state when meta.gen changes (new tuning / rate).
   void process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &meta,
                const std::function<void(const Row &)> &emit);

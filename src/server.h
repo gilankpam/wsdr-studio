@@ -2,12 +2,13 @@
 // HTTP + WebSocket server (Boost.Beast, one I/O thread) for the web UI.
 //
 // Security model: local only. Binds 127.0.0.1. Every request must carry Host 127.0.0.1:PORT or
-// localhost:PORT (DNS rebinding). The WebSocket /ws needs the session token, either as the cookie
-// wsdr_PORT (browsers) or as ?t=TOKEN (scripts), plus, when a browser sends one, an Origin from the same
-// two hosts (cross-site WebSocket). The session token never appears on a command line: the browser is
-// started with a single-use launch key (/?k=KEY, valid 60 s), exchanged for the HttpOnly SameSite=Strict
-// cookie on first load. /api/launch-key?t=TOKEN mints a new key (used by a second launch). Static files
-// come from one directory, canonicalised; nothing else on disk is reachable.
+// localhost:PORT (DNS rebinding). The WebSocket /ws needs the session token as ?t=TOKEN plus, when a
+// browser sends one, an Origin from the same two hosts (cross-site WebSocket). The token never appears
+// on a command line: the browser is started on /#k=KEY (a single-use launch key, valid 60 s, in the URL
+// fragment, which browsers never send to a server); the page exchanges it once via /api/session?k=KEY
+// and keeps the token in sessionStorage, which is per origin (port included) and per tab. No cookies:
+// those would be shared with every other service on 127.0.0.1. /api/launch-key?t=TOKEN mints a new
+// key (a second launch opens a window that way). Static files come from one directory, canonicalised.
 //
 // Thread safety: broadcast_* and send_text may be called from any thread; they post to the I/O thread.
 // Each client has a bounded queue of binary frames: a slow client loses rows, nobody blocks.
@@ -63,6 +64,7 @@ public:
   const ServerOptions &options() const { return _o; }
   const Handlers &handlers() const { return _h; }
   void add(const ClientPtr &c);
+  void accept_next();
   void remove(const ClientPtr &c);
   void count_drop() { _dropped++; }
 

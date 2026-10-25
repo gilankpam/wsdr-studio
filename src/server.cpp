@@ -74,13 +74,7 @@ std::string query(beast::string_view target) {
   return q == beast::string_view::npos ? std::string() : std::string(target.substr(q + 1));
 }
 
-std::string cookie_name(const ServerOptions &o) { return "wsdr_" + std::to_string(o.port); }
-
 bool token_ok(const ServerOptions &o, beast::string_view target) { return same(param(query(target), "t", '&'), o.token); }
-
-bool cookie_ok(const ServerOptions &o, beast::string_view cookies) {
-  return same(param(cookies, cookie_name(o), ';'), o.token);
-}
 
 const char *mime(const std::string &ext) {
   if (ext == ".html") return "text/html; charset=utf-8";
@@ -241,8 +235,7 @@ private:
     const std::string target(_req.target());
     const std::string path = target.substr(0, target.find('?'));
     if (websocket::is_upgrade(_req)) {
-      const bool authed = token_ok(o, _req.target()) || cookie_ok(o, _req[http::field::cookie]);
-      if (path != "/ws" || !authed || !origin_ok(o, _req[http::field::origin]))
+      if (path != "/ws" || !token_ok(o, _req.target()) || !origin_ok(o, _req[http::field::origin]))
         return text(http::status::forbidden, "forbidden\n");
       std::make_shared<WsClient>(_stream.release_socket(), _srv)->accept(std::move(_req));
       return;
@@ -256,17 +249,10 @@ private:
         return text(http::status::forbidden, "forbidden\n");
       return text(http::status::ok, "{\"key\":\"" + _srv.new_launch_key() + "\"}\n", "application/json");
     }
-    if (path == "/" && !param(query(_req.target()), "k", '&').empty()) {
-      // Launch key -> session cookie, then a clean URL (the key is single-use).
+    if (path == "/api/session") { // single-use launch key -> session token
       if (!_srv.consume_launch_key(param(query(_req.target()), "k", '&')))
-        return text(http::status::forbidden, "This link has expired. Start wsdr-studio again.\n");
-      http::response<http::string_body> res{http::status::found, _req.version()};
-      res.set(http::field::location, "/");
-      res.set(http::field::set_cookie, cookie_name(o) + "=" + o.token + "; HttpOnly; SameSite=Strict; Path=/");
-      res.set(http::field::cache_control, "no-store");
-      res.keep_alive(_req.keep_alive());
-      res.prepare_payload();
-      return reply(std::move(res));
+        return text(http::status::forbidden, "{\"error\":\"expired\"}\n", "application/json");
+      return text(http::status::ok, "{\"token\":\"" + o.token + "\"}\n", "application/json");
     }
     if (path.find("..") != std::string::npos || path.find('%') != std::string::npos ||
         path.find('\\') != std::string::npos || path.empty() || path[0] != '/')
@@ -325,18 +311,18 @@ bool Server::listen(std::string &err) {
     _impl->acc.close(ignored);
     return false;
   }
-  auto accept = std::make_shared<std::function<void()>>();
-  *accept = [this, accept] {
-    // One I/O thread runs everything, so no strands are needed.
-    _impl->acc.async_accept([this, accept](beast::error_code ec, tcp::socket s) {
-      if (!ec)
-        std::make_shared<HttpSession>(std::move(s), *this, _o.webroot)->run();
-      if (_impl->acc.is_open())
-        (*accept)();
-    });
-  };
-  (*accept)();
+  accept_next();
   return true;
+}
+
+void Server::accept_next() {
+  // One I/O thread runs everything, so no strands are needed.
+  _impl->acc.async_accept([this](beast::error_code ec, tcp::socket s) {
+    if (!ec)
+      std::make_shared<HttpSession>(std::move(s), *this, _o.webroot)->run();
+    if (_impl->acc.is_open())
+      accept_next();
+  });
 }
 
 std::string Server::new_launch_key() {

@@ -23,7 +23,8 @@ struct Spectrum::Path {
   fftwf_complex *in = nullptr, *out = nullptr;
   fftwf_plan plan = nullptr;
   int fill = 0;                   // samples in `in`
-  std::vector<float> sum, max;    // linear power per FFT bin (natural order)
+  std::vector<float> sum, max;    // linear power per DISPLAY bin (fftshifted, <= kMaxBins)
+  std::vector<float> one;         // this FFT's power per display bin
   int count = 0;                  // FFTs in the current row
   double row_samples = 0;         // samples consumed in the current row
 
@@ -32,8 +33,10 @@ struct Spectrum::Path {
     in = fftwf_alloc_complex(n);
     out = fftwf_alloc_complex(n);
     plan = fftwf_plan_dft_1d(n, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
-    sum.assign(n, 0.f);
-    max.assign(n, 0.f);
+    const int bins = std::min(n, kMaxBins);
+    sum.assign(bins, 0.f);
+    max.assign(bins, 0.f);
+    one.assign(bins, 0.f);
   }
   ~Path() {
     std::lock_guard<std::mutex> l(g_fftw_plan_mutex);
@@ -134,20 +137,25 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       p.fill = 0;
       fftwf_execute(p.plan);
       _ffts++;
-      float *sum = p.sum.data(), *mx = p.max.data();
+      // Power per display bin for this FFT (fftshift; above kMaxBins, `dec` FFT bins summed), then the
+      // row's average (sum) and peak (max) both from those same values: one unit for both traces.
+      const int bins = std::min(n, kMaxBins);
+      const int dec = n / bins;
+      float *one = p.one.data(), *sum = p.sum.data(), *mx = p.max.data();
+      std::fill(p.one.begin(), p.one.end(), 0.f);
       for (int k = 0; k < n; k++) {
         const float re = p.out[k][0], im = p.out[k][1];
-        const float pw = re * re + im * im;
-        sum[k] += pw;
-        if (pw > mx[k])
-          mx[k] = pw;
+        one[((k + n / 2) % n) / dec] += re * re + im * im;
+      }
+      for (int b = 0; b < bins; b++) {
+        sum[b] += one[b];
+        if (one[b] > mx[b])
+          mx[b] = one[b];
       }
       p.count++;
       if (p.row_samples < row_len)
         continue;
-      // Emit: fftshift, reduce to <= kMaxBins (summed power for avg, max for peaks), dB once per bin.
-      const int bins = std::min(n, kMaxBins);
-      const int dec = n / bins;
+      // Emit: dB once per display bin.
       Row r;
       r.path = p.index;
       r.seq = _seq++;
@@ -157,14 +165,8 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       r.max.resize(bins);
       const float inv = _norm / static_cast<float>(p.count);
       for (int b = 0; b < bins; b++) {
-        float s = 0, m = 0;
-        for (int d = 0; d < dec; d++) {
-          const int k = (b * dec + d + n / 2) % n; // fftshift
-          s += sum[k];
-          m = std::max(m, mx[k]);
-        }
-        r.avg[b] = 10.f * std::log10(s * inv + 1e-20f);
-        r.max[b] = 10.f * std::log10(m * _norm + 1e-20f);
+        r.avg[b] = 10.f * std::log10(sum[b] * inv + 1e-20f);
+        r.max[b] = 10.f * std::log10(mx[b] * _norm + 1e-20f);
       }
       emit(r);
       std::fill(p.sum.begin(), p.sum.end(), 0.f);

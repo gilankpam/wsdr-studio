@@ -29,8 +29,14 @@ std::string Recorder::start(double fs, double centre_hz, const std::string &hw, 
   std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
   std::strftime(dt, sizeof dt, "%Y-%m-%dT%H:%M:%SZ", &tm);
   std::snprintf(name, sizeof name, "wsdr-%s-%.3fMHz-%gMsps%s", stamp, centre_hz / 1e6, fs / 1e6, path ? "-B" : "");
-  const std::string base = (std::filesystem::path(_dir) / name).string();
-  const int fd = ::open((base + ".sigmf-data").c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+  std::string base;
+  int fd = -1;
+  for (int n = 1; fd < 0 && n < 100; n++) { // two recordings in the same second get -2, -3, ...
+    base = (std::filesystem::path(_dir) / name).string() + (n > 1 ? "-" + std::to_string(n) : "");
+    fd = ::open((base + ".sigmf-data").c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    if (fd < 0 && errno != EEXIST)
+      break;
+  }
   if (fd < 0)
     throw std::runtime_error(std::string("recording: ") + std::strerror(errno));
   {
@@ -58,9 +64,9 @@ std::string Recorder::start(double fs, double centre_hz, const std::string &hw, 
   return base + ".sigmf-data";
 }
 
-void Recorder::stop() {
+bool Recorder::stop() {
   if (!_t.joinable())
-    return;
+    return false;
   _active = false; // push() stops queueing; the writer drains what is queued
   {
     std::lock_guard<std::mutex> l(_m);
@@ -70,10 +76,12 @@ void Recorder::stop() {
   _t.join();
   {
     std::lock_guard<std::mutex> l(_m);
-    ::close(_fd);
+    if (::close(_fd) != 0 && _error.empty())
+      _error = std::string("closing the file failed: ") + std::strerror(errno);
     _fd = -1;
   }
   write_meta(true);
+  return true;
 }
 
 void Recorder::push(const int16_t *iq, size_t samples) {
@@ -153,8 +161,20 @@ void Recorder::write_meta(bool final) {
       {"global", g},
       {"captures", {{{"core:sample_start", 0}, {"core:frequency", _centre}, {"core:datetime", _datetime}}}},
       {"annotations", nlohmann::json::array()}};
-  std::ofstream f(_base + ".sigmf-meta");
-  f << meta.dump(2) << "\n";
+  // temp file + rename: a full disk leaves the previous meta file intact rather than a truncated one
+  const std::string tmp = _base + ".sigmf-meta.tmp";
+  {
+    std::ofstream f(tmp, std::ios::trunc);
+    f << meta.dump(2) << "\n";
+    f.flush();
+    if (!f) {
+      std::filesystem::remove(tmp);
+      if (_error.empty())
+        _error = "writing the metadata file failed";
+      return;
+    }
+  }
+  std::filesystem::rename(tmp, _base + ".sigmf-meta");
 }
 
 RecordInfo Recorder::info() const {
@@ -165,7 +185,6 @@ RecordInfo Recorder::info() const {
   i.samples = _samples;
   i.dropped = _dropped;
   i.fs = _fs;
-  i.centre_hz = _centre;
   i.error = _error;
   return i;
 }

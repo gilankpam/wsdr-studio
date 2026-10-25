@@ -48,15 +48,12 @@ check((await upgrade(`/ws?t=${token}`, { Origin: 'https://evil.example' })) === 
 check((await upgrade(`/ws?t=${token}`, { Origin: `http://127.0.0.1:${port}` })) === 101, 'WebSocket with token + own Origin -> 101');
 check((await get('/', {}, 'HEAD')).status === 405, 'HEAD -> 405');
 check((await get('/api/launch-key')).status === 403, 'launch key without token -> 403');
-check((await get('/?k=0123456789abcdef0123456789abcdef')).status === 403, 'unknown launch key -> 403');
+check((await get('/api/session?k=0123456789abcdef0123456789abcdef')).status === 403, 'unknown launch key -> 403');
 const key = JSON.parse((await get(`/api/launch-key?t=${token}`)).body).key;
-const first = await get(`/?k=${key}`);
-const cookie = (first.headers['set-cookie'] ?? [''])[0].split(';')[0];
-check(first.status === 302 && cookie === `wsdr_${port}=${token}`, 'launch key -> 302 + session cookie');
-check(/HttpOnly/.test(first.headers['set-cookie']?.[0] ?? '') && /SameSite=Strict/.test(first.headers['set-cookie']?.[0] ?? ''), 'cookie is HttpOnly + SameSite=Strict');
-check((await get(`/?k=${key}`)).status === 403, 'launch key is single-use');
-check((await upgrade('/ws', { Cookie: cookie, Origin: `http://127.0.0.1:${port}` })) === 101, 'WebSocket with the session cookie -> 101');
-check((await upgrade('/ws', { Cookie: `wsdr_${port}=nope`, Origin: `http://127.0.0.1:${port}` })) === 403, 'WebSocket with a wrong cookie -> 403');
+const sess = await get(`/api/session?k=${key}`);
+check(sess.status === 200 && JSON.parse(sess.body).token === token, 'launch key -> session token');
+check(!sess.headers['set-cookie'], 'no cookie is set (cookies would be shared across 127.0.0.1 ports)');
+check((await get(`/api/session?k=${key}`)).status === 403, 'launch key is single-use');
 
 // --- protocol
 const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?t=${token}`);
@@ -95,6 +92,8 @@ const badt = await req('set', { freq: '5180' });
 check(badt.type === 'error' && badt.kind === 'bad_request', 'frequency as a string -> error');
 const badp = await req('dsp', { fft: 1024, paths: 'b' });
 check(badp.type === 'error', 'path B on a one-path adapter -> error');
+const internal = await req('_lost');
+check(internal.type === 'error', 'clients cannot send internal commands');
 const s1 = await new Promise((r) => setTimeout(r, 300)).then(() => events.filter((e) => e.type === 'settings').at(-1));
 check(s1.dsp.fft === settings0.dsp.fft, 'a rejected dsp request changes nothing');
 
@@ -115,6 +114,8 @@ await req('dsp', { fft: settings0.dsp.fft });
 if (process.argv.includes('--record')) {
   const st = await req('record', { action: 'start' });
   check(st.type === 'ack' && st.file, `record start -> ${st.file}`);
+  const again = await req('record', { action: 'start' });
+  check(again.type === 'error' && again.kind === 'busy', 'a second record start is refused');
   await sleep(2000);
   const sp = await req('record', { action: 'stop' });
   check(sp.type === 'ack', 'record stop');

@@ -139,7 +139,15 @@ std::string running_instance_url() {
   long pid = 0;
   unsigned port = 0;
   std::string token;
-  if (!(f >> pid >> port >> token) || port == 0 || port > 65535)
+  if (!(f >> pid >> port >> token) || port == 0 || port > 65535 || pid <= 0)
+    return {};
+  // Only talk to it if that pid is alive, ours, and wsdr-studiod: a crashed instance's port may now
+  // belong to someone else's process, which must not be handed the token.
+  struct stat ps {};
+  const std::string proc = "/proc/" + std::to_string(pid);
+  std::ifstream comm(proc + "/comm");
+  std::string name;
+  if (::stat(proc.c_str(), &ps) != 0 || ps.st_uid != getuid() || !std::getline(comm, name) || name != "wsdr-studiod")
     return {};
   const json j = json::parse(local_get(static_cast<uint16_t>(port), "/api/launch-key?t=" + token), nullptr, false);
   if (!j.is_object() || !j.contains("key") || !j["key"].is_string())
@@ -209,7 +217,7 @@ void remove_old_launch_pages() {
       fs::remove(e.path(), ec);
 }
 
-// Where `name` resolves on PATH ("" if not found), symlinks followed.
+// Where `name` is found on PATH ("" if not found), as listed (symlinks not followed).
 std::string which(const std::string &name) {
   const char *p = std::getenv("PATH");
   std::string path = p ? p : "/usr/bin:/bin";
@@ -220,16 +228,31 @@ std::string which(const std::string &name) {
     const fs::path f = fs::path(path.substr(i, e - i)) / name;
     std::error_code ec;
     if (access(f.c_str(), X_OK) == 0)
-      return fs::canonical(f, ec).string();
+      return f.string();
     i = e + 1;
   }
   return {};
 }
 
+// A Snap browser: listed under /snap/, a link to /usr/bin/snap, or a wrapper script that runs a snap
+// (Ubuntu's /usr/bin/chromium-browser).
+bool is_snap(const std::string &exe) {
+  std::error_code ec;
+  if (exe.rfind("/snap/", 0) == 0 || fs::canonical(exe, ec).string() == "/usr/bin/snap")
+    return true;
+  std::ifstream f(exe, std::ios::binary);
+  char head[4] = {};
+  f.read(head, 4);
+  if (f.gcount() == 4 && std::memcmp(head, "\x7f" "ELF", 4) == 0)
+    return false;
+  std::string text((std::istreambuf_iterator<char>(f)), {});
+  return text.size() < 65536 && text.find("snap") != std::string::npos && exe.find("chromium") != std::string::npos;
+}
+
 // Open the UI: Chrome/Chromium as an app window, else the default browser. The child gets a clean
 // environment for libraries (an AppImage's LD_LIBRARY_PATH must not leak into the browser).
 // Normally the browser gets the private launch page (no key on its command line). Sandboxed
-// browsers (Snap, Flatpak) cannot read that page, and xdg-open may hand off to one, so those get
+// browsers (Snap) cannot read that page, and xdg-open may hand off to one, so those get
 // the single-use URL itself (valid 30 s).
 void open_browser(const std::string &secret_url) {
   const std::string page = launch_page(secret_url);
@@ -254,8 +277,7 @@ void open_browser(const std::string &secret_url) {
     const std::string exe = which(c[0]);
     if (exe.empty())
       continue;
-    const bool sandboxed = c[0] == "xdg-open" || exe.find("/snap/") != std::string::npos ||
-                           exe.find("flatpak") != std::string::npos;
+    const bool sandboxed = c[0] == "xdg-open" || is_snap(exe);
     std::string &target = c[1]; // the URL argument: "--app=URL" (Chrome/Chromium) or URL (xdg-open)
     if (sandboxed || page.empty())
       target = c[0] == "xdg-open" ? secret_url : "--app=" + secret_url;
@@ -276,7 +298,8 @@ void open_browser(const std::string &secret_url) {
     posix_spawnattr_destroy(&at);
     if (rc == 0) {
       std::thread([pid] { waitpid(pid, nullptr, 0); }).detach();
-      std::fprintf(stderr, "wsdr-studiod: opened the UI with %s\n", argv[0]);
+      std::fprintf(stderr, "wsdr-studiod: opened the UI with %s; if no window appears, open %s (single use, 30 s)\n",
+                   argv[0], secret_url.c_str());
       return;
     }
   }
@@ -407,7 +430,8 @@ int main(int argc, char **argv) {
   h.on_open = [&](const Server::ClientPtr &c) {
     seen_client = true;
     std::weak_ptr<WsClient> w = c;
-    srv->send_text(w, json{{"type", "hello"}, {"version", 1}, {"app", "wsdr-studio"}}.dump());
+    const char *home = std::getenv("HOME");
+    srv->send_text(w, json{{"type", "hello"}, {"version", 1}, {"app", "wsdr-studio"}, {"home", home ? home : ""}}.dump());
     eng->submit({{"cmd", "scan"}}, nullptr); // broadcasts "devices"; USB enumeration stays off the I/O thread
     srv->send_text(w, eng->caps().dump());
     srv->send_text(w, eng->settings().dump());
@@ -457,12 +481,13 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "wsdr-studiod: open http://127.0.0.1:%u/#k=%s (single use, 30 s)\n", srv->port(),
                  srv->new_launch_key().c_str());
 
-  net::signal_set sig(io, SIGINT, SIGTERM);
+  net::signal_set sig(io, SIGINT, SIGTERM, SIGHUP); // SIGHUP: the terminal closed; finalise cleanly
   sig.async_wait([&](const boost::system::error_code &, int) { io.stop(); });
 
   // 2 Hz status to all clients; exit after 30 s without clients once a browser has connected.
   net::steady_timer tick(io);
   auto idle_since = std::chrono::steady_clock::now();
+  const auto launched = idle_since;
   std::function<void()> on_tick = [&] {
     tick.expires_after(std::chrono::milliseconds(500));
     tick.async_wait([&](const boost::system::error_code &ec) {
@@ -477,6 +502,10 @@ int main(int argc, char **argv) {
       } else if (a.browser && seen_client && !eng->status()["record"]["active"].get<bool>() &&
                  std::chrono::steady_clock::now() - idle_since > std::chrono::seconds(30)) {
         std::fprintf(stderr, "wsdr-studiod: no clients for 30 s, exiting\n");
+        io.stop();
+        return;
+      } else if (a.browser && !seen_client && std::chrono::steady_clock::now() - launched > std::chrono::minutes(2)) {
+        std::fprintf(stderr, "wsdr-studiod: no browser connected within 2 minutes (did the window open?), exiting\n");
         io.stop();
         return;
       }

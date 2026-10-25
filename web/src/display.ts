@@ -44,6 +44,9 @@ export class Display {
   private dirty = true;
   private raf = 0;
   private hover: number | null = null; // CSS x
+  private hoverWfY = -1;               // CSS y over the waterfall (-1: over the spectrum)
+  private sepRows = -1;                // rows since the newest separator (older rows are another span)
+  onHint: (text: string) => void = () => {};
   private dpr = 1;
   private off: (() => void)[] = [];
   opts: DisplayOpts = {
@@ -64,6 +67,7 @@ export class Display {
     for (const c of [sp, wf]) {
       on(c, 'mousemove', (e) => {
         this.hover = e.offsetX;
+        this.hoverWfY = c === wf ? e.offsetY : -1;
         this.dirty = true;
       });
       on(c, 'mouseleave', () => {
@@ -76,6 +80,7 @@ export class Display {
       const f = this.freqAt(e.offsetX);
       if (f !== null) this.onRetune(f); // the app snaps it to the radio's tuning steps
     });
+    on(wf, 'dblclick', () => this.onHint('Double-click the spectrum (top plot) to tune.'));
     let wasStale = false;
     const loop = () => {
       const stale = this.isStale();
@@ -182,8 +187,9 @@ export class Display {
     if (!r) return null;
     const pct = (a: Float32Array, q: number) => Float32Array.from(a).sort()[Math.floor(a.length * q)];
     const floor = pct(r.avg, 0.1);
+    // the newest rows' peaks (the peak-hold may still be decaying from an earlier setting)
     let peak = -200;
-    for (const h of this.hold) if (h) for (let i = 0; i < h.length; i++) peak = Math.max(peak, h[i]);
+    for (const l of this.last) if (l) for (let i = 0; i < l.max.length; i++) peak = Math.max(peak, l.max[i]);
     const dbMin = Math.floor((floor - 8) / 5) * 5;
     const dbMax = Math.max(dbMin + 30, Math.ceil((peak + 5) / 5) * 5);
     // Waterfall floor just above the average noise floor: rows with no frame at all (common: 40 ms
@@ -292,6 +298,7 @@ export class Display {
     const w = W - L;
     if (w <= 0) return;
     c.drawImage(this.wf, L, 0, w, H - 1, L, 1, w, H - 1);
+    if (this.sepRows >= 0) this.sepRows++;
     if (this.stopRows >= 0) {
       this.stopRows++;
       if (this.stopRows <= H) this.drawGutter();
@@ -304,6 +311,7 @@ export class Display {
       const label = this.stopPending ? `▼ before Stop: ${this.wfSpan}` : `▼ before: ${this.wfSpan}`;
       if (this.stopPending) this.stopRows = 0;
       this.stopPending = false;
+      this.sepRows = 0;
       c.fillStyle = '#ffffff';
       c.fillRect(L, 0, w, Math.max(1, Math.round(d)));
       c.font = `${11 * d}px system-ui, sans-serif`;
@@ -473,7 +481,10 @@ export class Display {
           const b = Math.max(0, Math.min(r.bins - 1, Math.round((f - r.f0) / r.df)));
           const sm = this.smoothed[r.path] ?? r.avg;
           const pk = this.hold[r.path] ?? r.max;
-          const txt = `${(f / 1e6).toFixed(3)} MHz · avg ${sm[b].toFixed(1)} · peak ${pk[b].toFixed(1)} dBFS`;
+          const older = this.hoverWfY >= 0 && this.sepRows >= 0 && this.hoverWfY * d > this.sepRows;
+          const txt = older
+            ? 'older rows: another frequency/span (see the label at the line)'
+            : `${(f / 1e6).toFixed(3)} MHz · avg ${sm[b].toFixed(1)} · peak ${pk[b].toFixed(1)} dBFS`;
           c.font = `${12 * d}px system-ui, sans-serif`;
           const tw = c.measureText(txt).width + 12 * d;
           const tx = Math.min(W - tw, x + 8 * d);

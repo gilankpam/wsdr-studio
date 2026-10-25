@@ -18,12 +18,15 @@ const fmtDur = (s: number) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : s >= 6
 // The radio tunes in 5 MHz steps (2.4 GHz: 2407 + 5n MHz; 5 GHz: 5000 + 5n MHz).
 // The radio tunes 2.4 GHz channels 1-13 (2412-2472, 5 MHz apart) and 14 (2484), and 5 GHz in 5 MHz
 // steps from 5080 to 6165 MHz. The nearest tunable centre:
-const snap = (f: number) => {
+// (At 40 MHz width the centres run 2422-2462 and 5090-6155 MHz.)
+const snap = (f: number, width = 20) => {
+  const w40 = width === 40;
   if (f < 3.7e9) {
-    if (f > 2478e6) return 2484e6;
-    return 2412e6 + Math.min(12, Math.max(0, Math.round((f - 2412e6) / 5e6))) * 5e6;
+    if (!w40 && f > 2478e6) return 2484e6;
+    const lo = w40 ? 2422e6 : 2412e6, n = w40 ? 8 : 12;
+    return lo + Math.min(n, Math.max(0, Math.round((f - lo) / 5e6))) * 5e6;
   }
-  return Math.min(6165e6, Math.max(5080e6, Math.round(f / 5e6) * 5e6));
+  return Math.min(w40 ? 6155e6 : 6165e6, Math.max(w40 ? 5090e6 : 5080e6, Math.round(f / 5e6) * 5e6));
 };
 const UDEV_CMD = 'sudo cp tools/99-wsdr.rules /etc/udev/rules.d/ && sudo udevadm control --reload';
 const LOCKED = 'End the recording to change tuning or gain';
@@ -82,7 +85,9 @@ export default function App() {
   const rate = useRef({ banks: 0, t: 0 });
   const drops = useRef({ ring: 0, client: 0, at: 0 });
   const bannerId = useRef(1);
-  const live = useRef({ open: false, recording: false, opening: false, freq: 5180e6 }); // for callbacks that outlive a render
+  const live = useRef({ open: false, recording: false, opening: false, freq: 5180e6, width: 20 }); // for callbacks that outlive a render
+  const autoOn = useRef(loadPrefs().scale === null); // Auto scale on (mirrors prefs.scale === null; storage may be blocked)
+  const home = useRef('');
   const setRef = useRef<(a: Partial<RxSettings>) => void>(() => {});
   const popRef = useRef<HTMLDivElement>(null);
 
@@ -142,20 +147,22 @@ export default function App() {
     d.resize();
     // Auto scale: refit once enough rows of a new setting have arrived (Start, retune, gain change),
     // unless the user fixed the scale. autoAt = the row count to refit at (-1: nothing pending).
-    let autoAt = loadPrefs().scale === null ? 25 : -1;
+    let autoAt = autoOn.current ? 25 : -1;
     const autoAgain = () => {
-      if (loadPrefs().scale === null) autoAt = d.rowsSeen() + 25;
+      if (autoOn.current) autoAt = d.rowsSeen() + 25;
     };
+    d.onHint = (t) => addBanner(t);
     let wasOpen = false;
     let lastRx: RxSettings | null = null;
     let lastPaths = 'a';
+    let lastFft = 0;
     let client: Client | null = null;
     d.onRetune = (f) => {
       if (live.current.recording || live.current.opening) {
         if (live.current.recording) addBanner(LOCKED);
         return;
       }
-      const t = snap(f);
+      const t = snap(f, live.current.width);
       if (Math.abs(t - live.current.freq) < 1) addBanner(`Already at the nearest step (${mhz(t, 0)} MHz). The radio tunes in 5 MHz steps.`);
       else {
         addBanner(`${live.current.open ? 'Tuned to' : 'Next Start:'} ${mhz(t, 0)} MHz (nearest 5 MHz step)`);
@@ -187,7 +194,7 @@ export default function App() {
             case 'caps':
               if (e.open && !wasOpen) {
                 d.newStream();
-                autoAt = loadPrefs().scale === null ? 25 : -1;
+                autoAt = autoOn.current ? 25 : -1;
               } else if (!e.open && wasOpen) {
                 setHadPicture(d.hasPicture());
                 d.freeze();
@@ -209,6 +216,8 @@ export default function App() {
                 setGainUi(null);
               }
               if (e.dsp) {
+                if (e.dsp.fft !== lastFft) autoAgain();
+                lastFft = e.dsp.fft;
                 if (e.dsp.paths !== lastPaths) {
                   if (!e.dsp.paths.includes('a')) d.dropPath(0);
                   if (!e.dsp.paths.includes('b')) d.dropPath(1);
@@ -240,6 +249,9 @@ export default function App() {
               dr.client = cl;
               break;
             }
+            case 'hello':
+              home.current = e.home ?? '';
+              break;
             case 'recorded':
               setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error });
               break;
@@ -284,13 +296,20 @@ export default function App() {
   const rxState = open ? status?.rx?.state ?? 'starting' : 'stopped';
   const recording = status?.record.active ?? false;
   const locked = (open && recording) || opening; // recording: a change would end the file; opening: it would be lost
-  live.current.opening = opening;
-  live.current.freq = (rx ?? draft).freq;
+
   const fsNow = 80e6 / (1 << cur.rate_sel);
   const width = cur.rate_sel === 1 && (caps.wide_capable ?? true) ? 40 : 20;
   const chan = channelAt(cur.freq, width);
   const rates = caps.rates ?? (sel && sel.max_msps < 40 ? RATES.filter((r) => r.fs <= 5e6) : RATES);
   const tuned = status?.rx?.centre ?? 0;
+  useEffect(() => {
+    live.current.opening = opening;
+    live.current.freq = cur.freq;
+    live.current.width = width;
+  }, [opening, cur.freq, width]);
+  useEffect(() => {
+    autoOn.current = prefs.scale === null;
+  }, [prefs.scale]);
   const offGrid = open && tuned > 0 && Math.abs(tuned - cur.freq) > 1e3;
 
   const overlay = fatal
@@ -304,7 +323,7 @@ export default function App() {
           : !devices.length
             ? 'No adapter found. Plug in an RTL8812BU or RTL8812CU, then press ⟳ Rescan.'
             : hadPicture
-              ? 'Stopped. Double-click to pick a frequency; ▶ Start to resume.'
+              ? 'Stopped. Double-click the spectrum to pick a frequency; ▶ Start to resume.'
               : 'Stopped. Press ▶ Start to begin.';
   useEffect(
     () =>
@@ -325,7 +344,9 @@ export default function App() {
     }
     req('set', args).catch(() => {});
   };
-  setRef.current = set;
+  useEffect(() => {
+    setRef.current = set;
+  });
   const doStart = async () => {
     if (!sel) return;
     setStarting(true);
@@ -350,7 +371,7 @@ export default function App() {
       if (freqText.trim()) addBanner('Frequency must be between 2300 and 6200 MHz', 'error');
       return;
     }
-    const t = snap(f); // the radio tunes in 5 MHz steps
+    const t = snap(f, width); // the radio tunes in 5 MHz steps
     if (t !== f) addBanner(`Tuned to ${mhz(t, 3)} MHz (the radio tunes in 5 MHz steps)`);
     setFreqText(mhz(t, 3));
     if (t === lastSentFreq.current || Math.abs(t - cur.freq) < 1) return; // Enter then blur: send once
@@ -380,7 +401,12 @@ export default function App() {
     if (status!.dsp_load > 0.8) warn.push(`DSP ${(status!.dsp_load * 100).toFixed(0)} %`);
     if (rxState === 'streaming' && st.fs && msps > 0 && msps < 0.95 * (st.fs / 1e6)) warn.push(`input ${msps.toFixed(2)} MS/s`);
   }
-  const dotClass = fatal || !connected ? 'dot bad' : opening ? 'dot warn' : !open ? 'dot' : rxState === 'streaming' ? 'dot ok' : 'dot bad';
+  const dotClass =
+    fatal || !connected ? 'dot bad'
+    : opening || rxState === 'starting' ? 'dot warn' // a routine restart (retune, span) is not a fault
+    : !open ? 'dot'
+    : rxState === 'streaming' ? 'dot ok'
+    : 'dot bad';
   const stateText = fatal ? 'disconnected' : !connected ? 'connecting…' : opening ? 'starting…' : open ? rxState : 'stopped';
   const recRate = fsNow * 4; // bytes/s (int16 I + Q)
   const diskFree = status?.disk_free ?? 0;
@@ -404,14 +430,18 @@ export default function App() {
               {opening ? 'Starting…' : '▶ Start'}
             </button>
           ) : (
-            <button className="stop" onClick={() => req('close').catch(() => {})} title={recording ? 'Stop the radio (also ends the recording)' : 'Stop the radio'}>
-              ■ Stop
+            <button
+              className={recording ? '' : 'stop'}
+              onClick={() => req('close').catch(() => {})}
+              title={recording ? 'Stop the radio (also ends and saves the recording)' : 'Stop the radio'}
+            >
+              {recording ? '■ Stop radio' : '■ Stop'}
             </button>
           )}
           {open ? (
             <button
               className={recording ? 'rec on' : 'rec'}
-              disabled={rxState !== 'streaming'}
+              disabled={!recording && rxState !== 'streaming'}
               onClick={toggleRecord}
               title={`Record raw IQ (SigMF), about ${bytes(recRate)}/s at this span${diskFree ? `; ${bytes(diskFree)} free (~${fmtDur(diskFree / recRate)})` : ''}`}
             >
@@ -516,7 +546,7 @@ export default function App() {
             className={prefs.scale === null ? 'on' : ''}
             title={
               prefs.scale === null
-                ? 'Auto scale is on: refits after each Start. Type a value to fix the scale.'
+                ? 'Auto scale is on: refits after Start, retune, span, gain or FFT change. Type a value to fix the scale.'
                 : 'Fit the scale to the signal now and keep refitting after each Start'
             }
             onClick={() => {
@@ -558,7 +588,7 @@ export default function App() {
                     value={prefs.wfMode}
                     onChange={(e) => {
                       updatePrefs({ wfMode: e.target.value as 'max' | 'avg' });
-                      if (prefs.scale === null) {
+                      if (autoOn.current) {
                         // the floor depends on the mode: refit right away when Auto is on
                         display.current?.setOpts({ wfMode: e.target.value as 'max' | 'avg' });
                         const s = display.current?.suggestRange();
@@ -596,10 +626,12 @@ export default function App() {
       )}
       {!recording && saved && (
         <div className={saved.error ? 'strip error' : 'strip'}>
-          <span>
+          <span className="one-line" title={saved.file}>
             {saved.error ? `Recording stopped: ${saved.error}. ` : saved.reason ? `Recording stopped (${saved.reason}). ` : ''}
-            Saved to <code title={saved.file}>{saved.file.slice(0, saved.file.lastIndexOf('/') + 1).replace(/^\/home\/[^/]+\//, '~/')}</code>{' '}
-            <code title={saved.file}>{baseName(saved.file)}</code> · {bytes(saved.bytes)} · {saved.seconds.toFixed(1)} s
+            Saved <code>{baseName(saved.file)}</code> · {bytes(saved.bytes)} · {saved.seconds.toFixed(1)} s · in{' '}
+            {home.current && saved.file.startsWith(home.current + '/')
+              ? '~' + saved.file.slice(home.current.length, saved.file.lastIndexOf('/') + 1)
+              : saved.file.slice(0, saved.file.lastIndexOf('/') + 1)}
           </span>
           <button onClick={() => copy(saved.file)}>Copy path</button>
           <button className="x" onClick={() => setSaved(null)} title="Dismiss">
@@ -633,7 +665,7 @@ export default function App() {
         ))}
 
       <main className="plots">
-        <div className="toasts">
+        <div className={overlay ? 'toasts low' : 'toasts'}>
           {banners
             .filter((b) => b.kind === 'info')
             .map((b) => (

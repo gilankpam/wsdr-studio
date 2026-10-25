@@ -77,6 +77,11 @@ bool Recorder::stop() {
   _t.join();
   {
     std::lock_guard<std::mutex> l(_m);
+    const uint64_t whole = _bytes.load() / 4 * 4; // a short write must not leave half a sample
+    if (whole != _bytes.load() && ::ftruncate(_fd, static_cast<off_t>(whole)) == 0)
+      _bytes = whole;
+    if (::fsync(_fd) != 0 && _error.empty())
+      _error = std::string("flushing the file failed: ") + std::strerror(errno);
     if (::close(_fd) != 0 && _error.empty())
       _error = std::string("closing the file failed: ") + std::strerror(errno);
     _fd = -1;
@@ -90,7 +95,9 @@ void Recorder::push(const int16_t *iq, size_t samples) {
     return;
   {
     std::lock_guard<std::mutex> l(_m);
-    if (_quit || _queued + 2 * samples > kMaxQueued) {
+    if (_quit)
+      return; // stopping: these were never part of the file
+    if (_queued + 2 * samples > kMaxQueued) {
       _dropped += samples;
       return;
     }
@@ -155,7 +162,7 @@ void Recorder::write_meta(bool final) {
                                                (_agc ? std::string("AGC") : std::to_string(_gain) + " dB (fixed)")}};
   if (final) {
     g["wsdr:samples"] = _bytes.load() / 4;
-    if (_dropped)
+    if (_dropped && _error.empty())
       g["wsdr:note"] = "ended early: the disk could not keep up (the file has no gap)";
     if (!_error.empty())
       g["wsdr:error"] = _error;
@@ -172,8 +179,8 @@ void Recorder::write_meta(bool final) {
   {
     std::ofstream f(tmp, std::ios::trunc);
     f << meta.dump(2) << "\n";
-    f.flush();
-    if (!f)
+    f.close();
+    if (f.fail())
       err = "writing the metadata file failed";
   }
   std::error_code ec;

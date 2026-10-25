@@ -14,7 +14,7 @@ export type DspSettings = { fft: number; rows_per_s: number; paths: 'a' | 'b' | 
 export type Status = {
   state: string; adapter: string; error: string; t: number; rows: number; ring_dropped: number; dsp_load: number;
   rx?: { state: string; banks: number; restarts: number; channel: number; width: number; centre: number; fs: number; error: string };
-  record: { active: boolean; file: string; samples: number; dropped: number; seconds: number; bytes: number; error: string };
+  record: { active: boolean; file: string; samples: number; seconds: number; bytes: number; error: string };
   client_drops?: number;
   disk_free?: number; // bytes free where recordings go
 };

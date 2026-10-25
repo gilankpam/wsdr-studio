@@ -359,7 +359,10 @@ int main(int argc, char **argv) {
                               f[6] |= 0x10; // slot B
                             srv->broadcast_binary(std::move(f));
                           },
-                          [&, i](const json &e) { srv->broadcast_text(tagged(e, i)); }},
+                          [&, i](const json &e) {
+                            // the adapter list is everyone's; the rest is this slot's
+                            srv->broadcast_text(e.value("type", "") == "devices" ? e.dump() : tagged(e, i));
+                          }},
         a.record_dir.empty() ? data_dir() + "/recordings" : a.record_dir, i, claims);
     engs[i]->set_usb3_default(a.usb3); // also for Start pressed in the app
   }

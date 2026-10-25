@@ -5,6 +5,7 @@
 // stopped by closing its stdin (it then finalises any recording and exits).
 //
 // Backend options given to the app are passed on: --pid --freq --rate --record-dir --fft --port, --no-usb3.
+// --dual opens the window in dual-adapter mode.
 // WSDR_STUDIOD: the backend binary. WSDR_DEV_URL: load this URL instead (Vite dev server).
 'use strict';
 const { app, BrowserWindow, Menu, dialog, ipcMain, session } = require('electron');
@@ -149,7 +150,9 @@ function createWindow() {
     if (c === 1) e.preventDefault(); // = unload anyway
   });
   win.on('closed', () => (win = null));
-  win.loadURL(process.env.WSDR_DEV_URL || `${origin}/`);
+  // --dual: open in dual-adapter mode (the page reads ?dual=1 once and remembers it)
+  const q = process.argv.includes('--dual') ? '?dual=1' : '';
+  win.loadURL((process.env.WSDR_DEV_URL || `${origin}/`) + q);
 }
 
 if (!app.requestSingleInstanceLock()) {

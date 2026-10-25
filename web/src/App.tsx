@@ -8,12 +8,12 @@ import { Client, type Caps, type Device, type DspSettings, type Rate, type RxSet
 const FFTS = [1024, 2048, 4096, 8192, 16384];
 const RATES: Rate[] = [5, 4, 3, 2, 1].map((r) => ({ rate_sel: r, fs: 80e6 / (1 << r) }));
 // What an adapter offers before Start (after Start the backend's caps say it).
-const ratesFor = (d?: Device): Rate[] =>
+const ratesFor = (d: Device | undefined, offsetTuning: boolean): Rate[] =>
   d
     ? RATES.filter((r) => r.fs <= d.max_msps * 1e6 || r.fs <= (d.gapped_msps ?? 0) * 1e6).map((r) => {
         const gapped = r.fs > d.max_msps * 1e6;
-        // as the backend: the 8812CU's gapped views are cut from an offset-tuned 40 MHz capture
-        return { ...r, gapped, hw_fs: gapped && d.chip.includes('8822C') ? 40e6 : r.fs };
+        // as the backend: with offset tuning the 8812CU's 10/20 MHz gapped views come from a 40 MHz capture
+        return { ...r, gapped, hw_fs: gapped && offsetTuning && d.chip.includes('8822C') && r.fs <= 20e6 ? 40e6 : r.fs };
       })
     : RATES;
 // Share of the time a gapped span samples: one 8192-sample bank, then ~1.48 ms shipping it over USB 2.
@@ -46,9 +46,19 @@ const LOCKED = 'End the recording to change tuning or gain';
 const PREFS_KEY = 'wsdr-studio.prefs';
 type Scale = { dbMin: number; dbMax: number; wfFloor: number };
 type Tuning = { freq: number; rate_sel: number; gain_db: number; agc: boolean };
-type Prefs = { smooth: number; wfMode: 'max' | 'avg'; scale: Scale | null; retuned: boolean; tuning: Tuning | null };
+type Locks = { freq: boolean; span: boolean; gain: boolean };
+type Prefs = {
+  smooth: number; wfMode: 'max' | 'avg'; scale: Scale | null; retuned: boolean;
+  tuning: Tuning | null; tuningB: Tuning | null; // the last tuning of view A / B
+  dual: boolean; locks: Locks; ghost: boolean;   // dual-adapter mode
+  offsetTuning: boolean;                          // off: show what the adapter sees (notch included)
+  layout: 'row' | 'column';                       // dual: side by side (channel order) or stacked
+};
 function loadPrefs(): Prefs {
-  const d: Prefs = { smooth: 0.7, wfMode: 'max', scale: null, retuned: false, tuning: null };
+  const d: Prefs = {
+    smooth: 0.7, wfMode: 'max', scale: null, retuned: false, tuning: null, tuningB: null,
+    dual: false, locks: { freq: true, span: true, gain: false }, ghost: true, offsetTuning: false, layout: 'row',
+  };
   try {
     return { ...d, ...JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') };
   } catch {
@@ -86,7 +96,116 @@ function NumField({ value, onCommit, title }: { value: number; onCommit: (v: num
   );
 }
 
-export default function App() {
+// What the views share (display preferences, the scale) and how a view reaches the other (locks).
+type Shared = { prefs: Prefs; updatePrefs: (p: Partial<Prefs>) => void; scale: Scale; setScale: (s: Scale) => void };
+type StationHandle = {
+  linkedSet: (args: Partial<RxSettings>) => void; // a change from the other view (no further forwarding)
+  req: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  freq: () => number;
+  open: () => boolean;
+  suggest: (wfMode?: 'max' | 'avg') => Scale | null; // Auto scale from this view's picture
+};
+type ViewInfo = { fft: number; gapped: boolean; fsNow: number };
+type Link = {
+  ghost: boolean;                                              // draw the other view's average
+  userSet: (slot: number, args: Partial<RxSettings>) => void;  // a user change: locked fields go to the other view
+  dsp: (args: Record<string, unknown>) => void;                // shared display settings: both views
+  register: (slot: number, h: StationHandle | null) => void;
+  report: (v: ViewInfo) => void;                               // view A's FFT/span, for the app bar
+};
+
+// Scale, Auto and the Display popover: per view in single mode, in the app bar (shared) in dual mode.
+function ViewControls(p: {
+  scale: Scale; prefs: Prefs; updatePrefs: (x: Partial<Prefs>) => void; setUserScale: (s: Scale) => void;
+  onAuto: () => void; onWfMode: (m: 'max' | 'avg') => void; fft: number; onFft: (n: number) => void;
+  gapped: boolean; fsNow: number; shared?: boolean;
+}) {
+  const { scale, prefs, updatePrefs, setUserScale, gapped, fsNow } = p;
+  const [show, setShow] = useState(false);
+  const popRef = useRef<HTMLDivElement>(null);
+  // closes on Esc or a click outside it
+  useEffect(() => {
+    if (!show) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setShow(false);
+    const onDown = (e: MouseEvent) => popRef.current && !popRef.current.contains(e.target as Node) && setShow(false);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('mousedown', onDown);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('mousedown', onDown);
+    };
+  }, [show]);
+  return (
+    <div className="group" title={p.shared ? 'Shared by both views' : undefined}>
+      <label>Scale</label>
+      <NumField value={scale.dbMin} title="Bottom of the scale (dBFS); Enter to apply" onCommit={(v) => setUserScale({ ...scale, dbMin: v })} />
+      <span className="unit">to</span>
+      <NumField value={scale.dbMax} title="Top of the scale (dBFS); Enter to apply" onCommit={(v) => setUserScale({ ...scale, dbMax: v })} />
+      <span className="unit">dBFS</span>
+      <button
+        className={prefs.scale === null ? 'on' : ''}
+        title={
+          prefs.scale === null
+            ? 'Auto scale is on: refits after Start, retune, span, gain or FFT change. Type a value to fix the scale.'
+            : 'Fit the scale to the signal now, and keep refitting after Start, retune, span, gain or FFT changes'
+        }
+        onClick={p.onAuto}
+      >
+        Auto
+      </button>
+      <div className="popover-anchor" ref={popRef}>
+        <button className={show ? 'on' : ''} onClick={() => setShow((v) => !v)} aria-expanded={show}>
+          Display ▾
+        </button>
+        {show && (
+          <div className="popover">
+            <label>
+              FFT size
+              <select value={p.fft} onChange={(e) => p.onFft(Number(e.target.value))}>
+                {FFTS.map((n) => (
+                  <option key={n} value={n} disabled={gapped && n > 8192}>
+                    {n <= 4096 ? `${n} (${(fsNow / n / 1e3).toFixed(1)} kHz/bin)` : `${n} (${(fsNow / 4096 / 1e3).toFixed(1)} kHz/bin, smoother noise)`}
+                    {gapped && n > 8192 ? ' – not in gapped mode (8192 used)' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Averaging
+              <select value={prefs.smooth} onChange={(e) => updatePrefs({ smooth: Number(e.target.value) })}>
+                <option value={0}>off</option>
+                <option value={0.5}>low</option>
+                <option value={0.7}>medium</option>
+                <option value={0.9}>high</option>
+              </select>
+            </label>
+            <label>
+              Waterfall
+              <select value={prefs.wfMode} onChange={(e) => p.onWfMode(e.target.value as 'max' | 'avg')}>
+                <option value="max">peak (shows short frames)</option>
+                <option value="avg">average</option>
+              </select>
+            </label>
+            <label className="check" title="Off: the view is what the adapter's own receiver sees, its centre notch included. On: the 8812CU's 10 and 20 MHz views are cut from a 40 MHz capture tuned beside the channel, so the notch stays out of view (less of the time is sampled).">
+              <input type="checkbox" checked={prefs.offsetTuning} onChange={(e) => updatePrefs({ offsetTuning: e.target.checked })} />
+              Avoid the chip&apos;s centre notch (8812CU, 10/20 MHz)
+            </label>
+            <label>
+              Waterfall floor
+              <span>
+                <NumField value={scale.wfFloor} title="Colour of the waterfall starts here (dBFS)" onCommit={(v) => setUserScale({ ...scale, wfFloor: v })} /> dBFS
+              </span>
+            </label>
+            <span className="note">Esc or a click outside closes this.</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// One adapter's view (slot 0 = A, 1 = B): its own socket, controls, spectrum and waterfall.
+function Station({ slot, dual, shared, link }: { slot: number; dual: boolean; shared: Shared; link: Link }) {
   const clientRef = useRef<Client | null>(null);
   const spRef = useRef<HTMLCanvasElement>(null);
   const wfRef = useRef<HTMLCanvasElement>(null);
@@ -100,11 +219,11 @@ export default function App() {
   const narrowNoted = useRef(false);
   const live = useRef({ open: false, recording: false, opening: false, freq: 5180e6, width: 20 }); // for callbacks that outlive a render
   const autoOn = useRef(loadPrefs().scale === null); // Auto scale on (mirrors prefs.scale === null; storage may be blocked)
+  const view = useRef({ dual, ghost: link.ghost }); // for the socket callbacks
   const [home, setHome] = useState('');
   const setRef = useRef<(a: Partial<RxSettings>) => void>(() => {});
-  const popRef = useRef<HTMLDivElement>(null);
 
-  const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
+  const { prefs, updatePrefs, scale, setScale } = shared;
   const [connected, setConnected] = useState(false);
   const [fatal, setFatal] = useState<string | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -112,26 +231,21 @@ export default function App() {
   const [caps, setCaps] = useState<Caps>({ open: false });
   const [rx, setRx] = useState<RxSettings | null>(null); // live settings (adapter open)
   // the last tuning (remembered across launches) is the first draft
-  const [draft, setDraft] = useState<RxSettings>(() => ({ freq: 5180e6, rate_sel: 4, agc: false, gain_db: 30, ...loadPrefs().tuning, wide: true }));
+  const [draft, setDraft] = useState<RxSettings>(() => ({
+    freq: 5180e6, rate_sel: 4, agc: false, gain_db: 30, ...(slot ? loadPrefs().tuningB : loadPrefs().tuning), wide: true,
+  }));
   const [dsp, setDsp] = useState<DspSettings>({ fft: 8192, rows_per_s: 25, paths: 'a', dc_remove: true });
   const [status, setStatus] = useState<Status | null>(null);
   const [banners, setBanners] = useState<Banner[]>([]);
   const [saved, setSaved] = useState<Saved | null>(null);
   const [starting, setStarting] = useState(false);
-  const [scale, setScale] = useState<Scale>(prefs.scale ?? { dbMin: -110, dbMax: -20, wfFloor: -100 });
-  const [showDisplay, setShowDisplay] = useState(false);
   const [freqText, setFreqText] = useState(() => mhz(draft.freq, 3));
   const [gainUi, setGainUi] = useState<number | null>(null);
   const [msps, setMsps] = useState(0);
   const [dropWarn, setDropWarn] = useState<string[]>([]);
   const [hadPicture, setHadPicture] = useState(false);
 
-  const updatePrefs = (p: Partial<Prefs>) =>
-    setPrefs((old) => {
-      const n = { ...old, ...p };
-      savePrefs(n);
-      return n;
-    });
+  const rememberTuning = (t: Tuning) => updatePrefs(slot ? { tuningB: t } : { tuning: t });
   const setUserScale = (s: Scale) => {
     autoOn.current = false; // at once: a row arriving before the effect must not refit over it
     const dbMin = Math.min(s.dbMin, s.dbMax - 10);
@@ -146,7 +260,7 @@ export default function App() {
   };
   const dropBanner = (id: number) => setBanners((b) => b.filter((x) => x.id !== id));
   const req = (cmd: string, args: Record<string, unknown> = {}) =>
-    (clientRef.current ? clientRef.current.request(cmd, args) : Promise.reject(new Error('not connected'))).catch(
+    (clientRef.current ? clientRef.current.request(cmd, { ...args, slot }) : Promise.reject(new Error('not connected'))).catch(
       (e: Error & { kind?: string }) => {
         addBanner(e.message, e.kind === 'busy' ? 'info' : 'error'); // "try again in a moment" is not a fault
         throw e;
@@ -203,6 +317,10 @@ export default function App() {
         client = c;
         clientRef.current = c;
         c.onRow = (r) => {
+          if (r.slot !== slot) {
+            if (view.current.dual && view.current.ghost) d.setGhost(r);
+            return;
+          }
           d.push(r);
           const runDone = autoRun >= 0 && d.runCount() >= autoRun && d.runRows() >= 25;
           const rowsDone = autoAt >= 0 && d.rowsSeen() >= autoAt;
@@ -210,6 +328,7 @@ export default function App() {
             if (runDone) autoRun = -1; // clear only the trigger that fired
             if (rowsDone) autoAt = -1;
             if (!autoOn.current) return; // the user fixed a scale meanwhile
+            if (view.current.dual && slot) return; // one shared scale: view A fits it
             const s = d.suggestRange();
             if (s) setScale(s);
           }
@@ -220,6 +339,7 @@ export default function App() {
         };
         c.onGiveUp = (why) => setFatal(why);
         c.onEvent = (e) => {
+          if (e.slot !== undefined && e.slot !== slot) return; // the other view's
           switch (e.type) {
             case 'devices':
               setDevices(e.devices);
@@ -249,7 +369,7 @@ export default function App() {
                 if (lastRx && (lastRx.freq !== e.rx.freq || lastRx.rate_sel !== e.rx.rate_sel || lastRx.gain_db !== e.rx.gain_db || lastRx.agc !== e.rx.agc))
                   autoAgain(true);
                 if (lastRx && lastRx.freq !== e.rx.freq) updatePrefs({ retuned: true });
-                updatePrefs({ tuning: { freq: e.rx.freq, rate_sel: e.rx.rate_sel, gain_db: e.rx.gain_db, agc: e.rx.agc } });
+                rememberTuning({ freq: e.rx.freq, rate_sel: e.rx.rate_sel, gain_db: e.rx.gain_db, agc: e.rx.agc });
                 lastRx = e.rx;
                 setRx(e.rx);
                 lastSentFreq.current = null;
@@ -331,18 +451,6 @@ export default function App() {
       setDraft((dr) => (dr.rate_sel < 4 ? { ...dr, rate_sel: 4 } : dr)); // every 40 MHz centre is also a 5 MHz step
   }, [selMax]);
 
-  // Display popover: closes on Esc or a click outside it
-  useEffect(() => {
-    if (!showDisplay) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setShowDisplay(false);
-    const onDown = (e: MouseEvent) => popRef.current && !popRef.current.contains(e.target as Node) && setShowDisplay(false);
-    window.addEventListener('keydown', onKey);
-    window.addEventListener('mousedown', onDown);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousedown', onDown);
-    };
-  }, [showDisplay]);
 
   const open = caps.open;
   const opening = status?.state === 'opening' || starting;
@@ -355,7 +463,7 @@ export default function App() {
   const fsNow = 80e6 / (1 << cur.rate_sel);
   const width = cur.rate_sel === 1 && (caps.wide_capable ?? true) ? 40 : 20;
   const chan = channelAt(cur.freq, 20); // by centre frequency only (the span does not pick a channel)
-  const rates = caps.rates ?? ratesFor(sel);
+  const rates = caps.rates ?? ratesFor(sel, prefs.offsetTuning);
   // the selected span (follows a change at once; the footer shows the run's measured share)
   const gapped = rates.find((r) => r.rate_sel === cur.rate_sel)?.gapped ?? false;
   const run = status?.rx;
@@ -399,10 +507,13 @@ export default function App() {
         wfPath: dsp.paths === 'b' ? 1 : 0, marker: open || hadPicture ? cur.freq : null,
         markerLabel: open ? 'requested' : 'next Start',
         chipNotch: (caps.chip ?? sel?.chip ?? '').includes('8822C'),
+        // the 8822B dips at its centre at 40 MHz on 2.4 GHz (measured: ~8-10 dB over +-1 MHz)
+        notchWide: open && (caps.chip ?? '').includes('8822B') && (run?.hw_fs ?? run?.fs ?? 0) >= 40e6 && (run?.centre ?? 0) < 3.7e9,
+        ghostLabel: `view ${slot ? 'A' : 'B'}`,
         badge: `GAPPED · ${gappedPct !== null ? `~${gappedPct} %` : 'part of the time'} sampled`, // shown on gapped rows
         staleText: rxState === 'starting' ? 'Applying settings…' : 'No data from the adapter',
       }),
-    [scale, prefs.wfMode, prefs.smooth, overlay, open, dsp.paths, cur.freq, hadPicture, rxState, caps.chip, sel?.chip, run?.gapped, gappedPct],
+    [scale, prefs.wfMode, prefs.smooth, overlay, open, dsp.paths, cur.freq, hadPicture, rxState, caps.chip, sel?.chip, run?.gapped, gappedPct, run?.fs, run?.hw_fs, run?.centre, slot],
   );
 
   // A settings change: sent now when streaming, kept as a draft until Start otherwise.
@@ -410,15 +521,37 @@ export default function App() {
     if (!live.current.open) {
       const n = { ...draft, ...args };
       setDraft(n);
-      updatePrefs({ tuning: { freq: n.freq, rate_sel: n.rate_sel, gain_db: n.gain_db, agc: n.agc } }); // remembered too
+      rememberTuning({ freq: n.freq, rate_sel: n.rate_sel, gain_db: n.gain_db, agc: n.agc }); // remembered too
       if (args.freq !== undefined) setFreqText(mhz(args.freq, 3));
       return;
     }
     req('set', args).catch(() => {});
   };
+  // A change the user made here: applied, and offered to the other view (it takes the locked fields).
+  const userSet = (args: Partial<RxSettings>) => {
+    set(args);
+    link.userSet(slot, args);
+  };
   useEffect(() => {
-    setRef.current = set;
+    setRef.current = userSet;
+    view.current = { dual, ghost: link.ghost };
+    if (!link.ghost || !dual) display.current?.setGhost(null);
+    link.register(slot, {
+      linkedSet: set, req, freq: () => cur.freq, open: () => caps.open,
+      suggest: (wfMode) => {
+        if (wfMode) display.current?.setOpts({ wfMode });
+        return display.current?.suggestRange() ?? null;
+      },
+    });
   });
+  useEffect(() => () => link.register(slot, null), []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (slot === 0) link.report({ fft: dsp.fft, gapped, fsNow }); // for the app bar's shared controls
+  }, [dsp.fft, gapped, fsNow]); // eslint-disable-line react-hooks/exhaustive-deps
+  // the offset-tuning preference (shared) reaches a running adapter at once
+  useEffect(() => {
+    if (caps.open) req('set', { offset_tuning: prefs.offsetTuning }).catch(() => {});
+  }, [prefs.offsetTuning]); // eslint-disable-line react-hooks/exhaustive-deps
   const doStart = async () => {
     if (!sel) return;
     setStarting(true);
@@ -426,7 +559,7 @@ export default function App() {
     window.clearTimeout(gainTimer.current); // a gain change still waiting goes with the open
     const gain = gainUi ?? draft.gain_db;
     try {
-      await req('open', { pid: sel.pid, bus: sel.bus, port: sel.port, ...draft, gain_db: gain });
+      await req('open', { pid: sel.pid, bus: sel.bus, port: sel.port, ...draft, gain_db: gain, offset_tuning: prefs.offsetTuning });
     } catch {
       /* shown */
     } finally {
@@ -450,7 +583,7 @@ export default function App() {
             : `Showing ${spanLabel(fsNow)} of this ${c.width} MHz channel (the most this adapter shows)`,
       );
     }
-    set({ freq: snap(c.centre) });
+    userSet({ freq: snap(c.centre) });
   };
   const commitFreq = () => {
     const f = Math.round(parseFloat(freqText) * 1e6);
@@ -465,19 +598,19 @@ export default function App() {
     if (t === lastSentFreq.current || Math.abs(t - cur.freq) < 1) return; // Enter then blur: send once
     lastSentFreq.current = t;
     updatePrefs({ retuned: true });
-    set({ freq: t });
+    userSet({ freq: t });
   };
   const tuneTo = (f: number) => { // from the slider: same snapping as a typed frequency
     const t = snap(f);
     setFreqText(mhz(t, 3));
     lastSentFreq.current = t;
     updatePrefs({ retuned: true });
-    set({ freq: t });
+    userSet({ freq: t });
   };
   const onGain = (v: number) => {
     setGainUi(v);
     window.clearTimeout(gainTimer.current);
-    gainTimer.current = window.setTimeout(() => set({ gain_db: v }), 200);
+    gainTimer.current = window.setTimeout(() => userSet({ gain_db: v }), 200);
   };
   const toggleRecord = async () => {
     try {
@@ -509,10 +642,14 @@ export default function App() {
   const secsLeft = diskFree / recRate;
 
   return (
-    <div className="app">
+    <div className="station">
       <header className="bar">
         <div className="group">
-          <span className="brand">wsdr-studio</span>
+          {dual && (
+            <span className={`slotchip s${slot}`} title={`View ${slot ? 'B' : 'A'}`}>
+              {slot ? 'B' : 'A'}
+            </span>
+          )}
           <select value={selKey ?? ''} disabled={open || opening || !devices.length} onChange={(e) => setSelKey(e.target.value)} title={sel ? devTitle(sel) : 'Adapter'}>
             {!devices.length && <option value="">no adapter found</option>}
             {devices.map((d) => (
@@ -612,13 +749,13 @@ export default function App() {
             onChange={(e) => {
               // the centre stays as asked; a 40 MHz span centres within 2422-2462 / 5090-6155 MHz, so the
               // radio may sit beside it (the plot marks the requested frequency)
-              set({ rate_sel: Number(e.target.value), wide: true });
+              userSet({ rate_sel: Number(e.target.value), wide: true });
             }}
             title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
               sel && sel.max_msps < 40 && sel.model === 'RTL8812BU' ? ' (continuous 10-40 MHz need USB 3)' : ''
             }${
               rates.some((r) => r.gapped)
-                ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording). 10 and 20 MHz are cut from a 40 MHz capture tuned beside the channel, so the chip\'s centre notch stays out of view'
+                ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording)'
                 : ''
             }`}
           >
@@ -646,7 +783,7 @@ export default function App() {
           />
           <span className="val">{cur.agc ? 'auto' : `${(gainUi ?? cur.gain_db).toFixed(0)} dB`}</span>
           <label className="check" title="Let the chip's AGC set the gain (it steps down during frames)">
-            <input type="checkbox" disabled={locked} checked={cur.agc} onChange={(e) => set({ agc: e.target.checked })} />
+            <input type="checkbox" disabled={locked} checked={cur.agc} onChange={(e) => userSet({ agc: e.target.checked })} />
             AGC
           </label>
         </div>
@@ -662,82 +799,32 @@ export default function App() {
           </div>
         )}
 
-        <div className="group">
-          <label>Scale</label>
-          <NumField value={scale.dbMin} title="Bottom of the scale (dBFS); Enter to apply" onCommit={(v) => setUserScale({ ...scale, dbMin: v })} />
-          <span className="unit">to</span>
-          <NumField value={scale.dbMax} title="Top of the scale (dBFS); Enter to apply" onCommit={(v) => setUserScale({ ...scale, dbMax: v })} />
-          <span className="unit">dBFS</span>
-          <button
-            className={prefs.scale === null ? 'on' : ''}
-            title={
-              prefs.scale === null
-                ? 'Auto scale is on: refits after Start, retune, span, gain or FFT change. Type a value to fix the scale.'
-                : 'Fit the scale to the signal now, and keep refitting after Start, retune, span, gain or FFT changes'
-            }
-            onClick={() => {
-              const s = display.current?.suggestRange();
-              if (s) setScale(s);
+        {!dual && (
+          <ViewControls
+            scale={scale}
+            prefs={prefs}
+            updatePrefs={updatePrefs}
+            setUserScale={setUserScale}
+            onAuto={() => {
+              const sg = display.current?.suggestRange();
+              if (sg) setScale(sg);
               updatePrefs({ scale: null });
             }}
-          >
-            Auto
-          </button>
-          <div className="popover-anchor" ref={popRef}>
-            <button className={showDisplay ? 'on' : ''} onClick={() => setShowDisplay((v) => !v)} aria-expanded={showDisplay}>
-              Display ▾
-            </button>
-            {showDisplay && (
-              <div className="popover">
-                <label>
-                  FFT size
-                  <select value={dsp.fft} onChange={(e) => req('dsp', { fft: Number(e.target.value) }).catch(() => {})}>
-                    {FFTS.map((n) => (
-                      <option key={n} value={n} disabled={gapped && n > 8192}>
-                        {n <= 4096 ? `${n} (${(fsNow / n / 1e3).toFixed(1)} kHz/bin)` : `${n} (${(fsNow / 4096 / 1e3).toFixed(1)} kHz/bin, smoother noise)`}
-                        {gapped && n > 8192 ? ' – not in gapped mode (8192 used)' : ''}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Averaging
-                  <select value={prefs.smooth} onChange={(e) => updatePrefs({ smooth: Number(e.target.value) })}>
-                    <option value={0}>off</option>
-                    <option value={0.5}>low</option>
-                    <option value={0.7}>medium</option>
-                    <option value={0.9}>high</option>
-                  </select>
-                </label>
-                <label>
-                  Waterfall
-                  <select
-                    value={prefs.wfMode}
-                    onChange={(e) => {
-                      updatePrefs({ wfMode: e.target.value as 'max' | 'avg' });
-                      if (autoOn.current) {
-                        // the floor depends on the mode: refit right away when Auto is on
-                        display.current?.setOpts({ wfMode: e.target.value as 'max' | 'avg' });
-                        const s = display.current?.suggestRange();
-                        if (s) setScale(s);
-                      }
-                    }}
-                  >
-                    <option value="max">peak (shows short frames)</option>
-                    <option value="avg">average</option>
-                  </select>
-                </label>
-                <label>
-                  Waterfall floor
-                  <span>
-                    <NumField value={scale.wfFloor} title="Colour of the waterfall starts here (dBFS)" onCommit={(v) => setUserScale({ ...scale, wfFloor: v })} /> dBFS
-                  </span>
-                </label>
-                <span className="note">Esc or a click outside closes this.</span>
-              </div>
-            )}
-          </div>
-        </div>
+            onWfMode={(m) => {
+              updatePrefs({ wfMode: m });
+              if (autoOn.current) {
+                // the floor depends on the mode: refit right away when Auto is on
+                display.current?.setOpts({ wfMode: m });
+                const sg = display.current?.suggestRange();
+                if (sg) setScale(sg);
+              }
+            }}
+            fft={dsp.fft}
+            onFft={(n) => link.dsp({ fft: n })}
+            gapped={gapped}
+            fsNow={fsNow}
+          />
+        )}
       </header>
       <Tuner freq={cur.freq} disabled={locked} onTune={tuneTo} />
 
@@ -839,6 +926,141 @@ export default function App() {
         {!open && status?.error && <span className="warn">{status.error}</span>}
         {!prefs.retuned && open && !recording && <span className="hint">tip: double-click the spectrum to tune there</span>}
       </footer>
+    </div>
+  );
+}
+
+// The window: one view (single) or two (dual), stacked. Shared: display preferences and the scale.
+// Dual mode locks: a locked setting changed in one view is applied to the other (the frequency keeps
+// the offset the views had when it was locked).
+export default function App() {
+  const [prefs, setPrefs] = useState<Prefs>(() => {
+    const p = loadPrefs();
+    if (new URLSearchParams(location.search).get('dual') === '1') {
+      p.dual = true; // started with --dual
+      savePrefs(p);
+    }
+    return p;
+  });
+  const [scale, setScale] = useState<Scale>(() => loadPrefs().scale ?? { dbMin: -110, dbMax: -20, wfFloor: -100 });
+  const handles = useRef<(StationHandle | null)[]>([null, null]);
+  const [viewInfo, setViewInfo] = useState<ViewInfo>({ fft: 8192, gapped: false, fsNow: 5e6 });
+  const updatePrefs = (p: Partial<Prefs>) =>
+    setPrefs((old) => {
+      const n = { ...old, ...p };
+      savePrefs(n);
+      return n;
+    });
+  const { dual, locks } = prefs;
+  const shared: Shared = { prefs, updatePrefs, scale, setScale };
+  const link: Link = {
+    ghost: prefs.ghost,
+    register: (slot, h) => {
+      handles.current[slot] = h;
+    },
+    report: setViewInfo,
+    dsp: (args) =>
+      handles.current.forEach((h, i) => {
+        if (h && (i === 0 || dual)) h.req('dsp', args).catch(() => {});
+      }),
+    userSet: (slot, args) => {
+      const other = dual ? handles.current[slot ^ 1] : null;
+      if (!other) return;
+      const a: Partial<RxSettings> = {};
+      // the frequency lock keeps the views' distance as it is now (same frequency: compare; one span
+      // apart: adjacent channels)
+      const here = handles.current[slot]?.freq();
+      if (locks.freq && args.freq !== undefined && here !== undefined) a.freq = args.freq + (other.freq() - here);
+      if (locks.span && args.rate_sel !== undefined) {
+        a.rate_sel = args.rate_sel;
+        a.wide = args.wide ?? true;
+      }
+      if (locks.gain && args.gain_db !== undefined) a.gain_db = args.gain_db;
+      if (locks.gain && args.agc !== undefined) a.agc = args.agc;
+      if (Object.keys(a).length) other.linkedSet(a);
+    },
+  };
+  const setLock = (k: keyof Locks) => updatePrefs({ locks: { ...locks, [k]: !locks[k] } });
+  const setUserScale = (sc: Scale) => {
+    const dbMin = Math.min(sc.dbMin, sc.dbMax - 10);
+    const n = { dbMin, dbMax: Math.max(sc.dbMax, dbMin + 10), wfFloor: sc.wfFloor };
+    setScale(n);
+    updatePrefs({ scale: n });
+  };
+  const setDual = (on: boolean) => {
+    if (!on && handles.current[1]?.open()) handles.current[1]?.req('close').catch(() => {});
+    updatePrefs({ dual: on });
+  };
+  return (
+    <div className={dual ? 'app dual' : 'app'}>
+      <div className="appbar">
+        <span className="brand">wsdr-studio</span>
+        <div className="seg" title="One adapter, or two adapters stacked (A above B)">
+          <button className={!dual ? 'on' : ''} onClick={() => setDual(false)}>
+            Single
+          </button>
+          <button className={dual ? 'on' : ''} onClick={() => setDual(true)}>
+            Dual
+          </button>
+        </div>
+        {dual && (
+          <>
+            <div className="seg" title="Side by side: A then B in frequency order (adjacent channels). Stacked: A above B (compare one channel).">
+              <button className={prefs.layout === 'row' ? 'on' : ''} onClick={() => updatePrefs({ layout: 'row' })}>
+                Side by side
+              </button>
+              <button className={prefs.layout === 'column' ? 'on' : ''} onClick={() => updatePrefs({ layout: 'column' })}>
+                Stacked
+              </button>
+            </div>
+            <span className="muted">Lock A and B:</span>
+            <button
+              className={locks.freq ? 'on' : ''}
+              onClick={() => setLock('freq')}
+              title="Locked: retuning one view retunes the other by the same amount, keeping their distance (same frequency: compare one channel on two adapters; one span apart: adjacent channels)"
+            >
+              {locks.freq ? '🔒' : '🔓'} Frequency
+            </button>
+            <button className={locks.span ? 'on' : ''} onClick={() => setLock('span')} title="Locked: both views show the same span">
+              {locks.span ? '🔒' : '🔓'} Span
+            </button>
+            <button className={locks.gain ? 'on' : ''} onClick={() => setLock('gain')} title="Locked: gain and AGC change together (two dongles' gains differ slightly)">
+              {locks.gain ? '🔒' : '🔓'} Gain
+            </button>
+            <label className="check" title="Draw the other view's average trace over each spectrum while both show the same frequencies">
+              <input type="checkbox" checked={prefs.ghost} onChange={(e) => updatePrefs({ ghost: e.target.checked })} />
+              Overlay
+            </label>
+            <ViewControls
+              shared
+              scale={scale}
+              prefs={prefs}
+              updatePrefs={updatePrefs}
+              setUserScale={setUserScale}
+              onAuto={() => {
+                const sg = handles.current[0]?.suggest();
+                if (sg) setScale(sg);
+                updatePrefs({ scale: null });
+              }}
+              onWfMode={(m) => {
+                updatePrefs({ wfMode: m });
+                if (prefs.scale === null) {
+                  const sg = handles.current[0]?.suggest(m);
+                  if (sg) setScale(sg);
+                }
+              }}
+              fft={viewInfo.fft}
+              onFft={(n) => link.dsp({ fft: n })}
+              gapped={viewInfo.gapped}
+              fsNow={viewInfo.fsNow}
+            />
+          </>
+        )}
+      </div>
+      <div className={`views ${dual ? prefs.layout : 'column'}`}>
+        <Station slot={0} dual={dual} shared={shared} link={link} />
+        {dual && <Station slot={1} dual={dual} shared={shared} link={link} />}
+      </div>
     </div>
   );
 }

@@ -17,6 +17,22 @@ html, body, #root { height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--text); overflow: hidden; }
 
 .app { display: flex; flex-direction: column; height: 100%; }
+.station { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.views { display: flex; flex: 1; min-height: 0; }
+.views.column { flex-direction: column; }
+.views.row { flex-direction: row; }
+.views.row .station { min-width: 0; }
+.views.column .station + .station { border-top: 3px solid #2c3a4b; }
+.views.row .station + .station { border-left: 3px solid #2c3a4b; }
+.appbar { display: flex; align-items: center; gap: 12px; padding: 5px 12px; background: #0e131a; border-bottom: 1px solid var(--line); }
+.appbar button { padding: 2px 9px; }
+.seg { display: flex; }
+.seg button { border-radius: 0; }
+.seg button:first-child { border-radius: 4px 0 0 4px; }
+.seg button:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+.slotchip { font-weight: 700; padding: 1px 8px; border-radius: 4px; color: #0b0e13; }
+.slotchip.s0 { background: #4fc3f7; }
+.slotchip.s1 { background: #c792ea; }
 .bar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px;
   padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line);

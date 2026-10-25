@@ -15,6 +15,8 @@ export type DisplayOpts = {
   marker: number | null;        // requested frequency (Hz), drawn when it is not the band centre
   markerLabel: string;          // e.g. "requested" or "next Start"
   chipNotch: boolean;           // 8822C: shade its DC-rejection notch at the hardware centre (gapped rows)
+  notchWide: boolean;           // 8822B at 40 MHz on 2.4 GHz: its own ~+-1 MHz centre dip (shade it)
+  ghostLabel: string;           // legend name of the other view's trace (dual mode)
   badge: string | null;         // e.g. "GAPPED · ~12 % sampled", top right of the spectrum
   overlay: string | null;       // message over the plot (stopped, starting, ...)
   staleText: string;            // shown when rows stop arriving
@@ -23,6 +25,7 @@ export type DisplayOpts = {
 
 const AVG = ['#4fc3f7', '#ff8a65']; // average trace, path A / B
 const PEAK = ['#8d99a8', '#c9a28f']; // peak trace, path A / B
+const GHOST = '#c792ea'; // the other view's average (dual mode)
 const AXIS_W = 46; // CSS px reserved on the left (dB axis / colour bar + time ticks)
 const AXIS_H = 22; // CSS px for the frequency axis under the spectrum
 const TOP = 16;    // CSS px headroom above the spectrum (the "dBFS" caption sits there)
@@ -53,11 +56,13 @@ export class Display {
   private genRows = 0;                 // rows of the current run
   private genCount = 0;                // run changes seen
   private frozen: HTMLCanvasElement | null = null; // waterfall before Stop dimmed it
+  private ghost: Row | null = null;           // the other view's newest row (dual mode)
+  private ghostSm: Float32Array | null = null; // ... its average, smoothed like ours
   onHint: (text: string) => void = () => {};
   private dpr = 1;
   private off: (() => void)[] = [];
   opts: DisplayOpts = {
-    dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, markerLabel: 'requested', chipNotch: false, badge: null,
+    dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, markerLabel: 'requested', chipNotch: false, notchWide: false, ghostLabel: 'other view', badge: null,
     overlay: null, staleText: 'No data from the adapter', dim: false,
   };
   onRetune: (freq: number) => void = () => {};
@@ -241,6 +246,22 @@ export class Display {
     // peak mode: the noise-only peak over a row sits ~7-8 dB above the average floor
     const wfFloor = Math.min(dbMax - 10, Math.max(dbMin, Math.round(floor + (this.opts.wfMode === 'max' ? 6 : 1))));
     return { dbMin, dbMax, wfFloor };
+  }
+
+  // The other view's newest row (dual mode): its average is drawn over this spectrum while both share
+  // the frequency axis. null clears it.
+  setGhost(r: Row | null) {
+    if (!r) {
+      this.ghost = null;
+      this.ghostSm = null;
+    } else {
+      const g = this.ghost;
+      const same = g && g.bins === r.bins && Math.abs(g.f0 - r.f0) < r.df / 2 && Math.abs(g.df - r.df) < 1e-6;
+      if (!same || !this.ghostSm) this.ghostSm = Float32Array.from(r.avg);
+      else for (let i = 0; i < r.bins; i++) this.ghostSm[i] = this.ghostSm[i] * this.opts.smooth + r.avg[i] * (1 - this.opts.smooth);
+      this.ghost = r;
+    }
+    this.dirty = true;
   }
 
   push(r: Row) {
@@ -463,8 +484,9 @@ export class Display {
       // +-1.5 % of fs). Shade it so it is not read as a missing signal.
       const mid0 = (s.f0 + s.f1) / 2;
       const lr = this.last[0] ?? this.last[1];
-      if (this.opts.chipNotch && lr?.gapped && !lr.offset) { // gapped runs only; offset-tuned views keep it out of view
-        const hw = (s.f1 - s.f0) * 0.015;
+      // 8822C: gapped runs only (offset-tuned views keep it out of view); 8822B: 40 MHz on 2.4 GHz
+      if ((this.opts.chipNotch && lr?.gapped && !lr.offset) || this.opts.notchWide) {
+        const hw = this.opts.notchWide ? 1e6 : (s.f1 - s.f0) * 0.015;
         const x0 = xOf(mid0 - hw), x1 = xOf(mid0 + hw);
         if (x1 - x0 >= 3 * d) {
           c.fillStyle = 'rgba(160,170,190,0.10)';
@@ -525,12 +547,33 @@ export class Display {
         draw(this.smoothed[p] ?? r.avg, AVG[p], 1.3);
       }
       c.globalAlpha = 1;
+      // the other view (dual mode), when it shows the same axis
+      const own = this.last[0] ?? this.last[1];
+      const g = this.ghost, gs = this.ghostSm;
+      const ghostOn = !!(g && gs && own && g.bins === own.bins && Math.abs(g.f0 - own.f0) < own.df / 2 && Math.abs(g.df - own.df) < 1e-6);
+      if (ghostOn && g && gs) {
+        c.globalAlpha = stale || this.opts.dim ? 0.35 : 0.9;
+        c.strokeStyle = GHOST;
+        c.lineWidth = 1.1 * d;
+        c.beginPath();
+        for (let x = 0; x < w; x++) {
+          const b0 = Math.floor((x * g.bins) / w), b1 = Math.max(b0 + 1, Math.floor(((x + 1) * g.bins) / w));
+          let v = -1e9;
+          for (let b = b0; b < b1; b++) v = Math.max(v, gs[b]);
+          const y = Math.max(T, Math.min(ph, yOf(v)));
+          if (x === 0) c.moveTo(L + x, y);
+          else c.lineTo(L + x, y);
+        }
+        c.stroke();
+        c.globalAlpha = 1;
+      }
       // legend
       const both = !!(this.last[0] && this.last[1]);
       const pa = this.last[0] ? 0 : 1;
       const items: [string, string][] = both
         ? [['A average', AVG[0]], ['B average', AVG[1]], ['peak', PEAK[0]]]
         : [['average', AVG[pa]], ['peak', PEAK[pa]]];
+      if (ghostOn) items.push([this.opts.ghostLabel, GHOST]);
       c.font = `${11 * d}px system-ui, sans-serif`;
       c.textBaseline = 'middle';
       c.textAlign = 'left';

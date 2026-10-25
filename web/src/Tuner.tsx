@@ -2,7 +2,7 @@
 // Centre-frequency slider: the radio tunes in 5 MHz steps, one notch each (drag, or arrow keys). The
 // 2.4 and 5 GHz bands are separate ranges, picked with the band buttons. The value is sent 200 ms
 // after the last move, so a drag does not restart the stream at every notch.
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CHANNELS } from './channels';
 
 const BANDS = { '2.4': { lo: 2412e6, hi: 2472e6, home: 2437e6 }, '5': { lo: 5080e6, hi: 6165e6, home: 5180e6 } } as const;
@@ -14,6 +14,15 @@ export function Tuner({ freq, disabled, onTune }: { freq: number; disabled: bool
   const [drag, setDrag] = useState<number | null>(null); // moved, not sent yet
   const [sent, setSent] = useState<number | null>(null); // sent, settings not back yet
   const timer = useRef<number | undefined>(undefined);
+  const track = useRef<HTMLDivElement>(null);
+  const [trackPx, setTrackPx] = useState(1000);
+  useEffect(() => {
+    const el = track.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setTrackPx(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const clamp = (f: number) => Math.min(b.hi, Math.max(b.lo, Math.round(f / 5e6) * 5e6));
   const shown = drag ?? (sent !== null && Math.abs(freq - sent) >= 1 ? sent : clamp(freq));
   const pct = (f: number) => ((f - b.lo) / (b.hi - b.lo)) * 100;
@@ -27,7 +36,11 @@ export function Tuner({ freq, disabled, onTune }: { freq: number; disabled: bool
       window.setTimeout(() => setSent(null), 1500); // a refused or clamped tune shows the truth again
     }, 200);
   };
-  const ticks = CHANNELS.filter((c) => c.band === band && c.width === 20 && c.centre >= b.lo && c.centre <= b.hi);
+  const all = CHANNELS.filter((c) => c.band === band && c.width === 20 && c.centre >= b.lo && c.centre <= b.hi);
+  // label every n-th channel so the numbers stay ~24 px apart at this width
+  const spacing = band === '5' ? 20e6 : 5e6;
+  const every = Math.max(1, Math.ceil(24 / ((trackPx * spacing) / (b.hi - b.lo))));
+  const ticks = all.filter((_, i) => i % every === 0);
   return (
     <div className="tuner">
       <div className="bands">
@@ -37,7 +50,7 @@ export function Tuner({ freq, disabled, onTune }: { freq: number; disabled: bool
           </button>
         ))}
       </div>
-      <div className="track">
+      <div className="track" ref={track}>
         <input
           type="range"
           min={b.lo}

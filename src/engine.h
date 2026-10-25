@@ -126,6 +126,9 @@ private:
   } _crop;
   bool _crop_dirty = false;
   std::atomic<bool> _usb3_default{true};
+  // Off by default: the view is what the adapter's own receiver sees (its centre notch included).
+  // On: the 8812CU's 10/20 MHz gapped views are offset-tuned to keep the notch out (hw_for).
+  std::atomic<bool> _offset_tuning{false};
   std::atomic<bool> _dsp_quit{false};
 
   std::atomic<bool> _recording{false}; // DSP thread feeds the recorder while set

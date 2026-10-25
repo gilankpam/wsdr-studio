@@ -24,6 +24,7 @@ export type Status = {
   disk_free?: number; // bytes free where recordings go
 };
 export type Row = {
+  slot: number; // view slot (0 = A, 1 = B)
   path: number; gapped: boolean; offset: boolean; gen: number; seq: number; bins: number; t: number; f0: number; df: number;
   avg: Float32Array; max: Float32Array;
 };
@@ -45,7 +46,7 @@ export function decodeRow(buf: ArrayBuffer): Row | null {
     max[i] = dbMin + dbStep * u[bins + i];
   }
   return {
-    path: v.getUint8(6) & 0x3f, gapped: (v.getUint8(6) & 0x80) !== 0, offset: (v.getUint8(6) & 0x40) !== 0, gen: v.getUint8(7), seq: v.getUint32(8, true), bins, t: v.getFloat64(16, true),
+    slot: (v.getUint8(6) >> 4) & 1, path: v.getUint8(6) & 0x0f, gapped: (v.getUint8(6) & 0x80) !== 0, offset: (v.getUint8(6) & 0x40) !== 0, gen: v.getUint8(7), seq: v.getUint32(8, true), bins, t: v.getFloat64(16, true),
     f0: v.getFloat64(24, true), df: v.getFloat64(32, true), avg, max,
   };
 }

@@ -171,6 +171,10 @@ json Engine::run(const json &c) {
     if (c.contains("rate_sel"))
       s.rate_sel = integer(c, "rate_sel", 1, 5);
     s.allow_gapped = true; // a span picked in the app (gapped ones are labelled there)
+    bool caps_changed = false;
+    if (c.contains("offset_tuning")) {
+      caps_changed = _offset_tuning.exchange(flag(c, "offset_tuning")) != _offset_tuning.load();
+    }
     if (c.contains("gain_db"))
       s.gain_db = num(c, "gain_db", 0, 100);
     if (c.contains("agc"))
@@ -181,6 +185,8 @@ json Engine::run(const json &c) {
     r->set(hw);
     set_view(s, r->settings());
     _cb.event(settings());
+    if (caps_changed)
+      _cb.event(caps()); // the spans' captured rates (hw_fs) changed
     return {};
   }
   if (cmd == "dsp") {
@@ -397,6 +403,8 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   s.wide = c.contains("wide") ? flag(c, "wide") : true;
   // the 8812CU's wide spans (the UI marks them); the command line opens without them
   s.allow_gapped = c.contains("allow_gapped") ? flag(c, "allow_gapped") : true;
+  if (c.contains("offset_tuning"))
+    _offset_tuning = flag(c, "offset_tuning");
   auto r = std::make_shared<wsdr::Receiver>(std::make_shared<Logger>());
   {
     std::lock_guard<std::mutex> l(_sm);
@@ -466,7 +474,7 @@ wsdr::RxSettings Engine::hw_for(const wsdr::RxSettings &v) const {
     std::lock_guard<std::mutex> l(_sm);
     cu = _cu;
   }
-  if (!cu || !v.allow_gapped || (v.rate_sel != 2 && v.rate_sel != 3))
+  if (!cu || !_offset_tuning || !v.allow_gapped || (v.rate_sel != 2 && v.rate_sel != 3))
     return v;
   if (std::abs(v.freq - std::round(v.freq / 5e6) * 5e6) > 1)
     return v; // off the 5 MHz grid (the UI never sends that): no offset, the notch stays in view
@@ -529,7 +537,7 @@ json Engine::caps() const {
     for (int r = 5; r >= std::min(_caps.min_rate_sel, _caps.gapped_min_rate_sel); r--)
       // hw_fs: what the radio captures (10/20 MHz gapped views are cut from an offset-tuned 40 MHz capture)
       rates.push_back({{"rate_sel", r}, {"fs", wsdr::Receiver::rate_of(r)}, {"gapped", r < _caps.min_rate_sel},
-                       {"hw_fs", _caps.cu && r < _caps.min_rate_sel ? 40e6 : wsdr::Receiver::rate_of(r)}});
+                       {"hw_fs", _caps.cu && _offset_tuning && (r == 2 || r == 3) ? 40e6 : wsdr::Receiver::rate_of(r)}});
     j["adapter"] = _adapter;
     j["pid"] = _caps.pid;
     j["bus"] = _open_bus;

@@ -28,7 +28,7 @@ export type DisplayOpts = {
 const PEAK = ['#8d99a8', '#c9a28f']; // peak trace, path A / B
 const AXIS_W = 46; // CSS px reserved on the left (dB axis / colour bar + time ticks)
 const AXIS_H = 22; // CSS px for the frequency axis under the spectrum
-const TOP = 16;    // CSS px headroom above the spectrum (the "dBFS" caption sits there)
+const TOP = 22;    // CSS px headroom above the spectrum (the "dBFS" caption sits there)
 const STALE_MS = 1000;
 
 export class Display {
@@ -52,6 +52,10 @@ export class Display {
   private hover: number | null = null; // CSS x
   private hoverWfY = -1;               // CSS y over the waterfall (-1: over the spectrum)
   private sepRows = -1;                // rows since the newest span separator (older rows: another span)
+  // Separator labels: drawn on an overlay canvas, not into the waterfall's pixels (a resize rescales
+  // those, and would stretch the text). row: device px from the top.
+  private seps: { row: number; label: string }[] = [];
+  private wfo: HTMLCanvasElement;
   private lastGen = -1;                // run byte of the newest row
   private genRows = 0;                 // rows of the current run
   private genCount = 0;                // run changes seen
@@ -73,6 +77,9 @@ export class Display {
     this.wf = wf;
     this.spCtx = sp.getContext('2d')!;
     this.wfCtx = wf.getContext('2d')!;
+    this.wfo = document.createElement('canvas');
+    this.wfo.style.cssText = 'position:absolute;pointer-events:none';
+    wf.parentElement?.appendChild(this.wfo);
     const on = <K extends keyof HTMLElementEventMap>(el: HTMLElement, ev: K, fn: (e: HTMLElementEventMap[K]) => void) => {
       el.addEventListener(ev, fn);
       this.off.push(() => el.removeEventListener(ev, fn));
@@ -111,6 +118,7 @@ export class Display {
     cancelAnimationFrame(this.raf);
     for (const f of this.off) f();
     this.off = [];
+    this.wfo.remove();
   }
 
   private isStale() {
@@ -156,8 +164,30 @@ export class Display {
       f.getContext('2d')!.drawImage(oldFrozen, oL, 0, oldFrozen.width - oL, rows, L, 0, wf.width - L, rows);
       this.frozen = f;
     }
+    const o = this.wfo;
+    o.style.left = `${wf.offsetLeft}px`;
+    o.style.top = `${wf.offsetTop}px`;
+    o.style.width = `${wf.clientWidth}px`;
+    o.style.height = `${wf.clientHeight}px`;
+    o.width = wf.width;
+    o.height = wf.height;
+    this.drawSeps();
     this.drawGutter();
     this.dirty = true;
+  }
+
+  private drawSeps() {
+    const c = this.wfo.getContext('2d')!, d = this.dpr, L = this.plotLeft();
+    c.clearRect(0, 0, this.wfo.width, this.wfo.height);
+    c.font = `${11 * d}px system-ui, sans-serif`;
+    c.textAlign = 'left';
+    c.textBaseline = 'top';
+    for (const s of this.seps) {
+      c.fillStyle = 'rgba(0,0,0,0.65)';
+      c.fillRect(L + 4 * d, s.row + 2 * d, c.measureText(s.label).width + 8 * d, 15 * d);
+      c.fillStyle = '#ffffff';
+      c.fillText(s.label, L + 8 * d, s.row + 4 * d);
+    }
   }
 
   // New stream (Start): forget the traces. The waterfall keeps its history below a separator.
@@ -378,6 +408,11 @@ export class Display {
     if (w <= 0) return;
     c.drawImage(this.wf, L, 0, w, H - 1, L, 1, w, H - 1);
     if (this.sepRows >= 0) this.sepRows++;
+    if (this.seps.length) {
+      for (const s of this.seps) s.row++;
+      this.seps = this.seps.filter((s) => s.row < H);
+      this.drawSeps();
+    }
     if (this.stopRows >= 0) {
       this.stopRows++;
       if (this.stopRows <= H) this.drawGutter();
@@ -397,13 +432,8 @@ export class Display {
       this.stopPending = false;
       c.fillStyle = '#ffffff';
       c.fillRect(L, 0, w, Math.max(1, Math.round(d)));
-      c.font = `${11 * d}px system-ui, sans-serif`;
-      c.textAlign = 'left';
-      c.textBaseline = 'top';
-      c.fillStyle = 'rgba(0,0,0,0.65)';
-      c.fillRect(L + 4 * d, 2 * d, c.measureText(label).width + 8 * d, 15 * d);
-      c.fillStyle = '#ffffff';
-      c.fillText(label, L + 8 * d, 4 * d);
+      this.seps.unshift({ row: 0, label });
+      this.drawSeps();
       this.wfSpan = span;
       return;
     }
@@ -447,7 +477,7 @@ export class Display {
     }
     c.textAlign = 'left';
     c.textBaseline = 'top';
-    c.fillText('dBFS', 4 * d, 1 * d);
+    c.fillText('dBFS', 4 * d, 3 * d);
     c.textBaseline = 'middle';
     const s = this.span();
     const stale = this.isStale();

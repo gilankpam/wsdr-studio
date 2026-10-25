@@ -6,7 +6,7 @@ import { createPortal } from 'react-dom';
 import { CHANNELS, channelAt, channelKey } from './channels';
 import { Display } from './display';
 import type { Hub } from './hub';
-import type { Caps, Device, DspSettings, Rate, RxSettings, Status } from './protocol';
+import type { Caps, Device, DspSettings, Rate, RxSettings, Row, Status } from './protocol';
 import { Section, Seg } from './ui';
 import {
   LOCKED, SLOT_NAME, UDEV_CMD, VIEW_COLOUR, bandOf, baseName, bytes, chanShort, devKey, devLabel, devTitle, fmtClock,
@@ -24,6 +24,7 @@ export type StationHandle = {
   req: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
   freq: () => number;
   rateOk: (rate_sel: number) => boolean;          // a continuous span on this adapter (a lock never makes one gapped)
+  fs: () => number;                               // the span it shows (Hz)
   suggest: (wfMode?: 'max' | 'avg') => Scale | null; // Auto scale from this view's picture
   busy: () => string | null; // why a linked change must not touch this view now (recording, starting)
   notice: (text: string) => void;
@@ -31,6 +32,7 @@ export type StationHandle = {
 // What a view tells the shell (sidebar summary, links, band ruler).
 export type ViewInfo = {
   freq: number; fsNow: number; rate_sel: number; fft: number; gapped: boolean; gain_db: number; agc: boolean;
+  centre: number; // where the shown span is centred (the radio's centre while running, else the request)
   open: boolean; recording: boolean; locked: boolean; selKey: string | null;
 };
 export type Link = {
@@ -38,6 +40,7 @@ export type Link = {
   register: (slot: number, h: StationHandle | null) => void;
   report: (slot: number, v: ViewInfo) => void;
   autoFit: () => void;                                         // refit the shared scale (both views' pictures)
+  survey: (r: Row) => void;                                    // the band ruler's per-channel survey
 };
 
 export function Station(p: {
@@ -60,7 +63,10 @@ export function Station(p: {
   const narrowNoted = useRef(false);
   // for callbacks that outlive a render; want: a frequency sent and not yet acknowledged (a link reads it,
   // so quick changes in a row keep the views' distance)
-  const live = useRef({ open: false, recording: false, opening: false, freq: 5180e6, want: null as number | null, wantId: 0 });
+  // rates: the open adapter's (caps), set as events arrive, so a handle used in the same commit is current
+  const live = useRef({
+    open: false, recording: false, opening: false, freq: 5180e6, want: null as number | null, wantId: 0, rates: null as Rate[] | null,
+  });
   const autoOn = useRef(loadPrefs().scale === null); // Auto scale on (mirrors prefs.scale === null; storage may be blocked)
   const view = useRef({ ghost: false, other: p.otherSel }); // for the socket callbacks
   const [home, setHome] = useState('');
@@ -143,6 +149,7 @@ export function Station(p: {
       slot,
       row: (r) => {
         d.push(r);
+        if (r.seq % 5 === 0) link.survey(r);
         const runDone = autoRun >= 0 && d.runCount() >= autoRun && d.runRows() >= 25;
         const rowsDone = autoAt >= 0 && d.rowsSeen() >= autoAt;
         if (runDone || rowsDone) {
@@ -161,8 +168,10 @@ export function Station(p: {
         switch (e.type) {
           case 'devices': {
             setDevices(e.devices);
-            // keep the pick; else the first adapter the other view has not picked
-            const free = e.devices.find((x: Device) => devKey(x) !== view.current.other) ?? e.devices[0];
+            // keep the pick; else the first adapter the other view has not picked (nothing picked yet,
+            // at a start in a two-view mode: B takes the second)
+            const other = view.current.other;
+            const free = other !== null ? e.devices.find((x: Device) => devKey(x) !== other) ?? e.devices[0] : e.devices[slot] ?? e.devices[0];
             setSelKey((k) => (k !== null && e.devices.some((x: Device) => devKey(x) === k) ? k : free ? devKey(free) : null));
             break;
           }
@@ -183,6 +192,7 @@ export function Station(p: {
             }
             wasOpen = e.open;
             live.current.open = e.open;
+            live.current.rates = e.open ? e.rates ?? null : null;
             setCaps(e);
             break;
           case 'settings':
@@ -192,6 +202,7 @@ export function Station(p: {
               if (lastRx && lastRx.freq !== e.rx.freq) updatePrefs({ retuned: true });
               rememberTuning({ freq: e.rx.freq, rate_sel: e.rx.rate_sel, gain_db: e.rx.gain_db, agc: e.rx.agc });
               lastRx = e.rx;
+              live.current.freq = e.rx.freq;
               setRx(e.rx);
               lastSentFreq.current = null;
               if (!freqFocused.current) setFreqText(mhz(e.rx.freq, 3));
@@ -215,6 +226,7 @@ export function Station(p: {
               setSaved((s) => (s && s.file === e.record.file ? s : null)); // a new recording (from any window) replaces the old note
             }
             live.current.recording = e.record?.active ?? false;
+            live.current.opening = e.state === 'opening';
             const banks = e.rx?.banks ?? 0;
             const r = rate.current;
             if (r.t && e.t > r.t && banks >= r.banks) setMsps(((banks - r.banks) * 8192) / (e.t - r.t) / 1e6);
@@ -290,6 +302,13 @@ export function Station(p: {
     live.current.opening = opening;
     live.current.freq = cur.freq;
   }, [opening, cur.freq]);
+  // stopped on an adapter the other view has just opened: take a free one
+  useEffect(() => {
+    if (open || opening || !p.otherOpen || selKey !== p.otherOpen) return;
+    const free = devices.find((d) => devKey(d) !== p.otherOpen);
+    if (free) setSelKey(devKey(free));
+  }, [p.otherOpen, selKey, open, opening, devices]);
+  useEffect(() => () => window.clearTimeout(gainTimer.current), []); // a gain change still waiting dies with the view
   useEffect(() => {
     autoOn.current = prefs.scale === null;
   }, [prefs.scale]);
@@ -335,6 +354,7 @@ export function Station(p: {
   const set = (args: Partial<RxSettings>) => {
     if (!live.current.open) {
       const n = { ...draft, ...args };
+      live.current.freq = n.freq;
       setDraft(n);
       rememberTuning({ freq: n.freq, rate_sel: n.rate_sel, gain_db: n.gain_db, agc: n.agc }); // remembered too
       if (args.freq !== undefined) setFreqText(mhz(args.freq, 3));
@@ -370,13 +390,14 @@ export function Station(p: {
     view.current = { ghost, other: p.otherSel };
     if (!ghost) display.current?.setGhost(null);
     link.register(slot, {
-      linkedSet: set, tune: tuneTo, req, freq: () => live.current.want ?? cur.freq,
-      rateOk: (r) => rates.some((x) => x.rate_sel === r && !x.gapped),
+      linkedSet: set, tune: tuneTo, req, freq: () => live.current.want ?? live.current.freq,
+      rateOk: (r) => (live.current.rates ?? rates).some((x) => x.rate_sel === r && !x.gapped),
+      fs: () => 80e6 / (1 << cur.rate_sel),
       suggest: (wfMode) => {
         if (wfMode) display.current?.setOpts({ wfMode });
         return display.current?.suggestRange() ?? null;
       },
-      busy: () => (recording ? 'it is recording' : opening ? 'it is starting' : null),
+      busy: () => (live.current.recording ? 'it is recording' : live.current.opening || starting ? 'it is starting' : null),
       notice: (text) => addBanner(text),
     });
   });
@@ -384,9 +405,9 @@ export function Station(p: {
   useEffect(() => {
     link.report(slot, {
       freq: cur.freq, fsNow, rate_sel: cur.rate_sel, fft: dsp.fft, gapped, gain_db: cur.gain_db, agc: cur.agc,
-      open, recording, locked, selKey,
+      centre: open && tuned > 0 ? tuned : cur.freq, open, recording, locked, selKey,
     });
-  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.gain_db, cur.agc, open, recording, locked, selKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey]); // eslint-disable-line react-hooks/exhaustive-deps
   // the shared preferences reach this adapter: offset tuning when running, the FFT size at once
   useEffect(() => {
     if (caps.open) req('set', { offset_tuning: prefs.offsetTuning }).catch(() => {});
@@ -503,7 +524,7 @@ export function Station(p: {
         >
           {!devices.length && <option value="">no adapter found</option>}
           {devices.map((d) => {
-            const inOther = dual && devKey(d) === p.otherOpen;
+            const inOther = devKey(d) === p.otherOpen; // also in Single: view B may still be running
             return (
               <option key={devKey(d)} value={devKey(d)} title={devTitle(d)} disabled={inOther}>
                 {devLabel(d)}
@@ -655,7 +676,7 @@ export function Station(p: {
   }
 
   return (
-    <section className={`view s${slot}${dual && selected ? ' sel' : ''}`} onMouseDown={p.onSelect} aria-label={`View ${name}`}>
+    <section className={`view s${slot}${dual && selected ? ' sel' : ''}`} onMouseDown={p.onSelect} onFocusCapture={p.onSelect} aria-label={`View ${name}`}>
       <header className="vhead">
         {dual && <span className={`slotchip s${slot}`}>{name}</span>}
         <div className="freqbox" title={lockTitle}>
@@ -683,12 +704,15 @@ export function Station(p: {
             ›
           </button>
         </div>
-        <span className="muted">
-          MHz{chan ? ` · ${chanShort(chan)}` : ''} · {spanLabel(fsNow)}
+        <span className="muted">MHz</span>
+        <span className="muted chlabel">
+          · {chan ? `${chanShort(chan)} · ` : ''}
+          {spanLabel(fsNow)} span
         </span>
         {offGrid && (
           <span className="amber" title="At a 40 MHz span the radio centres within 2422–2462 / 5090–6155 MHz, or on its 5 MHz grid; the requested frequency is marked on the plot">
-            requested {mhz(cur.freq, 0)} · tuned {mhz(tuned, 0)} ({Math.abs(tuned - cur.freq) >= 4.99e6 ? '40 MHz centres' : '5 MHz steps'})
+            <span className="long">requested {mhz(cur.freq, 0)} · </span>tuned {mhz(tuned, 0)}
+            <span className="long"> ({Math.abs(tuned - cur.freq) >= 4.99e6 ? '40 MHz centres' : '5 MHz steps'})</span>
           </span>
         )}
         {runGapped && (
@@ -698,13 +722,21 @@ export function Station(p: {
               st?.offset && st.hw_centre ? `. Radio at ${mhz(st.hw_centre)} MHz (keeps the chip notch out of view)` : ''
             }`}
           >
-            GAPPED · {gappedPct !== null ? `~${gappedPct} %` : 'part of the time'} sampled
+            GAPPED<span className="long"> · {gappedPct !== null ? `~${gappedPct} %` : 'part of the time'} sampled</span>
           </span>
         )}
         <span className="spacer" />
-        <span className="state">
+        <div className="legend">
+          {legend.map(([label, colour, on, fn]) => (
+            <button key={label} className={on ? 'on' : 'off'} aria-pressed={on} aria-label={label} onClick={fn} title={on ? `Hide ${label}` : `Show ${label}`}>
+              <span className="swatch" style={{ background: colour }} />
+              <span className="ltext">{label}</span>
+            </button>
+          ))}
+        </div>
+        <span className="state" title={stateText}>
           <span className={dotClass} />
-          {stateText}
+          <span className="stext">{stateText}</span>
         </span>
         {!open ? (
           <button disabled={!sel || opening || !connected || !sel.can_open} onClick={doStart}>
@@ -729,39 +761,40 @@ export function Station(p: {
         </button>
       </header>
 
-      {!recording && saved && (
-        <div className={saved.error ? 'strip error' : 'strip'}>
-          <span className="one-line" title={saved.file}>
-            {saved.error ? `Recording stopped: ${saved.error}. ` : saved.reason ? `Recording stopped (${saved.reason}). ` : ''}
-            Saved <code>{baseName(saved.file)}</code> · {bytes(saved.bytes)} · {saved.seconds.toFixed(1)} s · in{' '}
-            {home && saved.file.startsWith(home + '/')
-              ? '~' + saved.file.slice(home.length, saved.file.lastIndexOf('/') + 1)
-              : saved.file.slice(0, saved.file.lastIndexOf('/') + 1)}
-          </span>
-          <button onClick={() => copy(saved.file)}>Copy path</button>
-          <button className="x" onClick={() => setSaved(null)} title="Dismiss">
-            ×
-          </button>
-        </div>
-      )}
-      {sel && !sel.can_open && !open && (
-        <div className="strip error">
-          No permission to open the {sel.model}. Run once (in the wifi-sdr folder), then replug: <code>{UDEV_CMD}</code>
-          <button onClick={() => copy(UDEV_CMD)}>Copy command</button>
-        </div>
-      )}
-      {banners
-        .filter((b) => b.kind === 'error')
-        .map((b) => (
-          <div key={b.id} className="strip error">
-            {b.text}
-            <button className="x" onClick={() => dropBanner(b.id)} title="Dismiss">
-              ×
-            </button>
-          </div>
-        ))}
-
       <main className="plots">
+        <div className="strips">
+          {!recording && saved && (
+            <div className={saved.error ? 'strip error' : 'strip'}>
+              <span className="one-line" title={saved.file}>
+                {saved.error ? `Recording stopped: ${saved.error}. ` : saved.reason ? `Recording stopped (${saved.reason}). ` : ''}
+                Saved <code>{baseName(saved.file)}</code> · {bytes(saved.bytes)} · {saved.seconds.toFixed(1)} s · in{' '}
+                {home && saved.file.startsWith(home + '/')
+                  ? '~' + saved.file.slice(home.length, saved.file.lastIndexOf('/') + 1)
+                  : saved.file.slice(0, saved.file.lastIndexOf('/') + 1)}
+              </span>
+              <button onClick={() => copy(saved.file)}>Copy path</button>
+              <button className="x" onClick={() => setSaved(null)} title="Dismiss">
+                ×
+              </button>
+            </div>
+          )}
+          {sel && !sel.can_open && !open && (
+            <div className="strip error">
+              No permission to open the {sel.model}. Run once (in the wifi-sdr folder), then replug: <code>{UDEV_CMD}</code>
+              <button onClick={() => copy(UDEV_CMD)}>Copy command</button>
+            </div>
+          )}
+          {banners
+            .filter((b) => b.kind === 'error')
+            .map((b) => (
+              <div key={b.id} className="strip error">
+                {b.text}
+                <button className="x" onClick={() => dropBanner(b.id)} title="Dismiss">
+                  ×
+                </button>
+              </div>
+            ))}
+        </div>
         <div className="toasts">
           {banners
             .filter((b) => b.kind === 'info')
@@ -771,14 +804,6 @@ export function Station(p: {
               </div>
             ))}
         </div>
-          <div className="legend">
-            {legend.map(([label, colour, on, fn]) => (
-              <button key={label} className={on ? 'on' : 'off'} aria-pressed={on} onClick={fn} title={on ? `Hide ${label}` : `Show ${label}`}>
-                <span className="swatch" style={{ background: colour }} />
-                {label}
-              </button>
-            ))}
-          </div>
         <canvas ref={spRef} className="spectrum" />
         <canvas ref={wfRef} className="waterfall" />
       </main>

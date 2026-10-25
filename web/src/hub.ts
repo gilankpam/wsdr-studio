@@ -31,18 +31,30 @@ export class Hub {
         if (gen !== this.gen) return; // stopped meanwhile
         this.client = c;
         c.onRow = (r) => {
+          if (gen !== this.gen) return; // a stopped client's late callbacks
           for (const s of this.subs) {
             if (s.slot === r.slot) s.row?.(r);
             else if (s.slot !== null) s.other?.(r);
           }
         };
         c.onConnection = (up) => {
+          if (gen !== this.gen) return;
           this.up = up;
           if (!up) this.kept.clear(); // the server sends the state again on reconnect
           for (const s of this.subs) s.connection?.(up);
         };
-        c.onGiveUp = (why) => this.giveUp(why);
+        c.onGiveUp = (why) => gen === this.gen && this.giveUp(why);
         c.onEvent = (e) => {
+          if (gen !== this.gen) return;
+          // a closed adapter has no live settings: the last run's must not come back to a late view
+          if (e.type === 'caps' && !e.open) {
+            const k = `${e.slot ?? '-'}:settings`, kept = this.kept.get(k);
+            if (kept?.rx) {
+              const rest = { ...kept };
+              delete rest.rx;
+              this.kept.set(k, rest);
+            }
+          }
           if (KEPT.has(e.type)) {
             const k = `${e.slot ?? '-'}:${e.type}`;
             // settings may carry rx or dsp alone: keep both

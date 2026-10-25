@@ -82,12 +82,14 @@ button.icon { width: 34px; padding: 0; display: flex; align-items: center; justi
 }
 .editing > span { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .editing button { font-weight: 700; }
+.editing button.s0 { color: var(--view-a); }
+.editing button.s1 { color: var(--view-b); }
 .editing button.s0.on { background: var(--view-a); border-color: var(--view-a); color: #0b0e13; }
 .editing button.s1.on { background: var(--view-b); border-color: var(--view-b); color: #0b0e13; }
 .sbsec { display: flex; flex-direction: column; gap: 8px; }
 .sbsec + .sbsec { padding-top: 10px; border-top: 1px solid #1d2733; }
 .sbhead {
-  all: unset; cursor: pointer; display: flex; align-items: center; gap: 6px;
+  all: unset; cursor: pointer; display: flex; align-items: center; gap: 6px; min-height: 24px;
   font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
 }
 .sbhead:focus-visible { outline: 2px solid var(--on-line); }
@@ -100,7 +102,7 @@ button.icon { width: 34px; padding: 0; display: flex; align-items: center; justi
 .links { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #0e131a; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 button.chip { display: flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 9px; border-radius: 13px; font-size: 12px; border-style: dashed; color: var(--muted2); }
-button.chip.on { border-style: solid; }
+button.chip.on { border-style: solid; color: #fff; }
 
 .workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .views { display: flex; flex: 1; min-height: 0; }
@@ -114,11 +116,18 @@ button.chip.on { border-style: solid; }
   .views.panorama .view + .view { border-left: none; border-top: 1px solid var(--line); }
 }
 
-.view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.view { display: flex; flex-direction: column; flex: 1; min-height: 0; container: view / inline-size; }
+/* one line: what does not fit goes in this order: channel label, long notes, legend words, state word */
 .vhead {
-  min-height: 44px; flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 12px;
+  height: 47px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px; overflow: hidden;
   background: var(--panel); border-bottom: 1px solid var(--line); border-top: 3px solid transparent;
 }
+.vhead > * { flex-shrink: 0; }
+.vhead .spacer { flex-shrink: 1; min-width: 0; }
+.vhead .amber, .vhead .chlabel { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@container view (max-width: 760px) { .vhead .chlabel, .vhead .long { display: none; } }
+@container view (max-width: 620px) { .vhead .ltext, .vhead .stext { display: none; } }
+.view.sel .vhead { background: #13202c; }
 .view.sel.s0 .vhead { border-top-color: var(--view-a); }
 .view.sel.s1 .vhead { border-top-color: var(--view-b); }
 .slotchip { font-weight: 700; padding: 2px 7px; border-radius: 4px; color: #0b0e13; }
@@ -128,8 +137,8 @@ button.chip.on { border-style: solid; }
 .freqbox button { width: 28px; padding: 0; }
 input.freq { width: 96px; height: 30px; text-align: center; font-family: var(--mono); font-size: 15px; color: #f2f5f8; background: #0f141b; }
 .badge { font-size: 11px; font-weight: 700; color: var(--warn); background: rgba(255, 183, 77, 0.14); padding: 3px 7px; border-radius: 4px; }
-.legend { position: absolute; top: 4px; right: 10px; z-index: 4; display: flex; gap: 4px; }
-.legend button { min-height: 22px; padding: 0 7px; font-size: 11px; display: flex; align-items: center; gap: 5px; background: rgba(11, 14, 19, 0.8); }
+.legend { display: flex; gap: 4px; }
+.legend button { min-height: 26px; padding: 0 8px; font-size: 12px; display: flex; align-items: center; gap: 5px; }
 .legend button.off { color: var(--muted); border-style: dashed; }
 .legend button.off .swatch { opacity: 0.3; }
 .swatch { width: 12px; height: 3px; border-radius: 1px; }
@@ -147,6 +156,8 @@ button.rec.on { background: #5a1f22; border-color: var(--bad); color: #ffd6d6; f
 .strip button.x { margin-left: auto; background: transparent; border-color: transparent; font-size: 16px; line-height: 1; }
 
 .plots { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
+/* two views: notes float over the plot, so both views' plots stay aligned */
+.app:not(.mode-single) .strips { position: absolute; top: 0; left: 0; right: 0; z-index: 6; }
 /* info notes float over the plot (bottom right) so the layout never jumps */
 .toasts { position: absolute; bottom: 12px; right: 12px; z-index: 5; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; pointer-events: none; }
 .toast {
@@ -155,6 +166,7 @@ button.rec.on { background: #5a1f22; border-color: var(--bad); color: #ffd6d6; f
 }
 canvas { display: block; width: 100%; }
 canvas.spectrum { flex: 0 0 38%; min-height: 140px; cursor: crosshair; }
+.views.compare canvas.spectrum { flex-basis: 55%; }
 canvas.waterfall { flex: 1; min-height: 100px; background: #000; cursor: crosshair; border-top: 1px solid var(--line); }
 
 .vfoot {
@@ -168,12 +180,31 @@ canvas.waterfall { flex: 1; min-height: 100px; background: #000; cursor: crossha
 .dot.warn { background: var(--warn); }
 .dot.bad { background: var(--bad); }
 
-/* frequency slider (Tuner.tsx), until the band ruler */
-.tuner { display: flex; align-items: center; gap: 10px; padding: 4px 12px 16px; background: #0e131a; border-bottom: 1px solid var(--line); }
-.tuner .bands { display: flex; gap: 4px; }
-.tuner .bands button { min-height: 26px; padding: 0 8px; }
-.tuner .track { position: relative; flex: 1; }
-.tuner input[type='range'] { width: 100%; margin: 0; padding: 0; accent-color: var(--on-line); }
-.tuner .ticks { position: absolute; left: 8px; right: 8px; top: 18px; height: 10px; pointer-events: none; }
-.tuner .ticks span { position: absolute; transform: translateX(-50%); font-size: 9px; color: var(--muted); }
-.tuner .val { min-width: 72px; }
+/* band ruler (BandRuler.tsx) */
+.ruler {
+  flex: none; display: grid; grid-template-columns: minmax(150px, 15%) 12px minmax(0, 1fr); column-gap: 0;
+  padding: 4px 12px 2px; background: #0e131a; border-bottom: 1px solid var(--line);
+}
+.rseg { position: relative; height: 44px; cursor: crosshair; }
+.rbreak { display: flex; align-items: center; justify-content: center; color: #4a5768; font-size: 16px; }
+.rband, .rgroup { position: absolute; top: 0; height: 14px; font-size: 10px; letter-spacing: 0.06em; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.rgroup { border-left: 1px solid #2a3646; padding-left: 4px; }
+button.rcell {
+  position: absolute; top: 17px; height: 22px; min-height: 0; padding: 0; border: 1px solid #263243; border-radius: 2px;
+  background: #0f141b; font-size: 10px; color: var(--muted2); overflow: hidden;
+}
+button.rcell:disabled { opacity: 1; cursor: not-allowed; }
+button.rview {
+  position: absolute; top: 14px; height: 28px; min-height: 0; padding: 0 0 0 3px; border: 2px solid; border-radius: 4px;
+  font-size: 10px; font-weight: 700; text-align: left; color: #fff; cursor: pointer;
+}
+button.rview.s0 { background: rgba(79, 195, 247, 0.16); }
+button.rview.s1 { background: rgba(199, 146, 234, 0.16); }
+button.rview.gapped { border-style: dashed; }
+button.rview:not(.sel) { opacity: 0.75; }
+.rfoot { grid-column: 1 / -1; display: flex; gap: 8px; font-size: 10px; color: var(--muted); min-height: 14px; }
+.rlink { color: var(--text); }
+.rlink.paused { color: var(--amber); }
+.ruler.compact .rseg { height: 24px; }
+.ruler.compact button.rcell { top: 2px; height: 20px; }
+.ruler.compact button.rview { top: 0; height: 24px; }

@@ -22,7 +22,7 @@ export const devKey = (d: Device) => `${d.bus}-${d.port}`;
 export const devLabel = (d: Device) => `${d.model} · ${d.speed_mbps >= 5000 ? 'USB 3' : 'USB 2'} · bus ${d.bus}`;
 export const devTitle = (d: Device) =>
   `${d.model} (${d.chip}), bus ${d.bus} port ${d.port}, ${d.speed_mbps} Mbit/s${d.controller ? `, host controller ${d.controller}` : ''}`;
-export const bytes = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(0)} MB`);
+export const bytes = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e11 ? 0 : 2)} GB` : `${(n / 1e6).toFixed(0)} MB`);
 export const baseName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
 export const chanShort = (c: Channel) => `ch ${c.width === 40 ? c.ch + 2 : c.label}`;
 export const fmtDur = (s: number) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : s >= 60 ? `${Math.floor(s / 60)} min` : `${Math.max(0, Math.floor(s))} s`);

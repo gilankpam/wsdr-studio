@@ -8,6 +8,7 @@ import type { Prefs, Scale } from './util';
 
 export function Panorama(p: {
   hub: Hub; prefs: Prefs; scale: Scale; sources: (Source | null)[]; overlay: string | null; onRetune: (f: number) => void;
+  offAxis: string | null; // a stopped view left off the axis (far away): where it is
 }) {
   const spRef = useRef<HTMLCanvasElement>(null);
   const wfRef = useRef<HTMLCanvasElement>(null);
@@ -55,6 +56,7 @@ export function Panorama(p: {
   }, [p.hub]);
   return (
     <main className="plots pano" aria-label="Panorama: views A and B on one axis">
+      {p.offAxis && <div className="offaxis">{p.offAxis}</div>}
       <div className="toasts">
         {hint && (
           <div className="toast" onClick={() => setHint(null)}>

@@ -44,6 +44,9 @@ const TOP = 22;    // CSS px headroom above the spectrum (the "dBFS" caption sit
 const STALE_MS = 1000;
 const FRESH_MS = 500; // stitched: a view's newest row older than this (or 3 rows) is not drawn into the waterfall
 const SLOT = ['A', 'B'];
+const BREAK_PX = 36; // CSS px between the pieces of a broken (stitched) axis
+// A piece of the axis: frequencies f0..f1 over plot x0..x1 (device px from the plot's left edge).
+type Piece = { f0: number; f1: number; x0: number; x1: number };
 
 export class Display {
   private sp: HTMLCanvasElement;
@@ -407,17 +410,50 @@ export class Display {
     return { f0: lo, f1: hi };
   }
 
+  // The axis in pieces over a plot w px wide (x from the plot's left edge). One view, or neighbouring
+  // views (a gap under half a span is shaded on the way): one piece. Views far apart: a piece each,
+  // sized by its MHz, with a break between, so neither is squeezed into a sliver.
+  private axis(w: number): Piece[] {
+    const s = this.span();
+    if (!s) return [];
+    const iv = (this.opts.stitch ?? []).filter((x) => x.hi > x.lo).map((x) => [x.lo, x.hi]).sort((a, b) => a[0] - b[0]);
+    const parts: number[][] = [];
+    for (const [lo, hi] of iv) {
+      const last = parts[parts.length - 1];
+      if (last && lo - last[1] <= 0.5 * Math.min(hi - lo, last[1] - last[0])) last[1] = Math.max(last[1], hi);
+      else parts.push([lo, hi]);
+    }
+    if (parts.length < 2) return [{ f0: s.f0, f1: s.f1, x0: 0, x1: w }];
+    const brk = BREAK_PX * this.dpr, total = parts.reduce((t, [lo, hi]) => t + hi - lo, 0), avail = Math.max(1, w - brk * (parts.length - 1));
+    let x = 0;
+    return parts.map(([lo, hi]) => {
+      const piece = { f0: lo, f1: hi, x0: x, x1: x + (avail * (hi - lo)) / total };
+      x = piece.x1 + brk;
+      return piece;
+    });
+  }
+  // where a frequency is (clamped into the nearest piece), and what is at x (null: in a break)
+  private static xAt(ax: Piece[], f: number) {
+    const p = ax.find((q) => f <= q.f1) ?? ax[ax.length - 1];
+    return p.x0 + ((Math.min(p.f1, Math.max(p.f0, f)) - p.f0) / (p.f1 - p.f0)) * (p.x1 - p.x0);
+  }
+  private static fAt(ax: Piece[], x: number) {
+    const p = ax.find((q) => x >= q.x0 && x < q.x1);
+    if (!p) return null;
+    const fx = (p.f1 - p.f0) / (p.x1 - p.x0); // Hz per px
+    return { f: p.f0 + (x - p.x0) * fx, fx };
+  }
+  private static onAxis(ax: Piece[], f: number) {
+    return ax.some((q) => f >= q.f0 && f <= q.f1);
+  }
+
   private plotLeft() {
     return AXIS_W * this.dpr;
   }
 
   private freqAt(cssX: number): number | null {
-    const s = this.span();
-    if (!s) return null;
-    const x = cssX * this.dpr - this.plotLeft();
     const w = this.sp.width - this.plotLeft();
-    if (x < 0 || x > w) return null;
-    return s.f0 + (s.f1 - s.f0) * (x / w);
+    return Display.fAt(this.axis(w), cssX * this.dpr - this.plotLeft())?.f ?? null;
   }
 
   private wfLo() {
@@ -494,7 +530,9 @@ export class Display {
       .map((x) => ({ r: x, ...Display.range(x) }));
     // stitched: rows sit at their own frequencies, so only a change of the axis moves older rows off it
     const ax0 = this.span();
-    const span = this.opts.stitch && ax0 ? `${(ax0.f0 / 1e6).toFixed(3)}–${(ax0.f1 / 1e6).toFixed(3)} MHz` : label(r);
+    const span = this.opts.stitch && ax0
+      ? this.axis(w).map((q) => `${(q.f0 / 1e6).toFixed(3)}–${(q.f1 / 1e6).toFixed(3)}`).join(', ') + ' MHz'
+      : label(r);
     if (this.wfSpan && (span !== this.wfSpan || this.stopPending)) {
       // A retune, span change or new run: a separator. The label describes the OLD rows below it (the
       // new rows above match the axis), so nothing below the line is misread.
@@ -520,10 +558,14 @@ export class Display {
     this.wfSpan = span;
     const img = c.createImageData(w, 1);
     const px = new Uint32Array(img.data.buffer);
-    const ax = this.opts.stitch ? this.span()! : { f0: rows[0].lo, f1: rows[0].hi };
-    const fx = (ax.f1 - ax.f0) / w; // Hz per pixel
+    const ax = this.opts.stitch ? this.axis(w) : [{ f0: rows[0].lo, f1: rows[0].hi, x0: 0, x1: w }];
     for (let x = 0; x < w; x++) {
-      const fa = ax.f0 + x * fx, fm = fa + fx / 2;
+      const at = Display.fAt(ax, x);
+      if (!at) {
+        px[x] = 0xff1a1511; // a break in the axis
+        continue;
+      }
+      const fa = at.f, fx = at.fx, fm = fa + fx / 2;
       // the row covering this pixel (overlapping views: the one whose centre is nearer)
       let best: Row | null = null, bd = Infinity, lo = 0;
       for (const q of rows) {
@@ -576,37 +618,54 @@ export class Display {
     const stale = this.isStale();
     const w = W - L;
     if (s && w > 0) {
-      const xOf = (f: number) => L + ((f - s.f0) / (s.f1 - s.f0)) * w;
-      // frequency grid + labels
-      // a label every ~70 px at least (1-2-5 steps): a wide stitched axis stays readable
-      const pxPerMHz = w / ((s.f1 - s.f0) / 1e6);
-      const fstep = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000].find((x) => x * pxPerMHz >= 70 * d) ?? 1000;
-      c.textAlign = 'center';
-      for (let f = Math.ceil(s.f0 / 1e6 / fstep) * fstep; f <= s.f1 / 1e6; f += fstep) {
-        const x = Math.round(xOf(f * 1e6)) + 0.5;
-        c.strokeStyle = '#1f2630';
-        c.beginPath();
-        c.moveTo(x, T);
-        c.lineTo(x, ph);
-        c.stroke();
-        c.fillStyle = '#7d8896';
-        c.fillText(f.toFixed(fstep < 1 ? 1 : 0), x, ph + B / 2);
+      const ax = this.axis(w);
+      const xOf = (f: number) => L + Display.xAt(ax, f);
+      for (const q of ax) {
+        // frequency grid + labels: one every ~70 px at least (1-2-5 steps), so a wide axis stays readable
+        const pxPerMHz = (q.x1 - q.x0) / ((q.f1 - q.f0) / 1e6);
+        const fstep = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000].find((x) => x * pxPerMHz >= 70 * d) ?? 1000;
+        c.textAlign = 'center';
+        c.textBaseline = 'middle';
+        for (let f = Math.ceil(q.f0 / 1e6 / fstep) * fstep; f <= q.f1 / 1e6; f += fstep) {
+          const x = Math.round(xOf(f * 1e6)) + 0.5;
+          c.strokeStyle = '#1f2630';
+          c.beginPath();
+          c.moveTo(x, T);
+          c.lineTo(x, ph);
+          c.stroke();
+          c.fillStyle = '#7d8896';
+          c.fillText(f.toFixed(fstep < 1 ? 1 : 0), x, ph + B / 2);
+        }
+        // Wi-Fi channel markers (20 MHz channels), while they are at least ~30 px apart
+        c.fillStyle = '#5c6b7a';
+        c.textBaseline = 'top';
+        for (const ch of 20 * pxPerMHz >= 30 * d ? channelsIn(q.f0, q.f1) : []) {
+          const x = Math.round(xOf(ch.centre)) + 0.5;
+          c.strokeStyle = '#2b3a4a';
+          c.setLineDash([3 * d, 3 * d]);
+          c.beginPath();
+          c.moveTo(x, T);
+          c.lineTo(x, ph);
+          c.stroke();
+          c.setLineDash([]);
+          c.fillText(`ch ${ch.label}`, x, T + 2 * d);
+        }
       }
-      // Wi-Fi channel markers (20 MHz channels)
-      c.fillStyle = '#5c6b7a';
-      c.textBaseline = 'top';
-      // channel markers while they are at least ~30 px apart (20 MHz channels are 20 MHz apart)
-      for (const ch of 20 * pxPerMHz >= 30 * d ? channelsIn(s.f0, s.f1) : []) {
-        const x = Math.round(xOf(ch.centre)) + 0.5;
-        c.strokeStyle = '#2b3a4a';
-        c.setLineDash([3 * d, 3 * d]);
-        c.beginPath();
-        c.moveTo(x, T);
-        c.lineTo(x, ph);
-        c.stroke();
-        c.setLineDash([]);
-        c.fillText(`ch ${ch.label}`, x, T + 2 * d);
+      // breaks between the pieces: how far apart they are
+      for (let i = 1; i < ax.length; i++) {
+        const x0 = L + ax[i - 1].x1, x1 = L + ax[i].x0;
+        c.fillStyle = '#141a22';
+        c.fillRect(x0, T, x1 - x0, ph - T);
+        c.fillStyle = '#8e99a7';
+        c.textAlign = 'center';
+        c.textBaseline = 'middle';
+        c.font = `${11 * d}px system-ui, sans-serif`;
+        const mid = (T + ph) / 2;
+        c.fillText('≈', (x0 + x1) / 2, mid - 14 * d);
+        c.fillText(`${Math.round((ax[i].f0 - ax[i - 1].f1) / 1e6)}`, (x0 + x1) / 2, mid);
+        c.fillText('MHz', (x0 + x1) / 2, mid + 14 * d);
       }
+      c.textBaseline = 'middle';
       const st = this.opts.stitch;
       // the views on this axis: one (this display's rows), or each stitched view with its own rows
       const views: { slot: number; src: Source; keys: number[]; lo: number; hi: number }[] = st
@@ -619,11 +678,12 @@ export class Display {
       // overlapping or nested spans split the same way in traces, waterfall and hover
       const ordered = [...views].sort((x, y) => x.lo + x.hi - (y.lo + y.hi));
       const overlap = ordered.length > 1 ? Math.min(ordered[0].hi, ordered[1].hi) - Math.max(ordered[0].lo, ordered[1].lo) : 0;
-      const fxs = (s.f1 - s.f0) / w;
       const owner = new Int8Array(Math.max(0, w)).fill(-1); // w < 0 while the canvas is hidden (Panorama)
       if (st)
         for (let x = 0; x < w; x++) {
-          const fm = s.f0 + (x + 0.5) * fxs;
+          const at = Display.fAt(ax, x + 0.5);
+          if (!at) continue;
+          const fm = at.f;
           let bd = Infinity;
           for (const v of views)
             if (fm >= v.lo && fm <= v.hi && Math.abs(fm - (v.lo + v.hi) / 2) < bd) [owner[x], bd] = [v.slot, Math.abs(fm - (v.lo + v.hi) / 2)];
@@ -640,7 +700,7 @@ export class Display {
         // at +-1.5 % of fs); gapped runs only (offset-tuned views keep it out of view). 8822B: 40 MHz on
         // 2.4 GHz. Shade it so it is not read as a missing signal.
         const mid0 = (rg.lo + rg.hi) / 2;
-        if ((v.src.chipNotch && lr?.gapped && !lr.offset) || (v.src.notchWide && lr)) {
+        if (((v.src.chipNotch && lr?.gapped && !lr.offset) || (v.src.notchWide && lr)) && Display.onAxis(ax, mid0)) {
           const hw = v.src.notchWide ? 1e6 : (rg.hi - rg.lo) * 0.015;
           const x0 = xOf(mid0 - hw), x1 = xOf(mid0 + hw);
           if (x1 - x0 >= 3 * d) {
@@ -660,7 +720,7 @@ export class Display {
         }
         // requested frequency, when the hardware centre differs (5 MHz synthesizer grid)
         const m = v.src.marker;
-        if (m !== null && m > s.f0 && m < s.f1 && Math.abs(m - mid0) > (rg.hi - rg.lo) / 200) {
+        if (m !== null && Display.onAxis(ax, m) && Math.abs(m - mid0) > (rg.hi - rg.lo) / 200) {
           const x = Math.round(xOf(m)) + 0.5;
           c.strokeStyle = '#ffd54f';
           c.setLineDash([6 * d, 4 * d]);
@@ -686,20 +746,20 @@ export class Display {
           const r = this.last[k];
           if (!r) continue;
           // drawn where its frequencies are on the axis (all of it, for one view)
-          const { lo } = Display.range(r);
-          const fx = (s.f1 - s.f0) / w;
-          const xa = Math.max(0, Math.floor((lo - s.f0) / fx)), xb = Math.min(w, Math.ceil((lo + r.bins * r.df - s.f0) / fx));
+          const { lo, hi } = Display.range(r);
+          const xa = Math.max(0, Math.floor(Display.xAt(ax, lo))), xb = Math.min(w, Math.ceil(Display.xAt(ax, hi)));
           const draw = (arr: Float32Array, colour: string, lw: number) => {
             c.strokeStyle = colour;
             c.lineWidth = lw * d;
             c.beginPath();
             let pen = false; // stitched: the line breaks where another view owns the pixels
             for (let x = xa; x < xb; x++) {
-              if (st && owner[x] !== v.slot) {
+              const at = Display.fAt(ax, x);
+              if (!at || at.f < lo || at.f > hi || (st && owner[x] !== v.slot)) {
                 pen = false;
                 continue;
               }
-              const fa = s.f0 + x * fx;
+              const fa = at.f, fx = at.fx;
               const b0 = Math.max(0, Math.floor((fa - lo) / r.df)), b1 = Math.min(r.bins, Math.max(b0 + 1, Math.floor((fa + fx - lo) / r.df)));
               let val = -1e9;
               for (let b = b0; b < b1; b++) val = Math.max(val, arr[b]);
@@ -722,14 +782,14 @@ export class Display {
         c.font = `${11 * d}px system-ui, sans-serif`;
         c.textBaseline = 'top';
         c.textAlign = 'center';
-        if (b.lo > a.hi + 1e3) {
+        if (b.lo > a.hi + 1e3 && ax.length === 1) {
           // not covered by either view
           const x0 = xOf(a.hi), x1 = xOf(b.lo);
           c.fillStyle = 'rgba(120,130,150,0.08)';
           c.fillRect(x0, T, x1 - x0, ph - T);
           c.fillStyle = '#8e99a7';
           if (x1 - x0 > 60 * d) c.fillText('not covered', (x0 + x1) / 2, T + 40 * d);
-        } else {
+        } else if (b.lo <= a.hi + 1e3) {
           // the seams: wherever one view's part ends and the other's begins (two for nested spans)
           let labelled = false;
           for (let x = 1; x < w; x++) {

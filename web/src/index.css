@@ -136,6 +136,7 @@ button.toggle.on .switch i { transform: translateX(14px); background: #0b0e13; }
 .mode-panorama .view.s0 .vcard { left: 25%; top: 140px; }
 .mode-panorama .view.s1 .vcard { left: 75%; top: 140px; }
 .plots.pano { grid-column: 1 / -1; border-top: 1px solid var(--line); }
+.offaxis { position: absolute; top: 4px; right: 12px; z-index: 4; padding: 2px 8px; font-size: 12px; color: var(--muted2); background: rgba(11, 14, 19, 0.85); border-radius: 4px; }
 .views.compare .view + .view { border-top: 1px solid var(--line); }
 .views.panorama .view + .view { border-left: 1px solid var(--line); }
 

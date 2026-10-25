@@ -184,7 +184,7 @@ export default function App() {
   // Entering Panorama puts B one span above A; Compare puts it on A's frequency. Pending until both
   // views have appeared and reported.
   const prevMode = useRef(mode);
-  const alignPending = useRef<Mode | null>(null);
+  const alignPending = useRef<Mode | null>(mode === 'single' ? null : mode); // also at a start in a two-view mode
   useEffect(() => {
     if (prevMode.current !== mode) {
       prevMode.current = mode;
@@ -331,14 +331,15 @@ export default function App() {
     </section>
   );
   const auto = prefs.scale === null;
-  // Panorama stitches neighbouring spans; far apart, one axis would squeeze both into slivers
+  // Panorama: views far apart (more than two spans)
   const [va, vb] = views;
   const gap = va && vb ? Math.max(va.src.lo, vb.src.lo) - Math.min(va.src.hi, vb.src.hi) : 0;
-  const panoNote = !views.some((v) => v?.open)
-    ? 'Stopped. Press ▶ Start in a view’s header.'
-    : va && vb && gap > 2 * Math.max(va.fsNow, vb.fsNow)
-      ? `A and B are ${Math.round(gap / 1e6)} MHz apart: Panorama is for neighbouring spans (Compare shows each on its own axis)`
-      : null;
+  const far = !!va && !!vb && gap > 2 * Math.max(va.fsNow, vb.fsNow);
+  // a stopped view far from a running one stays off the axis (it would squash the running one's part)
+  const offAxis = far ? views.findIndex((v, i) => v && !v.open && views[i ^ 1]?.open) : -1;
+  const panoSources = views.map((v, i) => (i === offAxis ? null : v?.src ?? null));
+  // (views far apart both running: the plot breaks its axis between them)
+  const panoNote = views.some((v) => v?.open) ? null : 'Stopped. Press ▶ Start in a view’s header.';
 
   return (
     <div className={`app mode-${mode}`}>
@@ -529,7 +530,8 @@ export default function App() {
                 hub={hub}
                 prefs={prefs}
                 scale={scale}
-                sources={views.map((v) => v?.src ?? null)}
+                sources={panoSources}
+                offAxis={offAxis >= 0 ? `${SLOT_NAME[offAxis]} is stopped at ${Math.round((views[offAxis]?.freq ?? 0) / 1e6)} MHz, off this axis` : null}
                 overlay={panoNote}
                 onRetune={(f) => {
                   // the view whose part this is (or the nearer one) moves its centre there

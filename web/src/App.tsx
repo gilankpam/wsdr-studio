@@ -71,7 +71,12 @@ export default function App() {
   const [mapOther, setMapOther] = useState<number | null>(null); // that view stays mounted (hidden): it keeps its adapter
   // Views to put back once they have settled (not opening; a Stop's close done): tuning, and a start
   // when they ran. key: the adapter it is for (a view whose adapter changed meanwhile is left alone).
-  const restore = useRef<{ slot: number; key: string | null; args?: Partial<RxSettings>; start: boolean }[]>([]);
+  // pid: its model too (a port can get another adapter); at: when queued (it lapses after 15 s)
+  const restore = useRef<{ slot: number; key: string | null; pid: number | null; args?: Partial<RxSettings>; start: boolean; at: number }[]>([]);
+  // bumped by every Stop, leave and entry: a Start or a restore queued behind a close does nothing
+  // if anything happened since
+  const mapSeq = useRef(0);
+  const mapRunRef = useRef(false);
   const [restoreKick, setRestoreKick] = useState(0);
   const mapClose = useRef<Promise<unknown> | null>(null); // a Stop's close in flight
   const backTo = useRef<Mode | null>(null); // the mode the map was entered from (no new alignment going back to it)
@@ -263,6 +268,7 @@ export default function App() {
       setMapRun(false);
       const v = views[slot];
       restore.current = [];
+      mapSeq.current++;
       setMapNote(null);
       mapReturn.current = v
         ? { mode, freq: v.freq, rate_sel: v.rate_sel, wasOpen: v.open, other: stopped !== null ? { slot: stopped, key: views[stopped]?.selKey ?? null } : null }
@@ -276,6 +282,8 @@ export default function App() {
   const leaveMap = (to: Mode, f: number | null) => {
     const r = mapReturn.current, slot = mapSlot;
     mapReturn.current = null;
+    const seq = ++mapSeq.current;
+    mapRunRef.current = false;
     backTo.current = r?.mode ?? null;
     setMapRun(false);
     setMapStep(null);
@@ -285,11 +293,14 @@ export default function App() {
     const args = { freq: f !== null ? snap(f) : r ? r.freq : views[slot]?.freq ?? 5180e6, rate_sel, wide: true };
     const shownAfter = (i: number) => (isDual(to) ? true : i === 0);
     const key = views[slot]?.selKey ?? null;
+    const pidOf = (k: string | null) => devices.find((d) => devKey(d) === k)?.pid ?? null;
     const queue = () => {
-      const items: { slot: number; key: string | null; args?: Partial<RxSettings>; start: boolean }[] = [];
+      if (seq !== mapSeq.current) return; // entered the map again meanwhile
+      const at = Date.now();
+      const items: { slot: number; key: string | null; pid: number | null; args?: Partial<RxSettings>; start: boolean; at: number }[] = [];
       if (to === 'single' && slot === 1) hub.request('close', { slot: 1 }).catch(() => {});
-      else items.push({ slot, key, args, start: !!r?.wasOpen });
-      if (r?.other && shownAfter(r.other.slot)) items.push({ slot: r.other.slot, key: r.other.key, start: true });
+      else items.push({ slot, key, pid: pidOf(key), args, start: !!r?.wasOpen && !!key, at });
+      if (r?.other && shownAfter(r.other.slot) && r.other.key) items.push({ slot: r.other.slot, key: r.other.key, pid: pidOf(r.other.key), start: true, at });
       restore.current = [...restore.current.filter((x) => !items.some((i) => i.slot === x.slot)), ...items];
       setRestoreKick((k) => k + 1);
     };
@@ -304,13 +315,16 @@ export default function App() {
   useEffect(() => {
     restore.current = restore.current.filter((x) => {
       const v = views[x.slot], h = handles.current[x.slot];
+      if (Date.now() - x.at > 15000) return false; // never settled: let it go
       if (!h || !v?.ready || v.locked) return true; // not settled yet: keep it
-      if (x.key && v.selKey !== x.key) return false; // its adapter changed meanwhile: leave the view as it is
+      // its adapter (port and model) changed meanwhile: leave the view as it is
+      const pid = devices.find((d) => devKey(d) === v.selKey)?.pid ?? null;
+      if (x.key && (v.selKey !== x.key || (x.pid !== null && pid !== x.pid))) return false;
       if (x.args) h.linkedSet(x.args); // running: retuned; stopped: its next start
       if (x.start && !h.running()) h.startWith(x.args ?? {});
       return false;
     });
-  }, [views, mode, restoreKick]);
+  }, [views, mode, restoreKick, devices]);
   // the close waits for a Start still running (the engine's queue is serial); on failure the view stays
   // (its recording note may come after the reply: it goes to a shown view for a few seconds more)
   const stopAndEnter = (to: Mode, slot: number) => {
@@ -353,9 +367,12 @@ export default function App() {
     const v = views[mapSlot];
     if (v?.recording) return handles.current[mapSlot]?.notice('End the recording first: the map retunes this adapter');
     setMapRun(true);
+    mapRunRef.current = true;
     setMapNote(null);
+    const seq = mapSeq.current;
     const first = mapPlan ? { freq: mapPlan.centres[0], rate_sel: mapPlan.rate_sel, wide: true } : {};
     const open = () => {
+      if (seq !== mapSeq.current || !mapRunRef.current) return; // stopped or left meanwhile
       const h = handles.current[mapSlot];
       if (h && !h.running()) h.startWith(first);
     };
@@ -364,6 +381,8 @@ export default function App() {
   };
   const mapStop = () => {
     setMapRun(false);
+    mapRunRef.current = false;
+    mapSeq.current++;
     if (handles.current[mapSlot]?.running()) {
       const p: Promise<unknown> = hub
         .request('close', { slot: mapSlot })

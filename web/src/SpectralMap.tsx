@@ -62,7 +62,7 @@ export function SpectralMap(p: {
           s.gen = r.gen;
           s.rowCentre = r.f0 + r.df * (r.bins / 2 - 0.5);
           const col = s.collect, pl = opts.current.plan, into = s.partial; // (Clear replaces the partial row: the step goes on into the new one)
-          if (!col || !pl || !into) return;
+          if (!col || !pl || !into || Math.abs(s.rowCentre - col.c) > 2.5e6) return; // only rows of this step
           col.rows++;
           const src = opts.current.prefs.wfMode === 'avg' ? r.avg : r.max;
           for (let i = 0; i < r.bins; i++) {

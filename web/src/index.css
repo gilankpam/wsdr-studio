@@ -283,8 +283,12 @@ button.rtab.s1 { background: var(--view-b); }
 .views.compare .vcard svg { display: none; }
 .views.compare .vcard { gap: 6px; padding: 12px 16px; }
 
-/* Spectral Map (SpectralMap.tsx): the views are hidden, the map fills the workspace */
-.mode-map .views > .view { display: none; }
+/* Spectral Map (SpectralMap.tsx): the views are hidden, the map fills the workspace; a hidden view's
+   notes and notices still show over the map */
+.mode-map .views { position: relative; }
+.mode-map .views > .view { position: absolute; inset: 0; z-index: 7; visibility: hidden; pointer-events: none; }
+.mode-map .views > .view canvas, .mode-map .views > .view .vfoot, .mode-map .views > .view .vcard { display: none; }
+.mode-map .views > .view .toasts, .mode-map .views > .view .strips { visibility: visible; pointer-events: auto; }
 .smap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .maphead .mtitle { font-weight: 600; color: #e6ebf1; white-space: nowrap; }
 .smap-plots { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; overflow: hidden; }

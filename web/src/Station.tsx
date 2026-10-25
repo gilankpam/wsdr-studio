@@ -98,6 +98,7 @@ export function Station(p: {
   const [banners, setBanners] = useState<Banner[]>([]);
   const [saved, setSaved] = useState<Saved | null>(null);
   const [starting, setStarting] = useState(false);
+  const startingRef = useRef(false); // the same, at once (a handle may be called before the next render)
   const [freqText, setFreqText] = useState(() => mhz(draft.freq, 3));
   const [gainUi, setGainUi] = useState<number | null>(null);
   const [msps, setMsps] = useState(0);
@@ -106,7 +107,11 @@ export function Station(p: {
   // unplugged while running: the adapter (pid, picker key) to start again when it is back
   // gone: a scan has shown it missing; before: the adapters there were when it was lost; tries: restarts
   // present: scans in a row that still listed it (a quick replug on the same port may never show it gone)
-  const [lost, setLost] = useState<{ pid: number; key: string; gone: boolean; present: number; before: string[]; tries: number } | null>(null);
+  // tune: what it ran when it was lost (a restart asks for that: the draft may since have been clamped
+  // to what a USB 2 adapter carries, before Start switches it back to USB 3)
+  const [lost, setLost] = useState<{
+    pid: number; key: string; gone: boolean; present: number; before: string[]; tries: number; tune: Partial<RxSettings>;
+  } | null>(null);
   const [gotDevices, setGotDevices] = useState(false);
   const scanSeen = useRef<Device[] | null>(null);
   const known = useRef<string[]>([]); // the adapter list's keys, for the callbacks
@@ -285,7 +290,11 @@ export function Station(p: {
             setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error });
             break;
           case 'alert':
-            if (e.kind === 'lost' && opened) setLost({ ...opened, gone: false, present: 0, before: known.current, tries: 0 }); // the header says it; no banner
+            if (e.kind === 'lost' && opened)
+              setLost({
+                ...opened, gone: false, present: 0, before: known.current, tries: 0,
+                tune: lastRx ? { freq: lastRx.freq, rate_sel: lastRx.rate_sel, wide: lastRx.wide } : {},
+              }); // the header says it; no banner
             else addBanner(e.msg, 'error');
             break;
           case 'error':
@@ -432,9 +441,9 @@ export function Station(p: {
       },
       busy: () => (live.current.recording ? 'it is recording' : live.current.opening || starting ? 'it is starting' : null),
       notice: (text) => addBanner(text),
-      running: () => live.current.open || live.current.opening || starting,
+      running: () => live.current.open || live.current.opening || startingRef.current,
       startWith: (args) => {
-        if (sel && sel.can_open && connected && !open && !opening) void doStart(sel, false, args);
+        if (sel && sel.can_open && connected && !live.current.open && !live.current.opening && !startingRef.current) void doStart(sel, false, args);
       },
       toggleRun: () => {
         if (open) req('close').catch(() => {});
@@ -486,6 +495,7 @@ export function Station(p: {
   const doStart = async (dev = sel, auto = false, extra: Partial<RxSettings> = {}) => {
     if (!dev) return;
     if (!auto) setLost(null);
+    startingRef.current = true;
     setStarting(true);
     setSaved(null);
     window.clearTimeout(gainTimer.current); // a gain change still waiting goes with the open
@@ -497,6 +507,7 @@ export function Station(p: {
     } catch {
       /* shown */
     } finally {
+      startingRef.current = false;
       setStarting(false);
     }
   };
@@ -530,7 +541,7 @@ export function Station(p: {
     }
     setSelKey(devKey(d));
     setLost({ ...lost, present, tries: lost.tries + 1 });
-    void doStart(d, true);
+    void doStart(d, true, lost.tune);
   }, [devices, lost, p.otherWaiting]); // eslint-disable-line react-hooks/exhaustive-deps
   const commitFreq = () => {
     const f = Math.round(parseFloat(freqText) * 1e6);

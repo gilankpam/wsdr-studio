@@ -82,15 +82,20 @@ export function sweepPlan(range: Range, dev: Device | undefined, gappedOk: boole
     if (last && lo <= last[1] + 5e6) last[1] = Math.max(last[1], hi);
     else stretches.push([lo, hi]);
   }
+  // a 40 MHz span centres within 2422-2462 / 5090-6155 MHz
+  const tunable = (c: number) => (fs < 40e6 ? c : c < 3.7e9 ? Math.min(2462e6, Math.max(2422e6, c)) : Math.min(6155e6, Math.max(5090e6, c)));
   const centres: number[] = [];
   for (const [lo, hi] of stretches) {
-    const n = Math.max(1, Math.ceil((hi - lo - fs) / step) + 1);
+    // the outer steps first, snapped towards the stretch's ends (its edge channels heard whole), then
+    // the others spread evenly between them
+    let first = snap(lo + fs / 2), last = snap(hi - fs / 2);
+    if (first > lo + fs / 2 && snap(first - 5e6) < first) first = snap(first - 5e6);
+    if (last < hi - fs / 2 && snap(last + 5e6) > last) last = snap(last + 5e6);
+    first = tunable(first);
+    last = tunable(last);
+    const n = last > first ? Math.ceil((last - first) / step) + 1 : 1;
     for (let i = 0; i < n; i++) {
-      const x = n === 1 ? (lo + hi) / 2 : lo + fs / 2 + (i * (hi - lo - fs)) / (n - 1);
-      let c = snap(x);
-      // the outer steps snap towards the stretch's ends, so its edge channels are heard whole
-      if (i === 0 && n > 1 && c > x && snap(c - 5e6) < c) c = snap(c - 5e6);
-      if (i === n - 1 && n > 1 && c < x && snap(c + 5e6) > c) c = snap(c + 5e6);
+      const c = n === 1 ? tunable(snap((lo + hi) / 2)) : i === 0 ? first : i === n - 1 ? last : tunable(snap(first + (i * (last - first)) / (n - 1)));
       if (!centres.includes(c)) centres.push(c);
     }
   }

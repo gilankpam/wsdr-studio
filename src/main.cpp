@@ -104,9 +104,10 @@ void open_browser(const std::string &url) {
   for (auto &s : env)
     envp.push_back(s.data());
   envp.push_back(nullptr);
-  const std::string app = "--app=" + url;
+  const std::string app = "--app=" + url, size = "--window-size=1440,900";
   const std::vector<std::vector<std::string>> cmds = {
-      {"google-chrome", app}, {"google-chrome-stable", app}, {"chromium", app}, {"chromium-browser", app},
+      {"google-chrome", app, size}, {"google-chrome-stable", app, size}, {"chromium", app, size},
+      {"chromium-browser", app, size},
       {"xdg-open", url}};
   for (const auto &c : cmds) {
     std::vector<char *> argv;

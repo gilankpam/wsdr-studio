@@ -132,6 +132,7 @@ export class Display {
         this.dirty = true;
       }
       this.raf = requestAnimationFrame(loop); // first: a failing draw must not end the loop
+      if ((window.devicePixelRatio || 1) !== this.dpr && this.wf.clientWidth && this.wf.clientHeight) this.resize(); // moved to a screen of another scale
       if (this.dirty) this.drawSpectrum();
     };
     this.raf = requestAnimationFrame(loop);
@@ -151,13 +152,26 @@ export class Display {
   // Layout change (window resize, a strip appearing): keep the waterfall's history, rescaled to the
   // new width and anchored at the top (newest rows).
   resize() {
+    const wf = this.wf;
+    // hidden (Panorama and Map hide a view's own plots): keep the picture as it is until shown again
+    if (!wf.clientWidth || !wf.clientHeight) return;
     const oldDpr = this.dpr;
     const oldFrozen = this.frozen;
     this.dpr = window.devicePixelRatio || 1;
     let keep: HTMLCanvasElement | null = null;
-    const wf = this.wf;
     const w = Math.max(1, Math.round(wf.clientWidth * this.dpr)), h = Math.max(1, Math.round(wf.clientHeight * this.dpr));
-    if ((wf.width !== w || wf.height !== h) && wf.width > 1 && wf.height > 1) {
+    if (wf.width === w && wf.height === h && this.dpr === oldDpr) {
+      // only the spectrum changed size: the waterfall and its history stay
+      const sw = Math.max(1, Math.round(this.sp.clientWidth * this.dpr)), sh = Math.max(1, Math.round(this.sp.clientHeight * this.dpr));
+      if (this.sp.width !== sw || this.sp.height !== sh) {
+        this.sp.width = sw;
+        this.sp.height = sh;
+      }
+      this.drawSeps();
+      this.dirty = true;
+      return;
+    }
+    if (wf.width > 1 && wf.height > 1) {
       keep = document.createElement('canvas');
       keep.width = wf.width;
       keep.height = wf.height;
@@ -173,7 +187,7 @@ export class Display {
     }
     this.wfCtx.fillStyle = '#000';
     this.wfCtx.fillRect(0, 0, wf.width, wf.height);
-    const oL = AXIS_W * oldDpr, L = this.plotLeft();
+    const oL = Math.round(AXIS_W * oldDpr), L = this.plotLeft();
     if (keep) {
       const rows = Math.min(keep.height, wf.height);
       this.wfCtx.drawImage(keep, oL, 0, keep.width - oL, rows, L, 0, wf.width - L, rows);
@@ -448,7 +462,7 @@ export class Display {
   }
 
   private plotLeft() {
-    return AXIS_W * this.dpr;
+    return Math.round(AXIS_W * this.dpr); // whole pixels: image data is put at whole columns
   }
 
   private freqAt(cssX: number): number | null {
@@ -529,8 +543,7 @@ export class Display {
       .filter((x): x is Row => !!x)
       .map((x) => ({ r: x, ...Display.range(x) }));
     // stitched: rows sit at their own frequencies, so only a change of the axis moves older rows off it
-    const ax0 = this.span();
-    const span = this.opts.stitch && ax0
+    const span = this.opts.stitch
       ? this.axis(w).map((q) => `${(q.f0 / 1e6).toFixed(3)}–${(q.f1 / 1e6).toFixed(3)}`).join(', ') + ' MHz'
       : label(r);
     if (this.wfSpan && (span !== this.wfSpan || this.stopPending)) {

@@ -4,7 +4,7 @@
 // origin. The page gets the token from the preload over IPC. Closing the window quits; the backend is
 // stopped by closing its stdin (it then finalises any recording and exits).
 //
-// Backend options given to the app are passed on: --pid --freq --rate --record-dir --fft --port, --no-usb3.
+// Backend options given to the app are passed on: --pid --freq --rate --record-dir --port, --no-usb3.
 // --dual opens the window in dual-adapter mode.
 // WSDR_STUDIOD: the backend binary. WSDR_DEV_URL: load this URL instead (Vite dev server).
 'use strict';
@@ -13,7 +13,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const PASS = new Set(['--pid', '--freq', '--rate', '--record-dir', '--fft', '--port']);
+const PASS = new Set(['--pid', '--freq', '--rate', '--record-dir', '--port']); // (FFT size: set in the app)
 const PASS_FLAGS = new Set(['--no-usb3']);
 
 let backend = null; // child process (null when attached to an instance started elsewhere)
@@ -145,7 +145,9 @@ function createWindow() {
       defaultId: 0,
       cancelId: 0,
       message: 'A recording is running',
-      detail: 'Quitting ends the recording; the file is saved.',
+      detail: backend
+        ? 'Quitting ends the recording; the file is saved.'
+        : 'This window uses a backend started elsewhere: the recording goes on there until it is stopped or that backend ends.',
     });
     if (c === 1) e.preventDefault(); // = unload anyway
   });

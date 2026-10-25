@@ -244,7 +244,6 @@ RecordInfo Recorder::info() const {
   i.active = _active;
   i.path = _base.empty() ? "" : _base + ".sigmf-data";
   i.samples = _bytes / 4;
-  i.ended_early = _dropped > 0;
   i.fs = _fs;
   i.error = !_error.empty() ? _error : _meta_error;
   return i;

@@ -39,6 +39,7 @@ export type StationHandle = {
 // What a view tells the shell (sidebar summary, links, band ruler).
 export type ViewInfo = {
   freq: number; fsNow: number; rate_sel: number; fft: number; gapped: boolean; gain_db: number; agc: boolean;
+  allowGapped: boolean; // its span may be gapped (the user picked a gapped one)
   centre: number; // where the shown span is centred (the radio's centre while running, else the request)
   src: Source;    // its part of the stitched Panorama plot
   open: boolean; recording: boolean; locked: boolean; selKey: string | null;
@@ -404,12 +405,20 @@ export function Station(p: {
   );
 
   // A settings change: sent now when streaming, kept as a draft until Start otherwise.
-  const set = (args: Partial<RxSettings>) => {
+  const set = (a: Partial<RxSettings>) => {
+    // a span change is a continuous one unless it says otherwise (only the user's pick of a gapped span does)
+    const args = a.rate_sel !== undefined && a.allow_gapped === undefined ? { ...a, allow_gapped: false } : a;
     if (!live.current.open) {
       const n = { ...draft, ...args };
       live.current.freq = n.freq;
       live.current.rateSel = n.rate_sel;
       setDraft(n);
+      // waiting for an unplugged adapter: it starts again with this tuning, not the one it had
+      const t: Partial<RxSettings> = {};
+      if (args.freq !== undefined) t.freq = args.freq;
+      if (args.rate_sel !== undefined) t.rate_sel = args.rate_sel;
+      if (args.wide !== undefined) t.wide = args.wide;
+      if (Object.keys(t).length) setLost((l) => l && { ...l, tune: { ...l.tune, ...t } });
       if (!view.current.map) rememberTuning({ freq: n.freq, rate_sel: n.rate_sel, gain_db: n.gain_db, agc: n.agc }); // remembered too
       if (args.freq !== undefined) setFreqText(mhz(args.freq, 3));
       return;
@@ -451,7 +460,7 @@ export function Station(p: {
         if (wfMode) display.current?.setOpts({ wfMode });
         return display.current?.suggestRange() ?? null;
       },
-      busy: () => (live.current.recording ? 'it is recording' : live.current.opening || starting ? 'it is starting' : null),
+      busy: () => (live.current.recording ? 'it is recording' : live.current.opening || startingRef.current ? 'it is starting' : null),
       notice: (text) => addBanner(text),
       running: () => live.current.open || live.current.opening || startingRef.current,
       startWith: (args) => {
@@ -487,12 +496,12 @@ export function Station(p: {
     const centre = open && tuned > 0 ? tuned : cur.freq;
     const msg = fatal || !connected ? null : opening ? `${name}: starting…` : !open ? `${name} stopped` : rxState === 'starting' ? `${name}: applying settings…` : null;
     link.report(slot, {
-      freq: cur.freq, fsNow, rate_sel: cur.rate_sel, fft: dsp.fft, gapped, gain_db: cur.gain_db, agc: cur.agc,
+      freq: cur.freq, fsNow, rate_sel: cur.rate_sel, fft: dsp.fft, gapped, allowGapped: !!cur.allow_gapped, gain_db: cur.gain_db, agc: cur.agc,
       centre, open, recording, locked, selKey, lost: !!lost,
       ready: connected && gotDevices && !opening && (!open || rx !== null),
       src: { lo: centre - fsNow / 2, hi: centre + fsNow / 2, colour: VIEW_COLOUR[slot], pathColours: twoPaths ? ANT_COLOUR : null, marker, markerLabel, chipNotch, notchWide, dim: !open, msg },
     });
-  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey, marker, markerLabel, chipNotch, notchWide, opening, rxState, fatal, connected, twoPaths, lost, gotDevices, rx]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.allow_gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey, marker, markerLabel, chipNotch, notchWide, opening, rxState, fatal, connected, twoPaths, lost, gotDevices, rx]); // eslint-disable-line react-hooks/exhaustive-deps
   // the shared preferences reach this adapter: offset tuning when running, the FFT size at once
   useEffect(() => {
     if (caps.open) req('set', { offset_tuning: prefs.offsetTuning }).catch(() => {});
@@ -687,7 +696,10 @@ export function Station(p: {
             value={cur.rate_sel}
             // the centre stays as asked; a 40 MHz span centres within 2422-2462 / 5090-6155 MHz, so the
             // radio may sit beside it (the plot marks the requested frequency)
-            onChange={(e) => userSet({ rate_sel: Number(e.target.value), wide: true })}
+            onChange={(e) => {
+              const r = Number(e.target.value);
+              userSet({ rate_sel: r, wide: true, allow_gapped: rates.some((x) => x.rate_sel === r && x.gapped) }); // picked: may be gapped
+            }}
             title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
               rates.some((r) => r.gapped)
                 ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording)'

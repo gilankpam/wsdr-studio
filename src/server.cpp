@@ -8,10 +8,8 @@
 #include <boost/beast/websocket.hpp>
 
 #include <chrono>
-#include <cstdio>
 #include <deque>
 #include <filesystem>
-#include <random>
 
 namespace studio {
 
@@ -53,10 +51,10 @@ bool same(const std::string &a, const std::string &b) { // constant time for equ
   return diff == 0;
 }
 
-// Value of `key` in a "a=1&b=2" (sep '&') or "a=1; b=2" (sep ';') list.
-std::string param(beast::string_view list, const std::string &key, char sep) {
+// Value of `key` in a query string "a=1&b=2".
+std::string param(beast::string_view list, const std::string &key) {
   for (size_t i = 0; i <= list.size();) {
-    size_t e = list.find(sep, i);
+    size_t e = list.find('&', i);
     if (e == beast::string_view::npos)
       e = list.size();
     auto kv = list.substr(i, e - i);
@@ -74,7 +72,7 @@ std::string query(beast::string_view target) {
   return q == beast::string_view::npos ? std::string() : std::string(target.substr(q + 1));
 }
 
-bool token_ok(const ServerOptions &o, beast::string_view target) { return same(param(query(target), "t", '&'), o.token); }
+bool token_ok(const ServerOptions &o, beast::string_view target) { return same(param(query(target), "t"), o.token); }
 
 const char *mime(const std::string &ext) {
   if (ext == ".html") return "text/html; charset=utf-8";

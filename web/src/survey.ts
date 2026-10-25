@@ -2,6 +2,7 @@
 // The band ruler's survey: per channel, the strongest peak seen over the noise (dB), kept for the
 // session.
 import type { Row } from './protocol';
+import { centre } from './channels';
 
 // the channels surveyed, with a cell's half-width
 type Seg = { chans: number[]; half: number };
@@ -10,7 +11,7 @@ const HIGH: Seg = {
   half: 10e6,
   chans: [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 149, 153, 157, 161, 165, 169, 173, 177],
 };
-export const centre = (c: number) => (c <= 14 ? 2407e6 + 5e6 * c : 5000e6 + 5e6 * c);
+export { centre }; // the band ruler and the sweep plans take it from here
 
 export type Survey = Map<number, number>;
 // Each cell's own slice (2.4 GHz: its 5 MHz, so one AP does not light up nine overlapping channels;

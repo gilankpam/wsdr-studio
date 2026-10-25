@@ -3,7 +3,9 @@
 
 export type Channel = { label: string; ch: number; width: 20 | 40; centre: number; band: '2.4' | '5' };
 
-const mhz = (ch: number) => (ch <= 14 ? (ch === 14 ? 2484 : 2407 + 5 * ch) : 5000 + 5 * ch) * 1e6;
+// a channel's centre frequency (Hz)
+export const centre = (ch: number) => (ch <= 14 ? (ch === 14 ? 2484 : 2407 + 5 * ch) : 5000 + 5 * ch) * 1e6;
+const mhz = centre;
 
 const five20 = [
   ...[36, 40, 44, 48, 52, 56, 60, 64],
@@ -30,4 +32,3 @@ export function channelAt(freq: number, width: number): Channel | undefined {
   return at.find((c) => c.width === width) ?? at[0];
 }
 
-export const channelKey = (c: Channel) => `${c.band}:${c.width}:${c.ch}`;

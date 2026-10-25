@@ -40,6 +40,12 @@ const MODES: [Mode, string, string][] = [
   ['map', 'Map', 'One adapter sweeps the band: a heatmap of what each channel had'],
 ];
 
+// afterClose: the view is being closed (stopped before the map): its tuning goes back once it is
+// (a set to the closing adapter would be lost, and the close's draft would be the sweep's last step)
+type RestoreItem = {
+  slot: number; key: string | null; pid: number | null; args?: Partial<RxSettings>; start: boolean; at: number; gappedOk: boolean; afterClose?: boolean;
+};
+
 export default function App() {
   const [prefs, setPrefs] = useState<Prefs>(() => {
     const p = loadPrefs();
@@ -67,16 +73,19 @@ export default function App() {
   const [mapStep, setMapStep] = useState<{ c: number; fs: number } | null>(null); // where the sweep is
   // Map: what to put back on leaving it (the sweeping view's tuning, whether it ran; the view stopped for
   // it, with its adapter)
-  const mapReturn = useRef<{ mode: Mode; freq: number; rate_sel: number; wasOpen: boolean; other: { slot: number; key: string | null } | null } | null>(null);
+  const mapReturn = useRef<{
+    mode: Mode; freq: number; rate_sel: number; gapped: boolean; wasOpen: boolean; other: { slot: number; key: string | null } | null;
+  } | null>(null);
   const [mapOther, setMapOther] = useState<number | null>(null); // that view stays mounted (hidden): it keeps its adapter
   // Views to put back once they have settled (not opening; a Stop's close done): tuning, and a start
   // when they ran. key: the adapter it is for (a view whose adapter changed meanwhile is left alone).
-  // pid: its model too (a port can get another adapter); at: when queued (it lapses after 15 s)
-  const restore = useRef<{ slot: number; key: string | null; pid: number | null; args?: Partial<RxSettings>; start: boolean; at: number }[]>([]);
+  // pid: its model too (a port can get another adapter); at: when queued (it lapses after 15 s);
+  // gappedOk: its span was gapped before the map (else a span the adapter now shows only gapped is
+  // not asked for: e.g. replugged at USB 2 meanwhile)
+  const restore = useRef<RestoreItem[]>([]);
   // bumped by every Stop, leave and entry: a Start or a restore queued behind a close does nothing
   // if anything happened since
   const mapSeq = useRef(0);
-  const mapRunRef = useRef(false);
   const [restoreKick, setRestoreKick] = useState(0);
   const mapClose = useRef<Promise<unknown> | null>(null); // a Stop's close in flight
   const backTo = useRef<Mode | null>(null); // the mode the map was entered from (no new alignment going back to it)
@@ -92,7 +101,7 @@ export default function App() {
   const dual = isDual(mode);
   const inMap = mode === 'map';
   const sel = inMap ? mapSlot : dual ? selSlot : 0;
-  const now = useRef({ mode, locks });
+  const now = useRef({ mode, locks, views });
 
   useEffect(() => {
     hub.start();
@@ -190,18 +199,14 @@ export default function App() {
   }));
   // the latest state and functions for those callbacks, after every render
   useEffect(() => {
-    now.current = { mode, locks };
+    now.current = { mode, locks, views };
     fwd.current = forward;
     autoFit.current = fit;
   });
 
   const setLock = (k: keyof Locks) => {
     const on = !locks[k];
-    setPrefs((old) => {
-      const n = { ...old, locks: { ...old.locks, [k]: on } };
-      savePrefs(n);
-      return n;
-    });
+    updatePrefs({ locks: { ...locks, [k]: on } });
     // engaging a span or gain link aligns the other view to the selected one now
     const v = views[sel];
     if (on && v && k !== 'freq')
@@ -237,7 +242,8 @@ export default function App() {
       args.agc = va.agc;
     }
     // Panorama: B's span starts where A's ends (each half of its own span from its centre)
-    const want = va.freq + (mode === 'panorama' ? (va.fsNow + (sameSpan ? va.fsNow : b.fs())) / 2 : 0);
+    // (from where the radio centres A: at 40 MHz on 2.4 GHz that may not be the asked frequency)
+    const want = (mode === 'panorama' ? va.centre : va.freq) + (mode === 'panorama' ? (va.fsNow + (sameSpan ? va.fsNow : b.fs())) / 2 : 0);
     if (Math.abs(snap(want) - want) <= 2.5e6 && bandOf(want) === bandOf(va.freq)) args.freq = snap(want);
     else a.notice(`View B stays: ${(want / 1e6).toFixed(0)} MHz is outside the band`);
     if (Object.keys(args).length) b.linkedSet(args);
@@ -252,7 +258,7 @@ export default function App() {
     }
     if (dual && !isDual(m)) {
       const other = m === 'single' ? 1 : selSlot ^ 1;
-      if (views[other]?.open || views[other]?.locked || openKey[other]) {
+      if (views[other]?.locked || openKey[other]) {
         setConfirm({ to: m, slot: other }); // that view is running: ask first
         return;
       }
@@ -266,12 +272,13 @@ export default function App() {
       setMapSlot(slot);
       setMapOther(stopped);
       setMapRun(false);
-      const v = views[slot];
+      const vs = now.current.views; // as they are now (this may run after a close, seconds after the click)
+      const v = vs[slot];
       restore.current = [];
       mapSeq.current++;
       setMapNote(null);
       mapReturn.current = v
-        ? { mode, freq: v.freq, rate_sel: v.rate_sel, wasOpen: v.open, other: stopped !== null ? { slot: stopped, key: views[stopped]?.selKey ?? null } : null }
+        ? { mode, freq: v.freq, rate_sel: v.rate_sel, gapped: v.gapped && v.allowGapped, wasOpen: v.open, other: stopped !== null ? { slot: stopped, key: vs[stopped]?.selKey ?? null } : null }
         : null;
     } else if (mode === 'map') leaveMap(m, null);
     updatePrefs({ mode: m });
@@ -283,7 +290,6 @@ export default function App() {
     const r = mapReturn.current, slot = mapSlot;
     mapReturn.current = null;
     const seq = ++mapSeq.current;
-    mapRunRef.current = false;
     backTo.current = r?.mode ?? null;
     setMapRun(false);
     setMapStep(null);
@@ -297,10 +303,20 @@ export default function App() {
     const queue = () => {
       if (seq !== mapSeq.current) return; // entered the map again meanwhile
       const at = Date.now();
-      const items: { slot: number; key: string | null; pid: number | null; args?: Partial<RxSettings>; start: boolean; at: number }[] = [];
-      if (to === 'single' && slot === 1) hub.request('close', { slot: 1 }).catch(() => {});
-      else items.push({ slot, key, pid: pidOf(key), args, start: !!r?.wasOpen && !!key, at });
-      if (r?.other && shownAfter(r.other.slot) && r.other.key) items.push({ slot: r.other.slot, key: r.other.key, pid: pidOf(r.other.key), start: true, at });
+      const items: RestoreItem[] = [];
+      const gappedOk = !!r?.gapped; // (a span the user picked gapped: see enter)
+      // shown afterwards, it goes back as it was: a view stopped before the map (and started by its
+      // Start) stops again, unless a channel was picked in the map
+      const stopAgain = !!r && !r.wasOpen && f === null && !!handles.current[slot]?.running();
+      if ((to === 'single' && slot === 1) || stopAgain)
+        hub.request('close', { slot }).catch((e: Error) => {
+          if (seq === mapSeq.current) restore.current = restore.current.filter((x) => x.slot !== slot); // it keeps running as it is
+          (handles.current[slot] ?? handles.current[0])?.notice(`Could not stop view ${SLOT_NAME[slot]}: ${e.message}`); // (B is gone in Single)
+        });
+      if (!(to === 'single' && slot === 1))
+        items.push({ slot, key, pid: pidOf(key), args, start: !!r?.wasOpen && !!key, at, gappedOk, afterClose: stopAgain });
+      if (r?.other && shownAfter(r.other.slot) && r.other.key)
+        items.push({ slot: r.other.slot, key: r.other.key, pid: pidOf(r.other.key), start: true, at, gappedOk: false });
       restore.current = [...restore.current.filter((x) => !items.some((i) => i.slot === x.slot)), ...items];
       setRestoreKick((k) => k + 1);
     };
@@ -316,12 +332,18 @@ export default function App() {
     restore.current = restore.current.filter((x) => {
       const v = views[x.slot], h = handles.current[x.slot];
       if (Date.now() - x.at > 15000) return false; // never settled: let it go
-      if (!h || !v?.ready || v.locked) return true; // not settled yet: keep it
+      if (!h || !v?.ready || v.locked || (x.afterClose && (v.open || h.running()))) return true; // not settled yet: keep it
       // its adapter (port and model) changed meanwhile: leave the view as it is
       const pid = devices.find((d) => devKey(d) === v.selKey)?.pid ?? null;
       if (x.key && (v.selKey !== x.key || (x.pid !== null && pid !== x.pid))) return false;
-      if (x.args) h.linkedSet(x.args); // running: retuned; stopped: its next start
-      if (x.start && !h.running()) h.startWith(x.args ?? {});
+      const args = { ...x.args };
+      // the span as it was: gapped only if it was before the map (else one the adapter now shows only
+      // gapped, e.g. replugged at USB 2 meanwhile, is not asked for); said explicitly either way, so no
+      // draft of a gapped sweep step carries over
+      if (args.rate_sel !== undefined && !x.gappedOk && !h.rateOk(args.rate_sel)) delete args.rate_sel;
+      if (x.args?.rate_sel !== undefined) args.allow_gapped = args.rate_sel !== undefined && x.gappedOk; // (an item without a span leaves it alone)
+      if (Object.keys(args).length) h.linkedSet(args); // running: retuned; stopped: its next start
+      if (x.start && !h.running()) h.startWith(args);
       return false;
     });
   }, [views, mode, restoreKick, devices]);
@@ -367,12 +389,11 @@ export default function App() {
     const v = views[mapSlot];
     if (v?.recording) return handles.current[mapSlot]?.notice('End the recording first: the map retunes this adapter');
     setMapRun(true);
-    mapRunRef.current = true;
     setMapNote(null);
     const seq = mapSeq.current;
-    const first = mapPlan ? { freq: mapPlan.centres[0], rate_sel: mapPlan.rate_sel, wide: true } : {};
+    const first = mapPlan ? { freq: mapPlan.centres[0], rate_sel: mapPlan.rate_sel, wide: true, allow_gapped: mapPlan.gapped } : {};
     const open = () => {
-      if (seq !== mapSeq.current || !mapRunRef.current) return; // stopped or left meanwhile
+      if (seq !== mapSeq.current) return; // stopped or left meanwhile (each bumps mapSeq)
       const h = handles.current[mapSlot];
       if (h && !h.running()) h.startWith(first);
     };
@@ -381,7 +402,6 @@ export default function App() {
   };
   const mapStop = () => {
     setMapRun(false);
-    mapRunRef.current = false;
     mapSeq.current++;
     if (handles.current[mapSlot]?.running()) {
       const p: Promise<unknown> = hub

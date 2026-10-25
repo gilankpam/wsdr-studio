@@ -48,6 +48,7 @@ std::vector<DeviceInfo> scan_devices() {
     info.sysfs = std::to_string(info.bus) + "-" + info.port;
     const fs::path dev = fs::path("/sys/bus/usb/devices") / info.sysfs;
     info.speed_mbps = std::atoi(read_line(dev / "speed").c_str());
+    info.devnum = std::atoi(read_line(dev / "devnum").c_str());
     std::error_code ec;
     // /sys/bus/usb/devices/6-1 -> .../0000:67:00.3/usb6/6-1: the PCI device above the root hub.
     for (fs::path p = fs::canonical(dev, ec); !ec && p.has_parent_path() && p != p.root_path();

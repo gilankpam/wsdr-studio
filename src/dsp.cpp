@@ -180,8 +180,13 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       if (_crop_hi > _crop_lo) {
         b0 = std::clamp(static_cast<int>(std::ceil((_crop_lo - r.f0) / r.df - 1e-6)), 0, bins);
         b1 = std::clamp(static_cast<int>(std::floor((_crop_hi - r.f0) / r.df + 1e-6)) + 1, b0, bins);
-        r.f0 += b0 * r.df;
-        r.offset = true;
+        if (b1 - b0 < 2) { // the window is not in this band: send the band (never an empty row)
+          b0 = 0;
+          b1 = bins;
+        } else {
+          r.f0 += b0 * r.df;
+          r.offset = true;
+        }
       }
       r.avg.resize(b1 - b0);
       r.max.resize(b1 - b0);

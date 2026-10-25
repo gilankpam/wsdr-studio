@@ -78,8 +78,8 @@ private:
   void rebuild();
 
   DspConfig _c;
-  int _req_fft = 8192;
-  double _crop_lo = 0, _crop_hi = 0;    // the configured size (_c.fft may be capped for a gapped run)
+  int _req_fft = 8192;    // the configured size (_c.fft may be capped for a gapped run)
+  double _crop_lo = 0, _crop_hi = 0;
   bool _gapped = false;
   uint32_t _gen = ~0u;
   double _fs = 0, _freq = 0;

@@ -17,6 +17,7 @@ struct DeviceInfo {
   std::string port;       // "1" or "1.2"
   std::string sysfs;      // e.g. "6-1"
   int speed_mbps = 0;     // 480 / 5000 / ...
+  int devnum = 0;         // changes on every (re-)enumeration
   std::string controller; // PCI address of the host controller, e.g. "0000:67:00.3"
   std::string driver;     // kernel driver bound to interface 0, empty if none
   bool can_open = false;  // the device node is readable and writable by us

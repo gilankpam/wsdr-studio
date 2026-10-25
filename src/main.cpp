@@ -333,6 +333,7 @@ int main(int argc, char **argv) {
       Engine::Callbacks{[&](std::vector<uint8_t> &&f) { srv->broadcast_binary(std::move(f)); },
                         [&](const json &e) { srv->broadcast_text(e.dump()); }},
       a.record_dir.empty() ? data_dir() + "/recordings" : a.record_dir);
+  eng->set_usb3_default(a.usb3); // also for Start pressed in the app
 
   if (!write_instance(std::to_string(getpid()) + " " + std::to_string(srv->port()) + " " + so.token + "\n"))
     std::fprintf(stderr, "wsdr-studiod: cannot write %s (a second launch will not find this one)\n",

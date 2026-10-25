@@ -2,6 +2,8 @@
 #include "engine.h"
 #include "usbmode.h"
 
+#include <set>
+
 #include <sys/statvfs.h>
 
 #include <chrono>
@@ -323,28 +325,45 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
       port = d.port;
       break;
     }
+  {
+    std::lock_guard<std::mutex> l(_sm);
+    _state = "opening";
+    _error.clear();
+  }
+  _cb.event(status());
   // An 8812BU that came up at USB 2 (it does after a cold plug) is switched to USB 3 first, like the
-  // kernel driver does: it re-enumerates on the same controller and port, on the SuperSpeed bus.
-  const bool usb3 = c.contains("usb3") ? flag(c, "usb3") : true;
+  // kernel driver does: it disconnects and re-enumerates on the SuperSpeed side of its port (a new
+  // device: one that was not there before the switch).
+  const bool usb3 = c.contains("usb3") ? flag(c, "usb3") : _usb3_default.load();
   if (usb3 && dev.pid == wsdr::kPid8812bu && dev.speed_mbps > 0 && dev.speed_mbps < 5000) {
     std::string why;
     const wsdr::Usb3Switch sw = wsdr::request_usb3(pid, bus, port, &why);
     std::fprintf(stderr, "wsdr-studiod: USB 3 switch: %s %s\n", wsdr::usb3_switch_name(sw), why.c_str());
     if (sw == wsdr::Usb3Switch::Requested) {
       _cb.event({{"type", "notice"}, {"text", "Switching the 8812BU to USB 3…"}});
-      bool super = false;
-      for (int i = 0; i < 40 && !super; i++) { // up to 8 s
+      std::set<std::string> before; // every 8812BU present before (bus, port, device number)
+      const auto key = [](const DeviceInfo &d) { return std::to_string(d.bus) + "-" + d.port + "#" + std::to_string(d.devnum); };
+      for (const auto &d : scan_devices())
+        if (d.pid == pid && key(d) != key(dev))
+          before.insert(key(d));
+      bool super = false, back = false;
+      for (int i = 0; i < 40 && !super && !back; i++) { // up to 8 s
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        for (const auto &d : scan_devices())
-          if (d.pid == pid && d.controller == dev.controller && d.port == port && d.speed_mbps >= 5000) {
+        for (const auto &d : scan_devices()) {
+          // new: not seen before and not the device we switched; usable: udev has set its permissions
+          if (d.pid != pid || before.count(key(d)) || key(d) == key(dev) || !d.can_open)
+            continue;
+          if (d.speed_mbps >= 5000 && (!super || d.controller == dev.controller)) {
             bus = d.bus;
+            port = d.port;
             super = true;
+          } else if (d.speed_mbps < 5000 && d.bus == dev.bus && d.port == dev.port) {
+            back = true; // re-enumerated at USB 2 on the same port: no USB 3 here
           }
+        }
       }
-      if (!super) // came back at USB 2 (no USB 3 lines on this port or cable?), or is still away
-        for (const auto &d : scan_devices())
-          if (d.pid == pid && d.controller == dev.controller && d.port == port)
-            bus = d.bus;
+      if (!super && !back)
+        throw CmdError("not_found", "the 8812BU did not come back after the USB 3 switch; replug it");
       _cb.event({{"type", "notice"},
                  {"text", super ? "The 8812BU now runs at USB 3 (until it is unplugged)"
                                 : "The 8812BU stayed at USB 2: this port or cable may not carry USB 3"}});
@@ -360,12 +379,6 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   s.wide = c.contains("wide") ? flag(c, "wide") : true;
   // the 8812CU's wide spans (the UI marks them); the command line opens without them
   s.allow_gapped = c.contains("allow_gapped") ? flag(c, "allow_gapped") : true;
-  {
-    std::lock_guard<std::mutex> l(_sm);
-    _state = "opening";
-    _error.clear();
-  }
-  _cb.event(status());
   auto r = std::make_shared<wsdr::Receiver>(std::make_shared<Logger>());
   {
     std::lock_guard<std::mutex> l(_sm);
@@ -433,6 +446,8 @@ wsdr::RxSettings Engine::hw_for(const wsdr::RxSettings &v) const {
   }
   if (!cu || !v.allow_gapped || (v.rate_sel != 2 && v.rate_sel != 3))
     return v;
+  if (std::abs(v.freq - std::round(v.freq / 5e6) * 5e6) > 1)
+    return v; // off the 5 MHz grid (the UI never sends that): no offset, the notch stays in view
   // 40 MHz capture (the 8822C's BW40 filter is flat to +-17 MHz), radio 10 MHz above the view (below
   // at the top of a band): the view is [-20, 0] or [-15, -5] MHz from the radio's centre, the notch
   // sits at the channel edge or outside. 40 MHz centres: 2422-2462 and 5090-6155 MHz.
@@ -529,8 +544,9 @@ json Engine::status() const {
     const wsdr::RxSettings hw = hw_for(v);
     if (hw.freq != v.freq || hw.rate_sel != v.rate_sel) { // offset-tuned: report the view, and the radio
       j["rx"]["offset"] = true;
-      j["rx"]["hw_centre"] = st.centre_hz;
-      j["rx"]["hw_fs"] = st.fs;
+      const int w = wsdr::Receiver::width_of(hw, false); // the radio's settings (not the run still ending)
+      j["rx"]["hw_centre"] = wsdr::Receiver::centre_of(wsdr::Receiver::channel_for(hw.freq, w), w);
+      j["rx"]["hw_fs"] = wsdr::Receiver::rate_of(hw.rate_sel);
       j["rx"]["centre"] = v.freq;
       j["rx"]["fs"] = wsdr::Receiver::rate_of(v.rate_sel);
     }
@@ -577,6 +593,7 @@ void Engine::dsp_loop() {
       submit({{"cmd", "_rec_stop"}, {"reason", reason}, {"rec", rec_seen}}, nullptr); // the file the bank was checked for
   };
   uint64_t rec_next = 0; // next bank seq expected in the file (0 = not started)
+  Crop applied;          // the crop window in use, and the hardware run it belongs to
   while (!_dsp_quit) {
     Bank *b = _ring.pop(std::chrono::milliseconds(100));
     const auto t0 = clk::now();
@@ -587,11 +604,17 @@ void Engine::dsp_loop() {
           sp.configure(_dsp_cfg);
           _dsp_dirty = false;
         }
-        // a new crop window applies from the first bank of the hardware run it was made for
-        if (_crop_dirty && std::abs(b->meta.centre_hz - _crop.hw_centre) < 1 && std::abs(b->meta.fs - _crop.hw_fs) < 1) {
-          sp.set_crop(_crop.lo, _crop.hi);
+        // A crop window belongs to one hardware run (centre, fs): it is taken over from the first bank
+        // of that run, and banks of any other run are not cropped (fast retunes: no stale window).
+        const auto same = [&](const Crop &c) {
+          return std::abs(b->meta.centre_hz - c.hw_centre) < 1 && std::abs(b->meta.fs - c.hw_fs) < 1;
+        };
+        if (_crop_dirty && same(_crop)) {
+          applied = _crop;
           _crop_dirty = false;
         }
+        const bool crop = applied.hi > applied.lo && same(applied);
+        sp.set_crop(crop ? applied.lo : 0, crop ? applied.hi : 0);
       }
       gen = b->meta.gen;
       cfg = b->meta.cfg;

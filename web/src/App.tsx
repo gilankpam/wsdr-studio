@@ -31,15 +31,13 @@ const fmtDur = (s: number) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : s >= 6
 // The radio tunes in 5 MHz steps (2.4 GHz: 2407 + 5n MHz; 5 GHz: 5000 + 5n MHz).
 // The radio tunes 2.4 GHz channels 1-13 (2412-2472, 5 MHz apart) and 14 (2484), and 5 GHz in 5 MHz
 // steps from 5080 to 6165 MHz. The nearest tunable centre:
-// (At 40 MHz width the centres run 2422-2462 and 5090-6155 MHz.)
-const snap = (f: number, width = 20) => {
-  const w40 = width === 40;
+// (At a 40 MHz span the radio centres within 2422-2462 / 5090-6155 MHz; the request stays and is marked.)
+const snap = (f: number) => {
   if (f < 3.7e9) {
-    if (!w40 && f > 2478e6) return 2484e6;
-    const lo = w40 ? 2422e6 : 2412e6, n = w40 ? 8 : 12;
-    return lo + Math.min(n, Math.max(0, Math.round((f - lo) / 5e6))) * 5e6;
+    if (f > 2478e6) return 2484e6;
+    return 2412e6 + Math.min(12, Math.max(0, Math.round((f - 2412e6) / 5e6))) * 5e6;
   }
-  return Math.min(w40 ? 6155e6 : 6165e6, Math.max(w40 ? 5090e6 : 5080e6, Math.round(f / 5e6) * 5e6));
+  return Math.min(6165e6, Math.max(5080e6, Math.round(f / 5e6) * 5e6));
 };
 const UDEV_CMD = 'sudo cp tools/99-wsdr.rules /etc/udev/rules.d/ && sudo udevadm control --reload';
 const LOCKED = 'End the recording to change tuning or gain';
@@ -191,7 +189,7 @@ export default function App() {
         if (live.current.recording) addBanner(LOCKED);
         return;
       }
-      const t = snap(f, live.current.width);
+      const t = snap(f); // the request stays; at a 40 MHz span the radio centres as near as it can
       if (Math.abs(t - live.current.freq) < 1) addBanner(`Already at the nearest step (${mhz(t, 0)} MHz). The radio tunes in 5 MHz steps.`);
       else {
         addBanner(`${live.current.open ? 'Tuned to' : 'Next Start:'} ${mhz(t, 0)} MHz (nearest 5 MHz step)`);
@@ -452,7 +450,7 @@ export default function App() {
             : `Showing ${spanLabel(fsNow)} of this ${c.width} MHz channel (the most this adapter shows)`,
       );
     }
-    set({ freq: snap(c.centre, width) });
+    set({ freq: snap(c.centre) });
   };
   const commitFreq = () => {
     const f = Math.round(parseFloat(freqText) * 1e6);
@@ -461,7 +459,7 @@ export default function App() {
       if (freqText.trim()) addBanner('Frequency must be between 2300 and 6200 MHz', 'error');
       return;
     }
-    const t = snap(f, width); // the radio tunes in 5 MHz steps
+    const t = snap(f); // the radio tunes in 5 MHz steps
     if (t !== f) addBanner(`Tuned to ${mhz(t, 3)} MHz (the radio tunes in 5 MHz steps)`);
     setFreqText(mhz(t, 3));
     if (t === lastSentFreq.current || Math.abs(t - cur.freq) < 1) return; // Enter then blur: send once
@@ -470,7 +468,7 @@ export default function App() {
     set({ freq: t });
   };
   const tuneTo = (f: number) => { // from the slider: same snapping as a typed frequency
-    const t = snap(f, width);
+    const t = snap(f);
     setFreqText(mhz(t, 3));
     lastSentFreq.current = t;
     updatePrefs({ retuned: true });
@@ -612,14 +610,9 @@ export default function App() {
             disabled={locked}
             value={cur.rate_sel}
             onChange={(e) => {
-              const rs = Number(e.target.value);
-              const w = rs === 1 && (caps.wide_capable ?? true) ? 40 : 20;
-              const f = snap(cur.freq, w); // a 40 MHz span centres within 2422-2462 / 5090-6155 MHz
-              if (Math.abs(f - cur.freq) > 1) {
-                addBanner(`A 40 MHz span centres between ${f < 3.7e9 ? '2422 and 2462' : '5090 and 6155'} MHz: now ${mhz(f, 0)} MHz`);
-                setFreqText(mhz(f, 3));
-              }
-              set({ rate_sel: rs, wide: true, freq: f });
+              // the centre stays as asked; a 40 MHz span centres within 2422-2462 / 5090-6155 MHz, so the
+              // radio may sit beside it (the plot marks the requested frequency)
+              set({ rate_sel: Number(e.target.value), wide: true });
             }}
             title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
               sel && sel.max_msps < 40 && sel.model === 'RTL8812BU' ? ' (continuous 10-40 MHz need USB 3)' : ''
@@ -825,7 +818,10 @@ export default function App() {
         {open && st && (
           <span>
             {chan && !offGrid ? `${chanName(chan)} · ` : ''}
-            {offGrid ? `${mhz(cur.freq)} MHz requested · tuned ${mhz(tuned)} MHz (5 MHz steps)` : `${mhz(cur.freq)} MHz`} · {spanLabel(st.fs)} span
+            {offGrid
+              ? `${mhz(cur.freq)} MHz requested · tuned ${mhz(tuned)} MHz (${Math.abs(tuned - cur.freq) >= 4.99e6 ? 'nearest 40 MHz centre' : '5 MHz steps'})`
+              : `${mhz(cur.freq)} MHz`}{' '}
+            · {spanLabel(st.fs)} span
             {st.gapped && (
               <span className="muted" title="Each slice is 8192 samples; the gaps between them are the time USB 2 needs to ship one">
                 {' '}· gapped: {gappedPct !== null ? `~${gappedPct} %` : '…'} of the time sampled

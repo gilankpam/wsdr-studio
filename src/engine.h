@@ -37,6 +37,9 @@ public:
     std::function<void(const json &event)> event;           // JSON event for all clients
   };
   Engine(Callbacks cb, std::string record_dir);
+  // Start switches an 8812BU found at USB 2 to USB 3 unless the open command says otherwise
+  // (its "usb3" field) or this default is off (--no-usb3).
+  void set_usb3_default(bool on) { _usb3_default = on; }
   ~Engine();
 
   // A command from a client ({"cmd": ..., ...}); `reply` gets {"type":"ack"|"error", ...}. Non-blocking.
@@ -90,6 +93,7 @@ private:
     double hw_centre = 0, hw_fs = 0; // applied from the first bank of this hardware run on
   } _crop;
   bool _crop_dirty = false;
+  std::atomic<bool> _usb3_default{true};
   std::atomic<bool> _dsp_quit{false};
 
   std::atomic<bool> _recording{false}; // DSP thread feeds the recorder while set

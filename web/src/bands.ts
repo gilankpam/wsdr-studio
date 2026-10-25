@@ -67,25 +67,30 @@ export function freqAt(band: Range, x: number) {
 
 export type SweepPlan = { centres: number[]; rate_sel: number; fs: number; step: number; gapped: boolean; lo: number; n: number };
 
-// The Spectral Map's steps for a range on this adapter: the widest continuous span it has (gapped 40 MHz only when
-// allowed), steps a little narrower than the span (its edges roll off), over the channel groups only.
+// The Spectral Map's steps for a range on this adapter: the widest continuous span it has (gapped 40 MHz
+// only when allowed); groups that touch are swept as one stretch, and each stretch gets evenly spaced
+// steps a little closer than the span (its edges roll off), the outer ones a span's half inside its ends.
 export function sweepPlan(range: Range, dev: Device | undefined, gappedOk: boolean): SweepPlan | null {
   if (!dev) return null;
   const cont = Math.min(40e6, dev.max_msps * 1e6), wide = (dev.gapped_msps ?? 0) * 1e6;
   const fs = cont < 40e6 && gappedOk && wide >= 40e6 ? 40e6 : cont;
   const step = Math.max(5e6, Math.floor((fs * 0.875) / 5e6) * 5e6);
-  const centres: number[] = [];
-  const groups = RANGES[range].groups;
-  for (const g of groups) {
+  const stretches: [number, number][] = [];
+  for (const g of RANGES[range].groups) {
     const lo = centre(g.chans[0]) - g.half, hi = centre(g.chans[g.chans.length - 1]) + g.half;
-    for (let f = lo + step / 2; f - step / 2 < hi; f += step) {
-      const c = snap(f);
+    const last = stretches[stretches.length - 1];
+    if (last && lo <= last[1] + 5e6) last[1] = Math.max(last[1], hi);
+    else stretches.push([lo, hi]);
+  }
+  const centres: number[] = [];
+  for (const [lo, hi] of stretches) {
+    const n = Math.max(1, Math.ceil((hi - lo - fs) / step) + 1);
+    for (let i = 0; i < n; i++) {
+      const c = snap(n === 1 ? (lo + hi) / 2 : lo + fs / 2 + (i * (hi - lo - fs)) / (n - 1));
       if (!centres.includes(c)) centres.push(c);
     }
   }
-  const lo = centre(groups[0].chans[0]) - groups[0].half;
-  const last = groups[groups.length - 1];
-  const hi = centre(last.chans[last.chans.length - 1]) + last.half;
+  const lo = stretches[0][0], hi = stretches[stretches.length - 1][1];
   return { centres, rate_sel: Math.round(Math.log2(80e6 / fs)), fs, step, gapped: fs > cont, lo, n: Math.ceil((hi - lo) / 1e6) };
 }
 export const planId = (p: SweepPlan | null) => (p ? `${p.rate_sel}:${p.centres.join(',')}` : '');

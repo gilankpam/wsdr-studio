@@ -65,9 +65,11 @@ export default function App() {
   const [mapSlot, setMapSlot] = useState(0);   // Map: the view whose adapter sweeps
   const [mapRun, setMapRun] = useState(false); // Map: sweeping
   const [mapStep, setMapStep] = useState<{ c: number; fs: number } | null>(null); // where the sweep is
-  // Map: what to put back on leaving it (the sweeping view's tuning; the other view, if it ran)
-  const mapReturn = useRef<{ mode: Mode; freq: number; rate_sel: number; other: number | null } | null>(null);
-  const restartOther = useRef<number | null>(null);
+  // Map: what to put back on leaving it (the sweeping view's tuning, whether it ran; the view stopped for it)
+  const mapReturn = useRef<{ mode: Mode; freq: number; rate_sel: number; wasOpen: boolean; other: number | null } | null>(null);
+  const [mapOther, setMapOther] = useState<number | null>(null); // that view stays mounted (hidden): it keeps its adapter
+  const restart = useRef<number[]>([]); // views to start again once they are ready
+  const mapOpenPending = useRef(false); // Start pressed while the adapter was still closing
   const [help, setHelp] = useState(false); // the keyboard sheet
   const [narrow, setNarrow] = useState(() => matchMedia('(max-width: 1279px)').matches);
   const [drawer, setDrawer] = useState(false);
@@ -200,8 +202,9 @@ export default function App() {
   const alignPending = useRef<Mode | null>(isDual(mode) ? mode : null); // also at a start in a two-view mode
   useEffect(() => {
     if (prevMode.current !== mode) {
+      // (back from the map: the views go back where they were, no new alignment)
+      alignPending.current = isDual(mode) && prevMode.current !== 'map' ? mode : null;
       prevMode.current = mode;
-      alignPending.current = isDual(mode) ? mode : null;
     }
     const a = handles.current[0], b = handles.current[1], va = views[0];
     if (!alignPending.current || !a || !b || !va?.ready || !views[1]?.ready) return; // what A runs, B's rates known
@@ -232,6 +235,10 @@ export default function App() {
   const setMode = (m: Mode) => {
     setConfirm(null);
     if (m === mode) return;
+    if (m === 'map') {
+      const slot = dual ? selSlot : 0;
+      if (views[slot]?.recording) return handles.current[slot]?.notice('End the recording first: the map retunes this adapter');
+    }
     if (dual && !isDual(m)) {
       const other = m === 'single' ? 1 : selSlot ^ 1;
       if (views[other]?.open || views[other]?.locked || openKey[other]) {
@@ -241,26 +248,34 @@ export default function App() {
     }
     enter(m, null);
   };
-  // stopped: the view stopped for it (Map starts it again on leaving)
+  // stopped: the view stopped for it (Map starts it again on leaving); the map sweeps with the other one
   const enter = (m: Mode, stopped: number | null) => {
     if (m === 'map') {
-      const slot = dual ? selSlot : 0;
+      const slot = stopped !== null ? stopped ^ 1 : dual ? selSlot : 0;
       setMapSlot(slot);
+      setMapOther(stopped);
       setMapRun(false);
       const v = views[slot];
-      mapReturn.current = v ? { mode, freq: v.freq, rate_sel: v.rate_sel, other: stopped } : null;
+      mapReturn.current = v ? { mode, freq: v.freq, rate_sel: v.rate_sel, wasOpen: v.open, other: stopped } : null;
     } else if (mode === 'map') leaveMap(m, null);
     updatePrefs({ mode: m });
   };
   // Leaving the map: the sweeping view back where it was (or onto the channel picked in the map); in
   // Single only view A is shown, so a sweeping B stops; a view stopped for the map starts again.
+  // The span goes back too (the sweep's may be one the user never picked, gapped on USB 2).
   const leaveMap = (to: Mode, f: number | null) => {
     const r = mapReturn.current, h = handles.current[mapSlot];
     setMapRun(false);
     setMapStep(null);
-    if (h && (f !== null || r)) h.linkedSet(f !== null ? { freq: snap(f) } : { freq: r!.freq, rate_sel: r!.rate_sel, wide: true });
+    setMapOther(null);
+    mapOpenPending.current = false;
+    const dev = devices.find((d) => devKey(d) === views[mapSlot]?.selKey);
+    const rate_sel = r?.rate_sel ?? (dev ? Math.max(1, Math.ceil(Math.log2(80 / dev.max_msps))) : 4); // else the widest continuous
+    if (h) h.linkedSet({ freq: f !== null ? snap(f) : r ? r.freq : views[mapSlot]?.freq ?? 5180e6, rate_sel, wide: true });
+    const shownAfter = (i: number) => (isDual(to) ? true : i === 0);
     if (to === 'single' && mapSlot === 1) hub.request('close', { slot: 1 }).catch(() => {});
-    if (r?.other !== null && r?.other !== undefined && isDual(to)) restartOther.current = r.other;
+    else if (r?.wasOpen && !views[mapSlot]?.open) restart.current.push(mapSlot); // stopped in the map: back as it was
+    if (r && r.other !== null && shownAfter(r.other)) restart.current.push(r.other);
     mapReturn.current = null;
   };
   const pickFromMap = (f: number) => {
@@ -269,10 +284,12 @@ export default function App() {
     updatePrefs({ mode: to === 'map' ? 'single' : to });
   };
   useEffect(() => {
-    const o = restartOther.current;
-    if (o === null || !handles.current[o] || !views[o]?.ready || views[o]?.open) return;
-    restartOther.current = null;
-    handles.current[o]!.toggleRun();
+    restart.current = restart.current.filter((o) => {
+      const v = views[o], h = handles.current[o];
+      if (!h || !v?.ready) return true; // not yet: keep it
+      if (!v.open && !v.locked) h.toggleRun();
+      return false;
+    });
   }, [views, mode]);
   // the close waits for a Start still running (the engine's queue is serial); on failure the view stays
   // (its recording note may come after the reply: it goes to a shown view for a few seconds more)
@@ -311,14 +328,27 @@ export default function App() {
   const mapDev = inMap ? devices.find((d) => devKey(d) === views[mapSlot]?.selKey) : undefined;
   const mapPlan = inMap ? sweepPlan(prefs.mapRange, mapDev, prefs.mapGapped) : null;
   const mapStart = () => {
+    const v = views[mapSlot];
+    if (v?.recording) return handles.current[mapSlot]?.notice('End the recording first: the map retunes this adapter');
     setMapRun(true);
-    if (!views[mapSlot]?.open) handles.current[mapSlot]?.toggleRun();
+    if (!v?.open && !v?.locked) handles.current[mapSlot]?.toggleRun();
+    else mapOpenPending.current = true; // still open (a Stop just sent) or starting: opened once it has closed
   };
   const mapStop = () => {
     setMapRun(false);
+    mapOpenPending.current = false;
     if (views[mapSlot]?.open) hub.request('close', { slot: mapSlot }).catch(() => {});
   };
   const mapToggle = () => (mapRun ? mapStop() : mapDev?.can_open && mapStart());
+  useEffect(() => {
+    const v = views[mapSlot];
+    if (!mapOpenPending.current || !inMap || !v) return;
+    if (v.open) mapOpenPending.current = false; // it stayed open (or opened): the sweep runs on it
+    else if (!v.locked) {
+      mapOpenPending.current = false;
+      handles.current[mapSlot]?.toggleRun();
+    }
+  }, [views, mapSlot, inMap]);
   // keyboard shortcuts (see KEYS)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -576,7 +606,7 @@ export default function App() {
                   </span>
                 </div>
                 <div className="kv">
-                  <span>Waterfall</span>
+                  <span>{inMap ? 'Map shows' : 'Waterfall'}</span>
                   <Seg
                     wide
                     value={prefs.wfMode}
@@ -587,14 +617,18 @@ export default function App() {
                       if (auto) fit(m); // the floor depends on the mode
                     }}
                   />
-                  <span>Smoothing</span>
-                  <Seg
-                    wide
-                    value={String(prefs.smooth)}
-                    options={[['0', 'Off'], ['0.5', 'Low'], ['0.7', 'Mid'], ['0.9', 'High']]}
-                    title="Averaging of the average trace across rows"
-                    onChange={(v) => updatePrefs({ smooth: Number(v) })}
-                  />
+                  {!inMap && ( // the map keeps peaks per listen; nothing to smooth
+                    <>
+                      <span>Smoothing</span>
+                      <Seg
+                        wide
+                        value={String(prefs.smooth)}
+                        options={[['0', 'Off'], ['0.5', 'Low'], ['0.7', 'Mid'], ['0.9', 'High']]}
+                        title="Averaging of the average trace across rows"
+                        onChange={(v) => updatePrefs({ smooth: Number(v) })}
+                      />
+                    </>
+                  )}
                   <span>FFT size</span>
                   <select
                     aria-label="FFT size"
@@ -636,7 +670,7 @@ export default function App() {
           />
           <div className={`views ${mode}`}>
             {[0, 1]
-              .filter((i) => (inMap ? i === mapSlot : i === 0 || dual))
+              .filter((i) => (inMap ? i === mapSlot || i === mapOther : i === 0 || dual))
               .map((i) => (
                 <Station
                   key={i}
@@ -656,7 +690,7 @@ export default function App() {
               ))}
             {inMap && (
               <SpectralMap
-                key={`${mapSlot}:${prefs.mapRange}:${planId(mapPlan)}`}
+                key={`${mapSlot}:${prefs.mapRange}:${prefs.mapDwell}:${planId(mapPlan)}`}
                 hub={hub}
                 slot={mapSlot}
                 range={prefs.mapRange}
@@ -667,6 +701,7 @@ export default function App() {
                 dwell={prefs.mapDwell}
                 gappedOk={prefs.mapGapped}
                 prefs={prefs}
+                updatePrefs={updatePrefs}
                 scale={scale}
                 setScale={setScale}
                 onStart={mapStart}

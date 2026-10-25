@@ -44,7 +44,7 @@ export function BandRuler(p: {
     return () => ro.disconnect();
   }, []);
   const selView = p.views.find((v) => v.slot === p.sel);
-  const selLocked = selView?.locked ?? true;
+  const selLocked = p.range ? false : selView?.locked ?? true; // Map: a cell click leaves the map (always allowed)
   // the range shown: the selected view's section, unless the user picked another (until that view
   // moves to another section)
   const selRange = selView ? rangeOf((selView.lo + selView.hi) / 2) : 'u12';

@@ -9,7 +9,7 @@ import type { Hub } from './hub';
 import type { Caps, Device, DspSettings, Rate, RxSettings, Row, Status } from './protocol';
 import { Seg } from './ui';
 import {
-  ANT_COLOUR, LOCKED, SLOT_NAME, UDEV_CMD, VIEW_COLOUR, bandOf, baseName, bytes, chanShort, devKey, devLabel, devTitle, fmtClock,
+  ANT_COLOUR, LOCKED, SLOT_NAME, UDEV_CMD, isDual, VIEW_COLOUR, bandOf, baseName, bytes, chanShort, devKey, devLabel, devTitle, fmtClock,
   fmtDur, gappedDuty, loadPrefs, mhz, ratesFor, snap, spanLabel, type Mode, type Prefs, type Scale, type Tuning,
 } from './util';
 
@@ -58,7 +58,7 @@ export function Station(p: {
   otherWaiting: boolean; // view A is restarting after an unplug: B waits its turn (they may want the same model)
 }) {
   const { slot, mode, hub, shared, link, selected } = p;
-  const dual = mode !== 'single';
+  const dual = isDual(mode);
   const name = SLOT_NAME[slot];
   const spRef = useRef<HTMLCanvasElement>(null);
   const wfRef = useRef<HTMLCanvasElement>(null);
@@ -76,7 +76,7 @@ export function Station(p: {
     open: false, recording: false, opening: false, freq: 5180e6, rateSel: 4, want: null as number | null, wantId: 0, rates: null as Rate[] | null,
   });
   const autoOn = useRef(loadPrefs().scale === null); // Auto scale on (mirrors prefs.scale === null; storage may be blocked)
-  const view = useRef({ ghost: false, other: p.otherSel }); // for the socket callbacks
+  const view = useRef({ ghost: false, other: p.otherSel, map: mode === 'map' }); // for the socket callbacks
   const [home, setHome] = useState('');
   const setRef = useRef<(a: Partial<RxSettings>) => void>(() => {});
 
@@ -222,8 +222,11 @@ export function Station(p: {
             if (e.rx) {
               if (lastRx && (lastRx.freq !== e.rx.freq || lastRx.rate_sel !== e.rx.rate_sel || lastRx.gain_db !== e.rx.gain_db || lastRx.agc !== e.rx.agc))
                 autoAgain(true);
-              if (lastRx && lastRx.freq !== e.rx.freq) updatePrefs({ retuned: true });
-              rememberTuning({ freq: e.rx.freq, rate_sel: e.rx.rate_sel, gain_db: e.rx.gain_db, agc: e.rx.agc });
+              // (the map's sweep steps are not the user's tuning)
+              if (!view.current.map) {
+                if (lastRx && lastRx.freq !== e.rx.freq) updatePrefs({ retuned: true });
+                rememberTuning({ freq: e.rx.freq, rate_sel: e.rx.rate_sel, gain_db: e.rx.gain_db, agc: e.rx.agc });
+              }
               lastRx = e.rx;
               live.current.freq = e.rx.freq;
               live.current.rateSel = e.rx.rate_sel;
@@ -415,7 +418,7 @@ export function Station(p: {
   };
   useEffect(() => {
     setRef.current = userSet;
-    view.current = { ghost, other: p.otherSel };
+    view.current = { ghost, other: p.otherSel, map: mode === 'map' };
     if (!ghost) display.current?.setGhost(null);
     link.register(slot, {
       linkedSet: set, tune: tuneTo, req, freq: () => live.current.want ?? live.current.freq,

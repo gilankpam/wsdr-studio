@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import { useEffect, useRef, useState } from 'react';
 import { CHANNELS, channelAt, channelKey, type Channel } from './channels';
+import { Tuner } from './Tuner';
 import { Display } from './display';
 import { Client, type Caps, type Device, type DspSettings, type Rate, type RxSettings, type Status } from './protocol';
 
@@ -468,6 +469,13 @@ export default function App() {
     updatePrefs({ retuned: true });
     set({ freq: t });
   };
+  const tuneTo = (f: number) => { // from the slider: same snapping as a typed frequency
+    const t = snap(f, width);
+    setFreqText(mhz(t, 3));
+    lastSentFreq.current = t;
+    updatePrefs({ retuned: true });
+    set({ freq: t });
+  };
   const onGain = (v: number) => {
     setGainUi(v);
     window.clearTimeout(gainTimer.current);
@@ -738,6 +746,7 @@ export default function App() {
           </div>
         </div>
       </header>
+      <Tuner freq={cur.freq} disabled={locked} onTune={tuneTo} />
 
       {recording && status && (
         <div className="strip rec">

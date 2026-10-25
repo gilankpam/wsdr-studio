@@ -89,3 +89,13 @@ canvas.waterfall { flex: 1; min-height: 120px; background: #000; cursor: crossha
 .dot.ok { background: #66bb6a; box-shadow: 0 0 6px #66bb6a99; }
 .dot.warn { background: var(--warn); }
 .dot.bad { background: var(--bad); }
+
+/* frequency slider (Tuner.tsx) */
+.tuner { display: flex; align-items: center; gap: 10px; padding: 4px 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.tuner .bands { display: flex; gap: 4px; }
+.tuner .bands button { padding: 2px 8px; }
+.tuner .track { position: relative; flex: 1; }
+.tuner input[type='range'] { width: 100%; margin: 0; accent-color: var(--accent); }
+.tuner .ticks { position: absolute; left: 8px; right: 8px; top: 18px; height: 10px; pointer-events: none; }
+.tuner .ticks span { position: absolute; transform: translateX(-50%); font-size: 9px; color: var(--muted); }
+.tuner .val { min-width: 72px; text-align: right; font-variant-numeric: tabular-nums; }

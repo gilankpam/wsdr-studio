@@ -16,9 +16,17 @@ const bytes = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 
 const baseName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
 const fmtDur = (s: number) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : s >= 60 ? `${Math.floor(s / 60)} min` : `${Math.max(0, Math.floor(s))} s`);
 // The radio tunes in 5 MHz steps (2.4 GHz: 2407 + 5n MHz; 5 GHz: 5000 + 5n MHz).
-const snap = (f: number) => (f < 3.7e9 ? 2407e6 + Math.round((f - 2407e6) / 5e6) * 5e6 : Math.round(f / 5e6) * 5e6);
+// The radio tunes 2.4 GHz channels 1-13 (2412-2472, 5 MHz apart) and 14 (2484), and 5 GHz in 5 MHz
+// steps from 5080 to 6165 MHz. The nearest tunable centre:
+const snap = (f: number) => {
+  if (f < 3.7e9) {
+    if (f > 2478e6) return 2484e6;
+    return 2412e6 + Math.min(12, Math.max(0, Math.round((f - 2412e6) / 5e6))) * 5e6;
+  }
+  return Math.min(6165e6, Math.max(5080e6, Math.round(f / 5e6) * 5e6));
+};
 const UDEV_CMD = 'sudo cp tools/99-wsdr.rules /etc/udev/rules.d/ && sudo udevadm control --reload';
-const LOCKED = 'Stop recording to change tuning or gain';
+const LOCKED = 'End the recording to change tuning or gain';
 
 // Per-viewer preferences (display only); storage may be unavailable.
 const PREFS_KEY = 'wsdr-studio.prefs';
@@ -41,7 +49,7 @@ function savePrefs(p: Prefs) {
 }
 
 type Banner = { id: number; text: string; kind: 'info' | 'error' };
-type Saved = { file: string; bytes: number; seconds: number; reason?: string; error?: string; dropped: number };
+type Saved = { file: string; bytes: number; seconds: number; reason?: string; error?: string };
 
 // A number box that applies on Enter or when leaving the field (not on every keystroke).
 function NumField({ value, onCommit, title }: { value: number; onCommit: (v: number) => void; title: string }) {
@@ -74,7 +82,7 @@ export default function App() {
   const rate = useRef({ banks: 0, t: 0 });
   const drops = useRef({ ring: 0, client: 0, at: 0 });
   const bannerId = useRef(1);
-  const live = useRef({ open: false, recording: false }); // for callbacks that outlive a render
+  const live = useRef({ open: false, recording: false, opening: false, freq: 5180e6 }); // for callbacks that outlive a render
   const setRef = useRef<(a: Partial<RxSettings>) => void>(() => {});
   const popRef = useRef<HTMLDivElement>(null);
 
@@ -132,17 +140,27 @@ export default function App() {
     ro.observe(spRef.current!);
     ro.observe(wfRef.current!);
     d.resize();
-    let autoPending = loadPrefs().scale === null; // fit the scale once per Start unless the user set one
+    // Auto scale: refit once enough rows of a new setting have arrived (Start, retune, gain change),
+    // unless the user fixed the scale. autoAt = the row count to refit at (-1: nothing pending).
+    let autoAt = loadPrefs().scale === null ? 25 : -1;
+    const autoAgain = () => {
+      if (loadPrefs().scale === null) autoAt = d.rowsSeen() + 25;
+    };
     let wasOpen = false;
     let lastRx: RxSettings | null = null;
     let lastPaths = 'a';
     let client: Client | null = null;
     d.onRetune = (f) => {
-      if (live.current.recording) {
-        addBanner(LOCKED);
+      if (live.current.recording || live.current.opening) {
+        if (live.current.recording) addBanner(LOCKED);
         return;
       }
-      setRef.current({ freq: snap(f) }); // live retune, or the draft for the next Start when stopped
+      const t = snap(f);
+      if (Math.abs(t - live.current.freq) < 1) addBanner(`Already at the nearest step (${mhz(t, 0)} MHz). The radio tunes in 5 MHz steps.`);
+      else {
+        addBanner(`${live.current.open ? 'Tuned to' : 'Next Start:'} ${mhz(t, 0)} MHz (nearest 5 MHz step)`);
+        setRef.current({ freq: t }); // live retune, or the draft for the next Start when stopped
+      }
       updatePrefs({ retuned: true });
     };
     Client.fromLocation()
@@ -152,8 +170,8 @@ export default function App() {
         clientRef.current = c;
         c.onRow = (r) => {
           d.push(r);
-          if (autoPending && d.rowsSeen() > 25) {
-            autoPending = false;
+          if (autoAt >= 0 && d.rowsSeen() >= autoAt) {
+            autoAt = -1;
             const s = d.suggestRange();
             if (s) setScale(s);
           }
@@ -169,7 +187,7 @@ export default function App() {
             case 'caps':
               if (e.open && !wasOpen) {
                 d.newStream();
-                autoPending = loadPrefs().scale === null;
+                autoAt = loadPrefs().scale === null ? 25 : -1;
               } else if (!e.open && wasOpen) {
                 setHadPicture(d.hasPicture());
                 d.freeze();
@@ -182,7 +200,8 @@ export default function App() {
               break;
             case 'settings':
               if (e.rx) {
-                if (lastRx && (lastRx.freq !== e.rx.freq || lastRx.rate_sel !== e.rx.rate_sel)) setSaved(null);
+                if (lastRx && (lastRx.freq !== e.rx.freq || lastRx.rate_sel !== e.rx.rate_sel || lastRx.gain_db !== e.rx.gain_db || lastRx.agc !== e.rx.agc))
+                  autoAgain();
                 lastRx = e.rx;
                 setRx(e.rx);
                 lastSentFreq.current = null;
@@ -222,7 +241,7 @@ export default function App() {
               break;
             }
             case 'recorded':
-              setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error, dropped: e.dropped });
+              setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error });
               break;
             case 'alert':
               addBanner(e.msg, 'error');
@@ -265,6 +284,8 @@ export default function App() {
   const rxState = open ? status?.rx?.state ?? 'starting' : 'stopped';
   const recording = status?.record.active ?? false;
   const locked = (open && recording) || opening; // recording: a change would end the file; opening: it would be lost
+  live.current.opening = opening;
+  live.current.freq = (rx ?? draft).freq;
   const fsNow = 80e6 / (1 << cur.rate_sel);
   const width = cur.rate_sel === 1 && (caps.wide_capable ?? true) ? 40 : 20;
   const chan = channelAt(cur.freq, width);
@@ -283,15 +304,16 @@ export default function App() {
           : !devices.length
             ? 'No adapter found. Plug in an RTL8812BU or RTL8812CU, then press ⟳ Rescan.'
             : hadPicture
-              ? 'Stopped. Last picture shown. Press ▶ Start to resume.'
+              ? 'Stopped. Double-click to pick a frequency; ▶ Start to resume.'
               : 'Stopped. Press ▶ Start to begin.';
   useEffect(
     () =>
       display.current?.setOpts({
         ...scale, wfMode: prefs.wfMode, smooth: prefs.smooth, overlay, dim: !open,
-        wfPath: dsp.paths === 'b' ? 1 : 0, marker: open ? cur.freq : null,
+        wfPath: dsp.paths === 'b' ? 1 : 0, marker: open || hadPicture ? cur.freq : null,
+        markerLabel: open ? 'requested' : 'next Start',
       }),
-    [scale, prefs.wfMode, prefs.smooth, overlay, open, dsp.paths, cur.freq],
+    [scale, prefs.wfMode, prefs.smooth, overlay, open, dsp.paths, cur.freq, hadPicture],
   );
 
   // A settings change: sent now when streaming, kept as a draft until Start otherwise.
@@ -307,7 +329,6 @@ export default function App() {
   const doStart = async () => {
     if (!sel) return;
     setStarting(true);
-    setSaved(null);
     try {
       await req('open', { pid: sel.pid, bus: sel.bus, port: sel.port, ...draft });
     } catch {
@@ -397,7 +418,7 @@ export default function App() {
               {recording ? '■ End recording' : '● Record'}
             </button>
           ) : (
-            <button disabled={opening || !connected} onClick={() => req('scan').catch(() => {})} title="Look for adapters again">
+            <button className="scan" disabled={opening || !connected} onClick={() => req('scan').catch(() => {})} title="Look for adapters again">
               ⟳ Rescan
             </button>
           )}
@@ -517,7 +538,7 @@ export default function App() {
                   <select value={dsp.fft} onChange={(e) => req('dsp', { fft: Number(e.target.value) }).catch(() => {})}>
                     {FFTS.map((n) => (
                       <option key={n} value={n}>
-                        {n} ({(fsNow / Math.min(n, 4096) / 1e3).toFixed(1)} kHz/bin)
+                        {n <= 4096 ? `${n} (${(fsNow / n / 1e3).toFixed(1)} kHz/bin)` : `${n} (${(fsNow / 4096 / 1e3).toFixed(1)} kHz/bin, smoother noise)`}
                       </option>
                     ))}
                   </select>
@@ -533,7 +554,18 @@ export default function App() {
                 </label>
                 <label>
                   Waterfall
-                  <select value={prefs.wfMode} onChange={(e) => updatePrefs({ wfMode: e.target.value as 'max' | 'avg' })}>
+                  <select
+                    value={prefs.wfMode}
+                    onChange={(e) => {
+                      updatePrefs({ wfMode: e.target.value as 'max' | 'avg' });
+                      if (prefs.scale === null) {
+                        // the floor depends on the mode: refit right away when Auto is on
+                        display.current?.setOpts({ wfMode: e.target.value as 'max' | 'avg' });
+                        const s = display.current?.suggestRange();
+                        if (s) setScale(s);
+                      }
+                    }}
+                  >
                     <option value="max">peak (shows short frames)</option>
                     <option value="avg">average</option>
                   </select>
@@ -559,16 +591,15 @@ export default function App() {
               {bytes(diskFree)} free (~{fmtDur(secsLeft)})
             </span>
           )}
-          <span className="muted">tuning locked</span>
-          {status.record.dropped > 0 && <span className="warn">{status.record.dropped} samples dropped (disk too slow)</span>}
+          <span className="muted">tuning and gain locked</span>
         </div>
       )}
       {!recording && saved && (
         <div className={saved.error ? 'strip error' : 'strip'}>
           <span>
             {saved.error ? `Recording stopped: ${saved.error}. ` : saved.reason ? `Recording stopped (${saved.reason}). ` : ''}
-            Saved <code title={saved.file}>{baseName(saved.file)}</code> · {bytes(saved.bytes)} · {saved.seconds.toFixed(1)} s
-            {saved.dropped ? ` · ${saved.dropped} samples dropped` : ''}
+            Saved to <code title={saved.file}>{saved.file.slice(0, saved.file.lastIndexOf('/') + 1)}</code>{' '}
+            <code title={saved.file}>{baseName(saved.file)}</code> · {bytes(saved.bytes)} · {saved.seconds.toFixed(1)} s
           </span>
           <button onClick={() => copy(saved.file)}>Copy path</button>
           <button className="x" onClick={() => setSaved(null)} title="Dismiss">
@@ -590,16 +621,27 @@ export default function App() {
       {sel && sel.pid === 0xb812 && sel.speed_mbps < 5000 && !open && (
         <div className="strip">This 8812BU is connected at USB 2 speed: spans up to 5 MHz. 40 MHz needs a USB 3 connection.</div>
       )}
-      {banners.map((b) => (
-        <div key={b.id} className={b.kind === 'error' ? 'strip error' : 'strip'}>
-          {b.text}
-          <button className="x" onClick={() => dropBanner(b.id)} title="Dismiss">
-            ×
-          </button>
-        </div>
-      ))}
+      {banners
+        .filter((b) => b.kind === 'error')
+        .map((b) => (
+          <div key={b.id} className="strip error">
+            {b.text}
+            <button className="x" onClick={() => dropBanner(b.id)} title="Dismiss">
+              ×
+            </button>
+          </div>
+        ))}
 
       <main className="plots">
+        <div className="toasts">
+          {banners
+            .filter((b) => b.kind === 'info')
+            .map((b) => (
+              <div key={b.id} className="toast" onClick={() => dropBanner(b.id)}>
+                {b.text}
+              </div>
+            ))}
+        </div>
         <canvas ref={spRef} className="spectrum" />
         <canvas ref={wfRef} className="waterfall" />
       </main>
@@ -620,7 +662,7 @@ export default function App() {
         ))}
         {status?.rx?.error && <span className="warn">{status.rx.error}</span>}
         {!open && status?.error && <span className="warn">{status.error}</span>}
-        {!prefs.retuned && open && <span className="hint">tip: double-click the spectrum to tune there</span>}
+        {!prefs.retuned && open && !recording && <span className="hint">tip: double-click the spectrum to tune there</span>}
       </footer>
     </div>
   );

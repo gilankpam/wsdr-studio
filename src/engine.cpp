@@ -276,7 +276,7 @@ void Engine::stop_recording(const std::string &why) {
   if (!_rec.stop())
     return; // nothing was recording
   const RecordInfo ri = _rec.info();
-  json e = {{"type", "recorded"}, {"file", ri.path}, {"samples", ri.samples}, {"dropped", ri.dropped},
+  json e = {{"type", "recorded"}, {"file", ri.path}, {"samples", ri.samples},
             {"seconds", ri.fs > 0 ? ri.samples / ri.fs : 0.0}, {"bytes", ri.samples * 4}};
   if (!why.empty())
     e["reason"] = why;
@@ -412,7 +412,7 @@ json Engine::status() const {
   j["rows"] = _rows.load();
   j["dsp_load"] = _dsp_load.load();
   const RecordInfo ri = _rec.info();
-  j["record"] = {{"active", ri.active}, {"file", ri.path}, {"samples", ri.samples}, {"dropped", ri.dropped},
+  j["record"] = {{"active", ri.active}, {"file", ri.path}, {"samples", ri.samples},
                  {"seconds", ri.fs > 0 ? ri.samples / ri.fs : 0.0}, {"bytes", ri.samples * 4}, {"error", ri.error}};
   // free space where recordings go (the nearest existing directory)
   std::error_code ec;
@@ -443,13 +443,13 @@ void Engine::dsp_loop() {
   double busy = 0;
   auto win = clk::now();
   // Ask the command thread to stop the recording (once); stop feeding it right away.
+  uint64_t rec_seen = 0; // the recording rec_next belongs to
   auto request_stop = [&](const char *reason) {
     _recording = false;
     if (!_rec_stop_requested.exchange(true))
-      submit({{"cmd", "_rec_stop"}, {"reason", reason}, {"rec", _rec_id.load()}}, nullptr);
+      submit({{"cmd", "_rec_stop"}, {"reason", reason}, {"rec", rec_seen}}, nullptr); // the file the bank was checked for
   };
   uint64_t rec_next = 0; // next bank seq expected in the file (0 = not started)
-  uint64_t rec_seen = 0; // the recording rec_next belongs to
   while (!_dsp_quit) {
     Bank *b = _ring.pop(std::chrono::milliseconds(100));
     const auto t0 = clk::now();

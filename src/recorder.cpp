@@ -50,13 +50,14 @@ std::string Recorder::start(double fs, double centre_hz, const std::string &hw, 
     _gain = gain_db;
     _agc = agc;
     _error.clear();
+    _meta_error.clear();
     _q.clear();
     _queued = 0;
     _quit = false;
     _fd = fd;
   }
   write_meta(false);
-  _samples = 0;
+  _bytes = 0;
   _dropped = 0;
   _failed = false;
   _active = true;
@@ -134,15 +135,16 @@ void Recorder::writer() {
       }
       p += w;
       left -= static_cast<size_t>(w);
-      _samples += static_cast<uint64_t>(w) / 4; // only what reached the file
+      _bytes += static_cast<uint64_t>(w); // only what reached the file
     }
     if (left)
-      _dropped += left / 4;
+      _dropped += (left + 3) / 4;
   }
 }
 
 void Recorder::write_meta(bool final) {
-  std::lock_guard<std::mutex> l(_m);
+  // Build under the lock, write without it (info() is read twice a second from the I/O thread).
+  std::unique_lock<std::mutex> l(_m);
   nlohmann::json g = {{"core:datatype", "ci16_le"},
                       {"core:sample_rate", _fs},
                       {"core:version", "1.0.0"},
@@ -152,8 +154,9 @@ void Recorder::write_meta(bool final) {
                                                ", 12-bit values << 4, DC not removed; gain " +
                                                (_agc ? std::string("AGC") : std::to_string(_gain) + " dB (fixed)")}};
   if (final) {
-    g["wsdr:samples"] = _samples.load();
-    g["wsdr:dropped_samples"] = _dropped.load();
+    g["wsdr:samples"] = _bytes.load() / 4;
+    if (_dropped)
+      g["wsdr:note"] = "ended early: the disk could not keep up (the file has no gap)";
     if (!_error.empty())
       g["wsdr:error"] = _error;
   }
@@ -161,24 +164,28 @@ void Recorder::write_meta(bool final) {
       {"global", g},
       {"captures", {{{"core:sample_start", 0}, {"core:frequency", _centre}, {"core:datetime", _datetime}}}},
       {"annotations", nlohmann::json::array()}};
+  const std::string base = _base;
+  l.unlock();
   // temp file + rename: a full disk leaves the previous meta file intact rather than a truncated one
-  const std::string tmp = _base + ".sigmf-meta.tmp";
+  const std::string tmp = base + ".sigmf-meta.tmp";
+  std::string err;
   {
     std::ofstream f(tmp, std::ios::trunc);
     f << meta.dump(2) << "\n";
     f.flush();
-    if (!f) {
-      std::error_code ec;
-      std::filesystem::remove(tmp, ec);
-      if (_error.empty())
-        _error = "writing the metadata file failed";
-      return;
-    }
+    if (!f)
+      err = "writing the metadata file failed";
   }
   std::error_code ec;
-  std::filesystem::rename(tmp, _base + ".sigmf-meta", ec);
-  if (ec && _error.empty())
-    _error = "writing the metadata file failed: " + ec.message();
+  if (err.empty()) {
+    std::filesystem::rename(tmp, base + ".sigmf-meta", ec);
+    if (ec)
+      err = "writing the metadata file failed: " + ec.message();
+  } else {
+    std::filesystem::remove(tmp, ec);
+  }
+  l.lock();
+  _meta_error = err; // the latest metadata write decides (a later success clears an earlier failure)
 }
 
 RecordInfo Recorder::info() const {
@@ -186,10 +193,10 @@ RecordInfo Recorder::info() const {
   RecordInfo i;
   i.active = _active;
   i.path = _base.empty() ? "" : _base + ".sigmf-data";
-  i.samples = _samples;
-  i.dropped = _dropped;
+  i.samples = _bytes / 4;
+  i.ended_early = _dropped > 0;
   i.fs = _fs;
-  i.error = _error;
+  i.error = !_error.empty() ? _error : _meta_error;
   return i;
 }
 

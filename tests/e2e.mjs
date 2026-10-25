@@ -125,7 +125,8 @@ if (process.argv.includes('--record')) {
   check(m.global['core:datatype'] === 'ci16_le' && m.captures[0]['core:frequency'] > 0, 'SigMF meta valid');
   const exp = m.global['core:sample_rate'] * 2 * 4;
   check(Math.abs(statSync(st.file).size / exp - 1) < 0.25, `size ~ 2 s of samples (${(statSync(st.file).size / exp).toFixed(2)} x)`);
-  check(m.global['wsdr:dropped_samples'] === 0, `no dropped samples (${m.global['wsdr:dropped_samples']})`);
+  check(m.global['wsdr:samples'] * 4 === statSync(st.file).size, `meta sample count = file size / 4 (${m.global['wsdr:samples']})`);
+  check(!m.global['wsdr:note'] && !m.global['wsdr:error'], 'recording complete (no early end, no error)');
 }
 
 check((await req('set', { freq: f_orig })).type === 'ack', `back to ${f_orig / 1e6} MHz`);

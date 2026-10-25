@@ -13,6 +13,7 @@ export type DisplayOpts = {
   wfPath: number;
   smooth: number;               // 0 = off .. 0.9 = heavy averaging of the average trace across rows
   marker: number | null;        // requested frequency (Hz), drawn when it is not the band centre
+  markerLabel: string;          // e.g. "requested" or "next Start"
   overlay: string | null;       // message over the plot (stopped, starting, ...)
   dim: boolean;                 // stopped: the last picture stays, faded
 };
@@ -46,7 +47,8 @@ export class Display {
   private dpr = 1;
   private off: (() => void)[] = [];
   opts: DisplayOpts = {
-    dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, overlay: null, dim: false,
+    dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, markerLabel: 'requested',
+    overlay: null, dim: false,
   };
   onRetune: (freq: number) => void = () => {};
 
@@ -268,7 +270,8 @@ export class Display {
     c.textBaseline = 'top';
     c.fillText(`${Math.round(hi)}`, 13 * d, y0);
     c.textBaseline = 'bottom';
-    c.fillText(`${Math.round(lo)}`, 13 * d, y0 + barH);
+    c.fillText(`${Math.round(lo)}`, 13 * d, y0 + barH - 10 * d);
+    c.fillText('floor', 13 * d, y0 + barH);
     // time ticks: one row = one device pixel, at the measured row rate
     const pxPerS = this.rowsPerS;
     this.gutterRate = pxPerS;
@@ -400,7 +403,7 @@ export class Display {
         c.lineTo(x, ph);
         c.stroke();
         c.setLineDash([]);
-        const label = `requested ${(m / 1e6).toFixed(1)}`;
+        const label = `${this.opts.markerLabel} ${(m / 1e6).toFixed(1)}`;
         c.font = `${11 * d}px system-ui, sans-serif`;
         const lw = c.measureText(label).width;
         const lx = Math.min(W - lw - 4 * d, Math.max(L + 2 * d, x - lw / 2));
@@ -487,7 +490,7 @@ export class Display {
     if (msg) {
       c.font = `${14 * d}px system-ui, sans-serif`;
       const tw = c.measureText(msg).width + 28 * d;
-      const cx = (L + W) / 2, cy = (T + ph) / 2;
+      const cx = (L + W) / 2, cy = T + 48 * d; // near the top: the traces stay visible below it
       c.fillStyle = 'rgba(19,24,32,0.92)';
       c.fillRect(cx - tw / 2, cy - 16 * d, tw, 32 * d);
       c.fillStyle = '#d6dde6';

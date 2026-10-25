@@ -21,7 +21,8 @@ namespace studio {
 struct RecordInfo {
   bool active = false;
   std::string path;     // data file
-  uint64_t samples = 0, dropped = 0;
+  uint64_t samples = 0;  // in the file
+  bool ended_early = false; // the disk could not keep up; the file stops before the first lost sample
   double fs = 0;
   std::string error;    // write failure, if any
 };
@@ -46,7 +47,7 @@ private:
 
   const std::string _dir;
   mutable std::mutex _m; // everything below except the atomics
-  std::string _base, _hw, _datetime, _error;
+  std::string _base, _hw, _datetime, _error, _meta_error;
   double _fs = 0, _centre = 0, _gain = 0;
   int _path = 0;
   bool _agc = false;
@@ -57,7 +58,7 @@ private:
   std::thread _t;
   int _fd = -1;
   std::atomic<bool> _active{false}, _failed{false};
-  std::atomic<uint64_t> _samples{0}, _dropped{0};
+  std::atomic<uint64_t> _bytes{0}, _dropped{0}; // written bytes; samples not written (queue full / failure)
 };
 
 } // namespace studio

@@ -144,7 +144,11 @@ std::string running_instance_url() {
   const json j = json::parse(local_get(static_cast<uint16_t>(port), "/api/launch-key?t=" + token), nullptr, false);
   if (!j.is_object() || !j.contains("key") || !j["key"].is_string())
     return {};
-  return "http://127.0.0.1:" + std::to_string(port) + "/#k=" + j["key"].get<std::string>();
+  const std::string key = j["key"].get<std::string>();
+  // whatever answers on that port is not trusted further than this: exactly 32 hex digits
+  if (key.size() != 32 || key.find_first_not_of("0123456789abcdef") != std::string::npos)
+    return {};
+  return "http://127.0.0.1:" + std::to_string(port) + "/#k=" + key;
 }
 
 // Remove the instance file only if it still describes us (another instance may have replaced it).
@@ -196,15 +200,39 @@ std::string launch_page(const std::string &url) {
   return "file://" + path;
 }
 
+// Launch pages are deleted after 30 s, but a short-lived second launch exits before that.
+void remove_old_launch_pages() {
+  std::error_code ec;
+  const auto now = fs::file_time_type::clock::now();
+  for (const auto &e : fs::directory_iterator(private_dir(), ec))
+    if (e.path().filename().string().rfind("launch-", 0) == 0 && now - e.last_write_time(ec) > std::chrono::seconds(30))
+      fs::remove(e.path(), ec);
+}
+
+// Where `name` resolves on PATH ("" if not found), symlinks followed.
+std::string which(const std::string &name) {
+  const char *p = std::getenv("PATH");
+  std::string path = p ? p : "/usr/bin:/bin";
+  for (size_t i = 0; i <= path.size();) {
+    size_t e = path.find(':', i);
+    if (e == std::string::npos)
+      e = path.size();
+    const fs::path f = fs::path(path.substr(i, e - i)) / name;
+    std::error_code ec;
+    if (access(f.c_str(), X_OK) == 0)
+      return fs::canonical(f, ec).string();
+    i = e + 1;
+  }
+  return {};
+}
+
 // Open the UI: Chrome/Chromium as an app window, else the default browser. The child gets a clean
 // environment for libraries (an AppImage's LD_LIBRARY_PATH must not leak into the browser).
+// Normally the browser gets the private launch page (no key on its command line). Sandboxed
+// browsers (Snap, Flatpak) cannot read that page, and xdg-open may hand off to one, so those get
+// the single-use URL itself (valid 30 s).
 void open_browser(const std::string &secret_url) {
   const std::string page = launch_page(secret_url);
-  if (page.empty()) {
-    std::fprintf(stderr, "wsdr-studiod: cannot write the launch page; open %s yourself\n", secret_url.c_str());
-    return;
-  }
-  const std::string url = page;
   std::vector<std::string> env;
   for (char **e = environ; *e; e++) {
     const std::string s = *e;
@@ -217,12 +245,20 @@ void open_browser(const std::string &secret_url) {
   for (auto &s : env)
     envp.push_back(s.data());
   envp.push_back(nullptr);
-  const std::string app = "--app=" + url, size = "--window-size=1440,900";
+  const std::string app = "--app=" + page, size = "--window-size=1440,900";
   const std::vector<std::vector<std::string>> cmds = {
       {"google-chrome", app, size}, {"google-chrome-stable", app, size}, {"chromium", app, size},
       {"chromium-browser", app, size},
-      {"xdg-open", url}};
-  for (const auto &c : cmds) {
+      {"xdg-open", page}};
+  for (auto c : cmds) {
+    const std::string exe = which(c[0]);
+    if (exe.empty())
+      continue;
+    const bool sandboxed = c[0] == "xdg-open" || exe.find("/snap/") != std::string::npos ||
+                           exe.find("flatpak") != std::string::npos;
+    std::string &target = c[1]; // the URL argument: "--app=URL" (Chrome/Chromium) or URL (xdg-open)
+    if (sandboxed || page.empty())
+      target = c[0] == "xdg-open" ? secret_url : "--app=" + secret_url;
     std::vector<char *> argv;
     for (const auto &a : c)
       argv.push_back(const_cast<char *>(a.c_str()));
@@ -244,7 +280,7 @@ void open_browser(const std::string &secret_url) {
       return;
     }
   }
-  std::fprintf(stderr, "wsdr-studiod: no browser found; open %s\n", url.c_str());
+  std::fprintf(stderr, "wsdr-studiod: no browser found; open %s (single use, 30 s)\n", secret_url.c_str());
 }
 
 bool parse(int argc, char **argv, Args &a) try {
@@ -341,8 +377,13 @@ int main(int argc, char **argv) {
                          "[--rate MSPS] [--record-dir DIR] | --headless-seconds N --pid ...\n");
     return 2;
   }
+  if (!a.record_dir.empty()) {
+    std::error_code ec;
+    a.record_dir = fs::absolute(a.record_dir, ec).string();
+  }
   if (a.headless > 0)
     return run_headless(a);
+  remove_old_launch_pages();
 
   // Single instance: if one is already serving, open a new window on it.
   if (const std::string url = running_instance_url(); !url.empty()) {
@@ -433,7 +474,7 @@ int main(int argc, char **argv) {
         json st = eng->status();
         st["client_drops"] = srv->frames_dropped();
         srv->broadcast_text(st.dump());
-      } else if (a.browser && seen_client &&
+      } else if (a.browser && seen_client && !eng->status()["record"]["active"].get<bool>() &&
                  std::chrono::steady_clock::now() - idle_since > std::chrono::seconds(30)) {
         std::fprintf(stderr, "wsdr-studiod: no clients for 30 s, exiting\n");
         io.stop();

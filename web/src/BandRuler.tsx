@@ -104,19 +104,21 @@ export function BandRuler(p: {
   // the range shown: the selected view's section, unless the user picked another (until that view
   // moves to another section)
   const selRange = selView ? rangeOf((selView.lo + selView.hi) / 2) : 'u12';
-  const [picked, setPicked] = useState<{ range: Range; from: Range } | null>(null);
-  // another view selected, or it moved to another section: follow it again (state adjusted in render)
+  const [picked, setPicked] = useState<Range | null>(null);
+  const inRange = (r: Range, v: RulerView) => {
+    const c = (v.lo + v.hi) / 2;
+    return r === '5' ? bandOf(c) === '5' : rangeOf(c) === r;
+  };
+  // forgotten when another view is selected, or when the selected view moves where the pick does not
+  // show it (the 5 GHz overview stays while it steps across sections); state adjusted in render
   const [seen, setSeen] = useState(`${p.sel}:${selRange}`);
   if (seen !== `${p.sel}:${selRange}`) {
     setSeen(`${p.sel}:${selRange}`);
-    setPicked(null);
+    if (!seen.startsWith(`${p.sel}:`) || (picked && selView && !inRange(picked, selView))) setPicked(null);
   }
-  const band: Range = picked && picked.from === selRange ? picked.range : selRange;
-  const showBand = (b: Range) => setPicked(b === selRange ? null : { range: b, from: selRange });
-  const shows = (v: RulerView) => {
-    const c = (v.lo + v.hi) / 2;
-    return band === '5' ? bandOf(c) === '5' : rangeOf(c) === band;
-  };
+  const band: Range = picked ?? selRange;
+  const showBand = (b: Range) => setPicked(b === selRange ? null : b);
+  const shows = (v: RulerView) => inRange(band, v);
 
   const onWheel = (e: WheelEvent) => {
     if (selLocked || !e.deltaY) return;

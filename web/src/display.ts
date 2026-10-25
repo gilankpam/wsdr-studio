@@ -687,9 +687,12 @@ export class Display {
           const at = Display.fAt(ax, x + 0.5);
           if (!at) continue;
           const fm = at.f;
+          // a running view's live picture over a stopped one's frozen one, then the nearer centre
           let bd = Infinity;
-          for (const v of views)
-            if (fm >= v.lo && fm <= v.hi && Math.abs(fm - (v.lo + v.hi) / 2) < bd) [owner[x], bd] = [v.slot, Math.abs(fm - (v.lo + v.hi) / 2)];
+          for (const v of views) {
+            const dist = (v.src.dim ? 1e12 : 0) + Math.abs(fm - (v.lo + v.hi) / 2);
+            if (fm >= v.lo && fm <= v.hi && dist < bd) [owner[x], bd] = [v.slot, dist];
+          }
         }
       const nowMs = performance.now();
       for (const v of views) {
@@ -853,8 +856,10 @@ export class Display {
         const f = this.freqAt(this.hover);
         // the trace under the pointer (stitched: the view whose frequencies these are)
         let k = -1, kd = Infinity;
+        // stitched: the trace of the view that owns this pixel (as drawn)
+        const own = this.opts.stitch ? owner[Math.round(this.hover * d - L)] ?? -1 : -1;
         this.last.forEach((q, i) => {
-          if (!q || f === null) return;
+          if (!q || f === null || (this.opts.stitch && Math.floor(i / 2) !== own)) return;
           const rg = Display.range(q), dist = Math.abs(f - (rg.lo + rg.hi) / 2);
           if (f >= rg.lo && f <= rg.hi && dist < kd) [k, kd] = [i, dist];
         });

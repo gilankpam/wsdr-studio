@@ -193,7 +193,7 @@ export default function App() {
       alignPending.current = mode === 'single' ? null : mode;
     }
     const a = handles.current[0], b = handles.current[1], va = views[0];
-    if (!alignPending.current || !a || !b || !va || !views[1]) return;
+    if (!alignPending.current || !a || !b || !va?.ready || !views[1]?.ready) return; // what A runs, B's rates known
     alignPending.current = null;
     const why = b.busy();
     if (why) {
@@ -528,6 +528,7 @@ export default function App() {
                   linksBox={linksBox}
                   otherSel={dual ? views[i ^ 1]?.selKey ?? null : null}
                   otherOpen={openKey[i ^ 1]}
+                  otherWaiting={i === 1 && !!(views[0]?.lost || views[0]?.locked)}
                 />
               ))}
             {mode === 'panorama' && (
@@ -541,7 +542,14 @@ export default function App() {
                 overlay={panoNote}
                 onRetune={(f) => {
                   // the view whose part this is (or the nearer one) moves its centre there
-                  const d = views.map((v) => (v ? (f >= v.src.lo && f <= v.src.hi ? 0 : Math.min(Math.abs(f - v.src.lo), Math.abs(f - v.src.hi))) : Infinity));
+                  // as the plot assigns pixels: a running view's part over a stopped one's, then the nearer centre
+                  const d = views.map((v) =>
+                    v
+                      ? (f >= v.src.lo && f <= v.src.hi ? 0 : 1e13 + Math.min(Math.abs(f - v.src.lo), Math.abs(f - v.src.hi))) +
+                        (v.open ? 0 : 1e12) +
+                        Math.abs(f - (v.src.lo + v.src.hi) / 2)
+                      : Infinity,
+                  );
                   const slot = d[1] < d[0] ? 1 : 0;
                   if (views[slot]?.locked) handles.current[slot]?.notice('End the recording to change tuning');
                   else handles.current[slot]?.tune(f);

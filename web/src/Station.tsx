@@ -40,6 +40,8 @@ export type ViewInfo = {
   centre: number; // where the shown span is centred (the radio's centre while running, else the request)
   src: Source;    // its part of the stitched Panorama plot
   open: boolean; recording: boolean; locked: boolean; selKey: string | null;
+  lost: boolean;  // unplugged, waiting for it
+  ready: boolean; // connected, the adapters known, and a running view's settings in (alignment waits for it)
 };
 export type Link = {
   userSet: (slot: number, args: Partial<RxSettings>) => void;  // a user change: locked fields go to the other view
@@ -53,6 +55,7 @@ export function Station(p: {
   slot: number; mode: Mode; hub: Hub; shared: Shared; link: Link; selected: boolean; onSelect: () => void;
   sidebar: HTMLElement | null; linksBox: ReactNode;
   otherSel: string | null; otherOpen: string | null; // the other view's adapter (picked, open)
+  otherWaiting: boolean; // view A is restarting after an unplug: B waits its turn (they may want the same model)
 }) {
   const { slot, mode, hub, shared, link, selected } = p;
   const dual = mode !== 'single';
@@ -100,7 +103,10 @@ export function Station(p: {
   const [hadPicture, setHadPicture] = useState(false);
   // unplugged while running: the adapter (pid, picker key) to start again when it is back
   // gone: a scan has shown it missing; before: the adapters there were when it was lost; tries: restarts
-  const [lost, setLost] = useState<{ pid: number; key: string; gone: boolean; before: string[]; tries: number } | null>(null);
+  // present: scans in a row that still listed it (a quick replug on the same port may never show it gone)
+  const [lost, setLost] = useState<{ pid: number; key: string; gone: boolean; present: number; before: string[]; tries: number } | null>(null);
+  const [gotDevices, setGotDevices] = useState(false);
+  const scanSeen = useRef<Device[] | null>(null);
   const known = useRef<string[]>([]); // the adapter list's keys, for the callbacks
   const freqInput = useRef<HTMLInputElement>(null);
 
@@ -179,6 +185,7 @@ export function Station(p: {
         switch (e.type) {
           case 'devices': {
             setDevices(e.devices);
+            setGotDevices(true);
             known.current = e.devices.map(devKey);
             // keep the pick; else the first adapter the other view has not picked (nothing picked yet,
             // at a start in a two-view mode: B takes the second)
@@ -273,7 +280,7 @@ export function Station(p: {
             setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error });
             break;
           case 'alert':
-            if (e.kind === 'lost' && opened) setLost({ ...opened, gone: false, before: known.current, tries: 0 }); // the header says it; no banner
+            if (e.kind === 'lost' && opened) setLost({ ...opened, gone: false, present: 0, before: known.current, tries: 0 }); // the header says it; no banner
             else addBanner(e.msg, 'error');
             break;
           case 'error':
@@ -451,10 +458,11 @@ export function Station(p: {
     const msg = fatal || !connected ? null : opening ? `${name}: starting…` : !open ? `${name} stopped` : rxState === 'starting' ? `${name}: applying settings…` : null;
     link.report(slot, {
       freq: cur.freq, fsNow, rate_sel: cur.rate_sel, fft: dsp.fft, gapped, gain_db: cur.gain_db, agc: cur.agc,
-      centre, open, recording, locked, selKey,
+      centre, open, recording, locked, selKey, lost: !!lost,
+      ready: connected && gotDevices && !opening && (!open || rx !== null),
       src: { lo: centre - fsNow / 2, hi: centre + fsNow / 2, colour: VIEW_COLOUR[slot], pathColours: twoPaths ? ANT_COLOUR : null, marker, markerLabel, chipNotch, notchWide, dim: !open, msg },
     });
-  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey, marker, markerLabel, chipNotch, notchWide, opening, rxState, fatal, connected, twoPaths]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey, marker, markerLabel, chipNotch, notchWide, opening, rxState, fatal, connected, twoPaths, lost, gotDevices, rx]); // eslint-disable-line react-hooks/exhaustive-deps
   // the shared preferences reach this adapter: offset tuning when running, the FFT size at once
   useEffect(() => {
     if (caps.open) req('set', { offset_tuning: prefs.offsetTuning }).catch(() => {});
@@ -493,20 +501,28 @@ export function Station(p: {
     const t = window.setInterval(() => hub.request('scan', { slot }).catch(() => {}), 3000);
     return () => window.clearInterval(t);
   }, [waiting, hub, slot]);
+  // (tries are paced by the scans: a failed try waits for the next adapter list)
   useEffect(() => {
-    if (!lost || open || opening || starting || !connected) return;
+    if (!lost || open || opening || starting || !connected || p.otherWaiting) return;
+    const fresh = scanSeen.current !== devices;
+    scanSeen.current = devices;
     const keys = devices.map(devKey);
     if (!lost.gone && !keys.includes(lost.key)) return setLost({ ...lost, gone: true });
+    const present = !lost.gone && fresh ? lost.present + 1 : lost.present;
+    const sameBack = lost.gone || present >= 2; // its own port: once seen gone, or listed by two scans since
     if (lost.tries >= 3) return; // the card says to press Start
     const d = devices.find((x) => {
       const k = devKey(x);
-      return x.pid === lost.pid && x.can_open && k !== p.otherOpen && k !== p.otherSel && (k === lost.key ? lost.gone : !lost.before.includes(k));
+      return x.pid === lost.pid && x.can_open && k !== p.otherOpen && k !== p.otherSel && (k === lost.key ? sameBack : !lost.before.includes(k));
     });
-    if (!d) return;
+    if (!d) {
+      if (present !== lost.present) setLost({ ...lost, present });
+      return;
+    }
     setSelKey(devKey(d));
-    setLost({ ...lost, tries: lost.tries + 1 });
+    setLost({ ...lost, present, tries: lost.tries + 1 });
     void doStart(d, true);
-  }, [devices, lost, starting]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [devices, lost, p.otherWaiting]); // eslint-disable-line react-hooks/exhaustive-deps
   const commitFreq = () => {
     const f = Math.round(parseFloat(freqText) * 1e6);
     if (!Number.isFinite(f) || f < 2.3e9 || f > 6.2e9) {

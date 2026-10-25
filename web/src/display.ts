@@ -634,7 +634,9 @@ export class Display {
           c.lineTo(x, ph);
           c.stroke();
           c.fillStyle = '#7d8896';
-          c.fillText(f.toFixed(fstep < 1 ? 1 : 0), x, ph + B / 2);
+          // a label that would be cut at the plot's edges is left out
+          const text = f.toFixed(fstep < 1 ? 1 : 0), half = c.measureText(text).width / 2;
+          if (x - half >= L - 2 * d && x + half <= W) c.fillText(text, x, ph + B / 2);
         }
         // Wi-Fi channel markers (20 MHz channels), while they are at least ~30 px apart
         c.fillStyle = '#5c6b7a';
@@ -648,7 +650,8 @@ export class Display {
           c.lineTo(x, ph);
           c.stroke();
           c.setLineDash([]);
-          c.fillText(`ch ${ch.label}`, x, T + 2 * d);
+          const half = c.measureText(`ch ${ch.label}`).width / 2;
+          if (x - half >= L && x + half <= W) c.fillText(`ch ${ch.label}`, x, T + 2 * d);
         }
       }
       // breaks between the pieces: how far apart they are
@@ -806,9 +809,9 @@ export class Display {
             labelled = true;
             const lw = c.measureText(label).width;
             c.fillStyle = 'rgba(11,14,19,0.85)';
-            c.fillRect(sx - lw / 2 - 4 * d, T + 2 * d, lw + 8 * d, 15 * d);
+            c.fillRect(sx - lw / 2 - 4 * d, T + 18 * d, lw + 8 * d, 15 * d); // under the channel labels
             c.fillStyle = '#d8dee6';
-            c.fillText(label, sx, T + 4 * d);
+            c.fillText(label, sx, T + 20 * d);
           }
         }
         // a view's own message (stopped, starting) over its part

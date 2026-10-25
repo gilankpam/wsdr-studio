@@ -20,14 +20,16 @@ const KEYS: [string, string, boolean][] = [
   ['← →', 'tune 5 MHz (Shift: 20 MHz)', false],
   ['[ ]', 'narrower / wider span (continuous spans; gapped ones are picked in the Span list)', false],
   ['0–9', 'type a frequency (Enter applies)', false],
+  ['A B', 'select view A / B', true],
   ['Enter', 'go to the frequency field', false],
-  ['1 2', 'select view A / B (then digits 3–9 and 0 start a frequency, or press Enter)', true],
   ['Space', 'Start / Stop', false],
   ['Ctrl+R', 'Record / end the recording', false],
   ['L', 'link the frequencies of A and B', true],
   ['O', 'the other view’s overlay (Compare)', true],
   ['Ctrl+B', 'sidebar', false],
   ['?', 'this list (Esc closes)', false],
+  ['Double-click', 'on the spectrum: tune there', false],
+  ['Wheel', 'over the band ruler: 5 MHz steps', false],
 ];
 const MODES: [Mode, string, string][] = [
   ['single', 'Single', 'One view'],
@@ -266,6 +268,7 @@ export default function App() {
       const typing = !!t.closest('input, select, textarea, [contenteditable="true"]');
       // held keys repeat only tuning and span steps (not Start/Stop, Record, the toggles)
       if (e.repeat && !['ArrowLeft', 'ArrowRight', '[', ']'].includes(k)) return;
+      if (confirmSingle && k === 'Escape') return setConfirmSingle(false);
       if (help) {
         // the sheet is modal: it takes only its own keys
         if (k === 'Escape' || k === '?') {
@@ -285,7 +288,7 @@ export default function App() {
       const onButton = !!t.closest('button');
       if (k === 'ArrowLeft' || k === 'ArrowRight') stepSel((k === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 4 : 1));
       else if (k === '[' || k === ']') h?.spanStep(k === ']' ? 1 : -1);
-      else if (dual && (k === '1' || k === '2')) setSelSlot(Number(k) - 1);
+      else if (dual && (k === 'a' || k === 'b' || k === 'A' || k === 'B')) setSelSlot(k.toLowerCase() === 'a' ? 0 : 1);
       else if (/^[0-9]$/.test(k)) h?.typeFreq(k);
       else if (k === 'Enter' && !onButton) h?.typeFreq('');
       else if (k === ' ' && !onButton) h?.toggleRun();
@@ -370,7 +373,9 @@ export default function App() {
           <div className="confirm" role="alertdialog" aria-label="Leave the two-view mode">
             View B is {views[1]?.recording ? 'recording' : views[1]?.open ? 'running' : 'starting'}. Single stops it{views[1]?.recording ? ' and saves the recording' : ''}.
             <button onClick={stopBAndSingle}>Stop B</button>
-            <button onClick={() => setConfirmSingle(false)}>Cancel</button>
+            <button autoFocus onClick={() => setConfirmSingle(false)}>
+              Cancel
+            </button>
           </div>
         )}
       </header>
@@ -459,8 +464,8 @@ export default function App() {
                   <Seg
                     wide
                     value={prefs.wfMode}
-                    options={[['max', 'Peak'], ['avg', 'Average']]}
-                    title="Peak shows short frames; average shows what stays"
+                    options={[['max', 'Peaks'], ['avg', 'Mean']]}
+                    title="What the waterfall's colours show: the peaks of each row (short frames stand out) or its mean (what stays)"
                     onChange={(m) => {
                       updatePrefs({ wfMode: m });
                       if (auto) fit(m); // the floor depends on the mode
@@ -482,7 +487,7 @@ export default function App() {
                     onChange={(e) => updatePrefs({ fft: Number(e.target.value) })}>
                     {FFTS.map((n) => (
                       <option key={n} value={n} disabled={gapped && n > 8192}>
-                        {`${n} · ${(fsNow / Math.min(n, 4096) / 1e3).toFixed(1)} kHz`}
+                        {n <= 4096 ? `${n} · ${(fsNow / n / 1e3).toFixed(1)} kHz` : `${n} · smoother`}
                         {gapped && n > 8192 ? ' (not gapped)' : ''}
                       </option>
                     ))}
@@ -529,6 +534,7 @@ export default function App() {
               <Panorama
                 hub={hub}
                 prefs={prefs}
+                updatePrefs={updatePrefs}
                 scale={scale}
                 sources={panoSources}
                 offAxis={offAxis >= 0 ? `${SLOT_NAME[offAxis]} is stopped at ${Math.round((views[offAxis]?.freq ?? 0) / 1e6)} MHz, off this axis` : null}

@@ -7,7 +7,8 @@ import type { Hub } from './hub';
 import type { Prefs, Scale } from './util';
 
 export function Panorama(p: {
-  hub: Hub; prefs: Prefs; scale: Scale; sources: (Source | null)[]; overlay: string | null; onRetune: (f: number) => void;
+  hub: Hub; prefs: Prefs; updatePrefs: (p: Partial<Prefs>) => void; scale: Scale; sources: (Source | null)[]; overlay: string | null;
+  onRetune: (f: number) => void;
   offAxis: string | null; // a stopped view left off the axis (far away): where it is
 }) {
   const spRef = useRef<HTMLCanvasElement>(null);
@@ -56,6 +57,20 @@ export function Panorama(p: {
   }, [p.hub]);
   return (
     <main className="plots pano" aria-label="Panorama: views A and B on one axis">
+      {/* one legend for the stitched plot (the traces are both views', in their colours) */}
+      <div className="legend pano-legend">
+        {(
+          [
+            ['average', p.prefs.showAvg, () => p.updatePrefs({ showAvg: !p.prefs.showAvg })],
+            ['peak', p.prefs.showPeak, () => p.updatePrefs({ showPeak: !p.prefs.showPeak })],
+          ] as [string, boolean, () => void][]
+        ).map(([label, on, fn]) => (
+          <button key={label} className={on ? 'on' : 'off'} aria-pressed={on} onClick={fn} title={`${on ? 'Hide' : 'Show'} the ${label} traces`}>
+            <span className="swatch" style={{ background: label === 'peak' ? '#8d99a8' : 'linear-gradient(90deg, #4fc3f7 50%, #c792ea 50%)' }} />
+            {label}
+          </button>
+        ))}
+      </div>
       {p.offAxis && <div className="offaxis">{p.offAxis}</div>}
       <div className="toasts">
         {hint && (

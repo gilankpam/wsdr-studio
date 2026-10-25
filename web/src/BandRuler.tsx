@@ -163,12 +163,17 @@ export function BandRuler(p: {
       </div>
       <div className="rtrack" ref={track} onClick={(e) => !selLocked && p.onTune(at(e))} title={selLocked ? undefined : 'Click to tune the selected view here'}>
         {RANGES[band].groups
-            .filter((g) => g.name)
-            .map((g) => (
-              <span key={g.name} className="rgroup" style={{ left: pc(pos(band, centre(g.chans[0]) - g.half)) }}>
+          .filter((g) => g.name)
+          .map((g) => {
+            const left = pos(band, centre(g.chans[0]) - g.half);
+            // a view's tab starting here (A's tabs sit at their bracket's left end): the name steps aside
+            const tabHere = p.views.some((v) => v.slot === 0 && shows(v) && Math.abs(pos(band, v.lo) - left) * trackPx < 24);
+            return (
+              <span key={g.name} className="rgroup" style={{ left: pc(left), paddingLeft: tabHere ? 26 : undefined }}>
                 {g.name}
               </span>
-            ))}
+            );
+          })}
         {RANGES[band].groups.flatMap((g) =>
           g.chans.map((c) => {
             const db = p.survey.get(c);

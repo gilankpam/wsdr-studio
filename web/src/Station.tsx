@@ -463,8 +463,9 @@ export function Station(p: {
     if (connected && dsp.fft !== prefs.fft) req('dsp', { fft: prefs.fft }).catch(() => {});
   }, [prefs.fft, connected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // auto: starting again after an unplug; it waits on if this fails, and never opens a gapped span
-  // (a replugged 8812BU comes back at USB 2 and may stay there)
+  // auto: starting again after an unplug; it waits on if this fails. It asks for the span it had, but
+  // never gapped: a replugged 8812BU comes back at USB 2, Start switches it to USB 3 (40 MHz again),
+  // and should it stay at USB 2 the receiver opens the widest continuous span instead.
   const doStart = async (dev = sel, auto = false) => {
     if (!dev) return;
     if (!auto) setLost(null);
@@ -473,8 +474,9 @@ export function Station(p: {
     window.clearTimeout(gainTimer.current); // a gain change still waiting goes with the open
     const gain = gainUi ?? draft.gain_db;
     try {
-      const rate_sel = auto ? Math.max(draft.rate_sel, Math.ceil(Math.log2(80 / dev.max_msps))) : draft.rate_sel;
-      await req('open', { pid: dev.pid, bus: dev.bus, port: dev.port, ...draft, rate_sel, gain_db: gain, offset_tuning: prefs.offsetTuning });
+      await req('open', {
+        pid: dev.pid, bus: dev.bus, port: dev.port, ...draft, gain_db: gain, offset_tuning: prefs.offsetTuning, ...(auto ? { allow_gapped: false } : {}),
+      });
     } catch {
       /* shown */
     } finally {
@@ -767,14 +769,15 @@ export function Station(p: {
           </span>
         )}
         <span className="spacer" />
-        <div className="legend">
+        {/* Panorama: one legend on the stitched plot instead */}
+        {mode !== 'panorama' && <div className="legend">
           {legend.map(([label, colour, on, fn]) => (
             <button key={label} className={on ? 'on' : 'off'} aria-pressed={on} aria-label={label} onClick={fn} title={`${on ? 'Hide' : 'Show'} ${label}${dual && !label.startsWith('Ant') ? ' (both views)' : ''}`}>
               <span className="swatch" style={{ background: colour }} />
               <span className="ltext">{label}</span>
             </button>
           ))}
-        </div>
+        </div>}
         <span className="state" title={stateText}>
           <span className={dotClass} />
           <span className="stext">{stateText}</span>
@@ -795,7 +798,12 @@ export function Station(p: {
           title={recTitle}
         >
           {recording && status
-            ? `■ End rec ${fmtClock(status.record.seconds)} · ${bytes(status.record.bytes)}`
+            ? (
+                <>
+                  ■ End rec {fmtClock(status.record.seconds)}
+                  <span className="long"> · {bytes(status.record.bytes)}</span>
+                </>
+              )
             : gapped
               ? '● Rec · ≤ 5 MHz'
               : '● Rec'}
@@ -879,7 +887,11 @@ export function Station(p: {
       {(warn.length > 0 || (!prefs.retuned && open && !recording) || (recording && secsLeft < 60)) && (
         <footer className="vfoot">
           {warn.map((w) => (
-            <span key={w} className="warn">
+            <span
+              key={w}
+              className="warn"
+              title={w.startsWith('input') ? 'The adapter delivers fewer samples than this span needs (USB could not keep up): the picture has gaps' : undefined}
+            >
               {w}
             </span>
           ))}

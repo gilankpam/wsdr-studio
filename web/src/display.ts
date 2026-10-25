@@ -128,8 +128,8 @@ export class Display {
         wasStale = stale;
         this.dirty = true;
       }
+      this.raf = requestAnimationFrame(loop); // first: a failing draw must not end the loop
       if (this.dirty) this.drawSpectrum();
-      this.raf = requestAnimationFrame(loop);
     };
     this.raf = requestAnimationFrame(loop);
   }
@@ -574,8 +574,8 @@ export class Display {
     c.textBaseline = 'middle';
     const s = this.span();
     const stale = this.isStale();
-    if (s) {
-      const w = W - L;
+    const w = W - L;
+    if (s && w > 0) {
       const xOf = (f: number) => L + ((f - s.f0) / (s.f1 - s.f0)) * w;
       // frequency grid + labels
       // a label every ~70 px at least (1-2-5 steps): a wide stitched axis stays readable
@@ -620,7 +620,7 @@ export class Display {
       const ordered = [...views].sort((x, y) => x.lo + x.hi - (y.lo + y.hi));
       const overlap = ordered.length > 1 ? Math.min(ordered[0].hi, ordered[1].hi) - Math.max(ordered[0].lo, ordered[1].lo) : 0;
       const fxs = (s.f1 - s.f0) / w;
-      const owner = new Int8Array(w).fill(-1);
+      const owner = new Int8Array(Math.max(0, w)).fill(-1); // w < 0 while the canvas is hidden (Panorama)
       if (st)
         for (let x = 0; x < w; x++) {
           const fm = s.f0 + (x + 0.5) * fxs;

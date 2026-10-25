@@ -278,7 +278,7 @@ export default function App() {
       mapSeq.current++;
       setMapNote(null);
       mapReturn.current = v
-        ? { mode, freq: v.freq, rate_sel: v.rate_sel, gapped: v.gapped, wasOpen: v.open, other: stopped !== null ? { slot: stopped, key: vs[stopped]?.selKey ?? null } : null }
+        ? { mode, freq: v.freq, rate_sel: v.rate_sel, gapped: v.gapped && v.allowGapped, wasOpen: v.open, other: stopped !== null ? { slot: stopped, key: vs[stopped]?.selKey ?? null } : null }
         : null;
     } else if (mode === 'map') leaveMap(m, null);
     updatePrefs({ mode: m });
@@ -304,11 +304,15 @@ export default function App() {
       if (seq !== mapSeq.current) return; // entered the map again meanwhile
       const at = Date.now();
       const items: RestoreItem[] = [];
-      const gappedOk = !!r?.gapped;
+      const gappedOk = !!r?.gapped; // (a span the user picked gapped: see enter)
       // shown afterwards, it goes back as it was: a view stopped before the map (and started by its
       // Start) stops again, unless a channel was picked in the map
       const stopAgain = !!r && !r.wasOpen && f === null && !!handles.current[slot]?.running();
-      if ((to === 'single' && slot === 1) || stopAgain) hub.request('close', { slot }).catch(() => {});
+      if ((to === 'single' && slot === 1) || stopAgain)
+        hub.request('close', { slot }).catch((e: Error) => {
+          restore.current = restore.current.filter((x) => x.slot !== slot); // it keeps running as it is
+          handles.current[slot]?.notice(`Could not stop view ${SLOT_NAME[slot]}: ${e.message}`);
+        });
       if (!(to === 'single' && slot === 1))
         items.push({ slot, key, pid: pidOf(key), args, start: !!r?.wasOpen && !!key, at, gappedOk, afterClose: stopAgain });
       if (r?.other && shownAfter(r.other.slot) && r.other.key)
@@ -337,7 +341,7 @@ export default function App() {
       // gapped, e.g. replugged at USB 2 meanwhile, is not asked for); said explicitly either way, so no
       // draft of a gapped sweep step carries over
       if (args.rate_sel !== undefined && !x.gappedOk && !h.rateOk(args.rate_sel)) delete args.rate_sel;
-      args.allow_gapped = args.rate_sel !== undefined && x.gappedOk;
+      if (args.rate_sel !== undefined) args.allow_gapped = x.gappedOk; // (an item without a span leaves it alone)
       if (Object.keys(args).length) h.linkedSet(args); // running: retuned; stopped: its next start
       if (x.start && !h.running()) h.startWith(args);
       return false;

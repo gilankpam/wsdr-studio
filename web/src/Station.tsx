@@ -39,6 +39,7 @@ export type StationHandle = {
 // What a view tells the shell (sidebar summary, links, band ruler).
 export type ViewInfo = {
   freq: number; fsNow: number; rate_sel: number; fft: number; gapped: boolean; gain_db: number; agc: boolean;
+  allowGapped: boolean; // its span may be gapped (the user picked a gapped one)
   centre: number; // where the shown span is centred (the radio's centre while running, else the request)
   src: Source;    // its part of the stitched Panorama plot
   open: boolean; recording: boolean; locked: boolean; selKey: string | null;
@@ -495,12 +496,12 @@ export function Station(p: {
     const centre = open && tuned > 0 ? tuned : cur.freq;
     const msg = fatal || !connected ? null : opening ? `${name}: starting…` : !open ? `${name} stopped` : rxState === 'starting' ? `${name}: applying settings…` : null;
     link.report(slot, {
-      freq: cur.freq, fsNow, rate_sel: cur.rate_sel, fft: dsp.fft, gapped, gain_db: cur.gain_db, agc: cur.agc,
+      freq: cur.freq, fsNow, rate_sel: cur.rate_sel, fft: dsp.fft, gapped, allowGapped: !!cur.allow_gapped, gain_db: cur.gain_db, agc: cur.agc,
       centre, open, recording, locked, selKey, lost: !!lost,
       ready: connected && gotDevices && !opening && (!open || rx !== null),
       src: { lo: centre - fsNow / 2, hi: centre + fsNow / 2, colour: VIEW_COLOUR[slot], pathColours: twoPaths ? ANT_COLOUR : null, marker, markerLabel, chipNotch, notchWide, dim: !open, msg },
     });
-  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey, marker, markerLabel, chipNotch, notchWide, opening, rxState, fatal, connected, twoPaths, lost, gotDevices, rx]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.allow_gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey, marker, markerLabel, chipNotch, notchWide, opening, rxState, fatal, connected, twoPaths, lost, gotDevices, rx]); // eslint-disable-line react-hooks/exhaustive-deps
   // the shared preferences reach this adapter: offset tuning when running, the FFT size at once
   useEffect(() => {
     if (caps.open) req('set', { offset_tuning: prefs.offsetTuning }).catch(() => {});

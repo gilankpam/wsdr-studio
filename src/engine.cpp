@@ -94,9 +94,9 @@ Engine::~Engine() {
   _diskcv.notify_all();
   if (_cmd.joinable())
     _cmd.join();
-  if (_disk.joinable())
-    _disk.join(); // (a hung file system holds it: an exit then waits for it)
   close_adapter("the app closed"); // stops the recorder and the stream; the DSP thread then idles
+  if (_disk.joinable())
+    _disk.join(); // (after the recording is saved: a slow file system may hold it)
   _dsp_quit = true;
   _ring.wake();
   if (_dsp.joinable())

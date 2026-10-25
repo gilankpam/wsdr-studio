@@ -73,6 +73,9 @@ $DOCKER run --rm -v "$R":/src:ro -v "$OUT":/out -e HOST_UID="$(id -u)" -e HOST_G
   mkdir -p "$E/resources/app"
   cp /src/desktop/main.js /src/desktop/preload.js /src/desktop/package.json /src/desktop/icon.png "$E/resources/app/"
   test -x /tmp/AppDir/AppRun && test -x "$E/wsdr-studio"
+  # the menu entry starts the app (AppRun), not the bare backend
+  ln -s ../../AppRun /tmp/AppDir/usr/bin/wsdr-studio
+  sed -i "s/^Exec=wsdr-studiod$/Exec=wsdr-studio/" /tmp/AppDir/*.desktop /tmp/AppDir/usr/share/applications/*.desktop
   /out/tools/appimagetool-x86_64.AppImage --no-appstream --runtime-file /out/tools/runtime-x86_64 \
       /tmp/AppDir /out/wsdr-studio-x86_64.AppImage >/dev/null
   chown "$HOST_UID:$HOST_GID" /out/wsdr-studio-x86_64.AppImage

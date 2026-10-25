@@ -25,7 +25,7 @@ function backendArgs() {
   for (let i = 0; i < argv.length; i++) {
     const [k, inline] = argv[i].split(/=(.*)/s, 2);
     if (!PASS.has(k)) continue;
-    const v = inline ?? argv[++i];
+    const v = inline ?? (argv[i + 1]?.startsWith('--') ? undefined : argv[++i]);
     if (v !== undefined) out.push(k, v);
   }
   if (process.env.WSDR_DEV_URL) out.push('--dev-origin', new URL(process.env.WSDR_DEV_URL).origin);
@@ -41,9 +41,11 @@ function fail(title, detail) {
 
 // Start the backend and wait for its {port, token} line.
 function startBackend() {
-  const exe = process.env.WSDR_STUDIOD || path.join(process.resourcesPath, '..', '..', '..', '..', 'bin', 'wsdr-studiod') // AppDir: usr/lib/wsdr-studio/electron/resources;
+  // AppDir: usr/lib/wsdr-studio/electron/resources -> usr/bin
+  const exe = process.env.WSDR_STUDIOD || path.join(process.resourcesPath, '..', '..', '..', '..', 'bin', 'wsdr-studiod');
+  const args = backendArgs();
   return new Promise((resolve, reject) => {
-    const child = spawn(exe, backendArgs(), { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(exe, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     let done = false;
@@ -52,8 +54,10 @@ function startBackend() {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      if (e) reject(e);
-      else resolve(v);
+      if (e) {
+        child.kill(); // a backend stuck before answering must not keep the adapter
+        reject(e);
+      } else resolve(v);
     }
     child.on('error', (e) => finish(new Error(`cannot run ${exe}: ${e.message}`)));
     child.stderr.on('data', (d) => {
@@ -70,9 +74,11 @@ function startBackend() {
       } catch {
         return finish(new Error(`unexpected backend output: ${out.slice(0, 200)}`));
       }
-      finish(null, { child: info.attached ? null : child, port: info.port, token: info.token });
+      finish(null, { child: info.attached ? null : child, port: info.port, token: info.token, pid: info.pid, ignored: info.attached && args.length > 1 });
     });
-    child.on('exit', (code, sig) => {
+    // 'close', not 'exit': it comes after stdout/stderr are drained (an attaching backend prints its
+    // line and exits at once; 'exit' may arrive before that line does)
+    child.on('close', (code, sig) => {
       if (!done) return finish(new Error(`the backend exited (${sig ?? code})\n\n${err.trim()}`));
       if (backend === child && !quitting) fail('wsdr-studio stopped', `The backend exited (${sig ?? code}).\n\n${err.trim()}`);
       if (backend === child) app.quit();
@@ -80,9 +86,21 @@ function startBackend() {
   });
 }
 
+const sameOrigin = (url) => {
+  try {
+    return new URL(url).origin === origin;
+  } catch {
+    return false;
+  }
+};
+
 function lockDown(wc) {
-  wc.on('will-navigate', (e, url) => {
-    if (new URL(url).origin !== origin) e.preventDefault();
+  // every frame, every navigation and redirect: only within the app's origin
+  wc.on('will-frame-navigate', (e) => {
+    if (!sameOrigin(e.url)) e.preventDefault();
+  });
+  wc.on('will-redirect', (e) => {
+    if (!sameOrigin(e.url)) e.preventDefault();
   });
   wc.on('will-attach-webview', (e) => e.preventDefault());
   wc.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -105,7 +123,7 @@ function createWindow() {
       spellcheck: false,
     },
   });
-  lockDown(win.webContents);
+  // (lockDown: via 'web-contents-created', like every web contents)
   // The page asks before closing while recording (beforeunload); confirm here.
   win.webContents.on('will-prevent-unload', (e) => {
     const c = dialog.showMessageBoxSync(win, {
@@ -145,6 +163,23 @@ if (!app.requestSingleInstanceLock()) {
     }
     backend = b.child;
     origin = `http://127.0.0.1:${b.port}`;
+    if (!backend) {
+      // attached to a backend started elsewhere: notice when it goes away
+      const watch = setInterval(() => {
+        try {
+          process.kill(b.pid, 0);
+        } catch {
+          clearInterval(watch);
+          fail('wsdr-studio stopped', `The running wsdr-studiod (pid ${b.pid}) this window was using has exited.`);
+        }
+      }, 2000);
+      if (b.ignored)
+        dialog.showMessageBox({
+          type: 'info',
+          message: 'wsdr-studiod was already running',
+          detail: 'This window uses it; the command-line options were not applied.',
+        });
+    }
     token = b.token;
     const pageOrigin = process.env.WSDR_DEV_URL ? new URL(process.env.WSDR_DEV_URL).origin : origin;
     ipcMain.handle('wsdr:session', (e) => {

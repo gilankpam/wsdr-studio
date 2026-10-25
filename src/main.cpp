@@ -254,15 +254,27 @@ int main(int argc, char **argv) {
   // Single instance (one process owns the adapters): the shell attaches to a running one.
   if (const auto inst = running_instance()) {
     if (a.ui_pipe) {
-      std::printf("%s\n", json{{"port", inst->port}, {"token", inst->token}, {"attached", true}}.dump().c_str());
+      std::printf("%s\n",
+                  json{{"port", inst->port}, {"token", inst->token}, {"pid", inst->pid}, {"attached", true}}.dump().c_str());
       std::fflush(stdout);
       return 0;
     }
     std::fprintf(stderr, "wsdr-studiod: already running (pid %ld, port %u)\n", inst->pid, inst->port);
     return 1;
   }
-  if (a.ui_pipe)
-    prctl(PR_SET_PDEATHSIG, SIGTERM); // the shell died without closing our stdin
+  ::signal(SIGPIPE, SIG_IGN); // a closed stdout/stderr (the shell is gone) must not kill a finalising recording
+  static std::atomic<bool> finished{false};
+  if (a.ui_pipe) {
+    prctl(PR_SET_PDEATHSIG, SIGTERM); // backup: the shell died (its pipe to our stdin also closes)
+    // The shell stops us by closing our stdin; started now, so a shell that is already gone is noticed.
+    std::thread([] {
+      char b[256];
+      while (::read(0, b, sizeof b) > 0) {
+      }
+      if (!finished)
+        ::kill(::getpid(), SIGTERM);
+    }).detach();
+  }
 
   net::io_context io;
   ServerOptions so;
@@ -324,16 +336,9 @@ int main(int argc, char **argv) {
   sig.async_wait([&](const boost::system::error_code &, int) { io.stop(); });
 
   if (a.ui_pipe) {
-    // The shell reads this one line (a private pipe: the token is never on a command line), and
-    // stops us by closing our stdin.
+    // The shell reads this one line (a private pipe: the token is never on a command line).
     std::printf("%s\n", json{{"port", srv->port()}, {"token", so.token}}.dump().c_str());
     std::fflush(stdout);
-    std::thread([] {
-      char b[256];
-      while (::read(0, b, sizeof b) > 0) {
-      }
-      ::kill(::getpid(), SIGTERM);
-    }).detach();
   }
 
   // 2 Hz status to all clients.
@@ -354,6 +359,7 @@ int main(int argc, char **argv) {
   };
   on_tick();
   io.run();
+  finished = true; // a late stdin EOF must not signal us during the shutdown below
 
   remove_instance_if_ours(so.token);
   eng.reset(); // closes the adapter before the server goes away

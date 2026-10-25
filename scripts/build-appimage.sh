@@ -76,6 +76,7 @@ $DOCKER run --rm -v "$R":/src:ro -v "$OUT":/out -e HOST_UID="$(id -u)" -e HOST_G
   # the menu entry starts the app (AppRun), not the bare backend
   ln -s ../../AppRun /tmp/AppDir/usr/bin/wsdr-studio
   sed -i "s/^Exec=wsdr-studiod$/Exec=wsdr-studio/" /tmp/AppDir/*.desktop /tmp/AppDir/usr/share/applications/*.desktop
+  grep -q "^Exec=wsdr-studio$" /tmp/AppDir/usr/share/applications/wsdr-studio.desktop
   /out/tools/appimagetool-x86_64.AppImage --no-appstream --runtime-file /out/tools/runtime-x86_64 \
       /tmp/AppDir /out/wsdr-studio-x86_64.AppImage >/dev/null
   chown "$HOST_UID:$HOST_GID" /out/wsdr-studio-x86_64.AppImage

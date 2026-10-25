@@ -9,6 +9,7 @@
 'use strict';
 const { app, BrowserWindow, Menu, dialog, ipcMain, session } = require('electron');
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const PASS = new Set(['--pid', '--freq', '--rate', '--record-dir', '--fft', '--port']);
@@ -64,18 +65,24 @@ function startBackend() {
       process.stderr.write(d);
       err = (err + d).slice(-4000);
     });
-    child.stdout.on('data', (d) => {
+    const onOut = (d) => {
       out += d;
       const nl = out.indexOf('\n');
-      if (nl < 0) return;
+      if (nl < 0) return out.length > 4096 ? finish(new Error('unexpected backend output')) : undefined;
+      child.stdout.off('data', onOut); // only the first line matters; drain the rest
+      child.stdout.resume();
       let info;
       try {
         info = JSON.parse(out.slice(0, nl));
       } catch {
-        return finish(new Error(`unexpected backend output: ${out.slice(0, 200)}`));
+        info = null;
       }
-      finish(null, { child: info.attached ? null : child, port: info.port, token: info.token, pid: info.pid, ignored: info.attached && args.length > 1 });
-    });
+      if (!info || !Number.isInteger(info.port) || typeof info.token !== 'string')
+        return finish(new Error(`unexpected backend output: ${out.slice(0, 200)}`));
+      const ignored = info.attached && args.some((a) => PASS.has(a)); // options for a backend we did not start
+      finish(null, { child: info.attached ? null : child, port: info.port, token: info.token, pid: info.pid, ignored });
+    };
+    child.stdout.on('data', onOut);
     // 'close', not 'exit': it comes after stdout/stderr are drained (an attaching backend prints its
     // line and exits at once; 'exit' may arrive before that line does)
     child.on('close', (code, sig) => {
@@ -144,7 +151,11 @@ if (!app.requestSingleInstanceLock()) {
   app.quit(); // the running one gets 'second-instance' and shows its window
 } else {
   app.on('second-instance', () => {
-    if (!win) return;
+    if (!win) {
+      if (quitting)
+        dialog.showMessageBox({ type: 'info', message: 'wsdr-studio is still closing (saving a recording)', detail: 'Start it again in a moment.' });
+      return;
+    }
     if (win.isMinimized()) win.restore();
     win.focus();
   });
@@ -163,11 +174,11 @@ if (!app.requestSingleInstanceLock()) {
     }
     backend = b.child;
     origin = `http://127.0.0.1:${b.port}`;
-    if (!backend) {
-      // attached to a backend started elsewhere: notice when it goes away
+    if (!backend && Number.isInteger(b.pid)) {
+      // attached to a backend started elsewhere: notice when it goes away (or its pid is reused)
       const watch = setInterval(() => {
         try {
-          process.kill(b.pid, 0);
+          if (fs.readFileSync(`/proc/${b.pid}/comm`, 'utf8').trim() !== 'wsdr-studiod') throw new Error('gone');
         } catch {
           clearInterval(watch);
           fail('wsdr-studio stopped', `The running wsdr-studiod (pid ${b.pid}) this window was using has exited.`);

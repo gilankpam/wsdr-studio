@@ -339,6 +339,11 @@ int main(int argc, char **argv) {
     // The shell reads this one line (a private pipe: the token is never on a command line).
     std::printf("%s\n", json{{"port", srv->port()}, {"token", so.token}}.dump().c_str());
     std::fflush(stdout);
+    const int null = ::open("/dev/null", O_WRONLY | O_CLOEXEC); // nothing else may reach that pipe
+    if (null >= 0) {
+      ::dup2(null, 1);
+      ::close(null);
+    }
   }
 
   // 2 Hz status to all clients.

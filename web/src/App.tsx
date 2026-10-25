@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import { useEffect, useRef, useState } from 'react';
-import { CHANNELS, channelAt, channelKey } from './channels';
+import { CHANNELS, channelAt, channelKey, type Channel } from './channels';
 import { Display } from './display';
 import { Client, type Caps, type Device, type DspSettings, type Rate, type RxSettings, type Status } from './protocol';
 
@@ -21,6 +21,7 @@ const devTitle = (d: Device) =>
   `${d.model} (${d.chip}), bus ${d.bus} port ${d.port}, ${d.speed_mbps} Mbit/s${d.controller ? `, host controller ${d.controller}` : ''}`;
 const bytes = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(0)} MB`);
 const baseName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
+const chanName = (c: Channel) => (c.width === 40 ? `ch ${c.ch + 2} (${c.label})` : `ch ${c.label}`);
 const fmtDur = (s: number) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : s >= 60 ? `${Math.floor(s / 60)} min` : `${Math.max(0, Math.floor(s))} s`);
 // The radio tunes in 5 MHz steps (2.4 GHz: 2407 + 5n MHz; 5 GHz: 5000 + 5n MHz).
 // The radio tunes 2.4 GHz channels 1-13 (2412-2472, 5 MHz apart) and 14 (2484), and 5 GHz in 5 MHz
@@ -346,7 +347,7 @@ export default function App() {
 
   const fsNow = 80e6 / (1 << cur.rate_sel);
   const width = cur.rate_sel === 1 && (caps.wide_capable ?? true) ? 40 : 20;
-  const chan = channelAt(cur.freq, width);
+  const chan = channelAt(cur.freq, 20); // by centre frequency only (the span does not pick a channel)
   const rates = caps.rates ?? ratesFor(sel);
   // the selected span (follows a change at once; the footer shows the run's measured share)
   const gapped = rates.find((r) => r.rate_sel === cur.rate_sel)?.gapped ?? false;
@@ -428,19 +429,10 @@ export default function App() {
     const c = CHANNELS.find((x) => channelKey(x) === key);
     if (!c) return;
     updatePrefs({ retuned: true }); // the tip is no longer needed
-    const r40 = rates.find((r) => r.rate_sel === 1);
-    if (c.width === 40 && cur.rate_sel === 1) set({ freq: c.centre }); // already at 40 MHz
-    else if (c.width === 40 && r40 && !r40.gapped) set({ freq: c.centre, rate_sel: 1, wide: true });
-    else {
-      // gapped mode is the user's choice, never switched on by a channel pick
-      if (c.width === 40)
-        addBanner(
-          r40
-            ? 'This adapter shows 40 MHz only gapped: choose "40 MHz · gapped" in Span / rate. Showing the centre for now.'
-            : '40 MHz needs the 8812BU on USB 3; showing the centre at the widest span this adapter can do',
-        );
-      set({ freq: c.centre });
-    }
+    // A channel only moves the centre; the width shown is Span / rate alone.
+    if (fsNow < c.width * 1e6 - 1)
+      addBanner(`Showing ${spanLabel(fsNow)} of this ${c.width} MHz channel; widen it with Span / rate`);
+    set({ freq: c.centre });
   };
   const commitFreq = () => {
     const f = Math.round(parseFloat(freqText) * 1e6);
@@ -541,7 +533,13 @@ export default function App() {
 
         <div className="group" title={locked ? LOCKED : undefined}>
           <label htmlFor="ch">Channel</label>
-          <select id="ch" disabled={locked} value={chan ? channelKey(chan) : ''} onChange={(e) => pickChannel(e.target.value)}>
+          <select
+            id="ch"
+            disabled={locked}
+            value={chan ? channelKey(chan) : ''}
+            onChange={(e) => pickChannel(e.target.value)}
+            title="Sets the centre frequency only; how wide a slice you see is Span / rate"
+          >
             <option value="" disabled>
               custom
             </option>
@@ -550,14 +548,14 @@ export default function App() {
                 <option key={channelKey(c)} value={channelKey(c)}>{`${c.label} · ${mhz(c.centre, 0)} MHz`}</option>
               ))}
             </optgroup>
-            <optgroup label="5 GHz · 20 MHz">
+            <optgroup label="5 GHz">
               {CHANNELS.filter((c) => c.band === '5' && c.width === 20).map((c) => (
                 <option key={channelKey(c)} value={channelKey(c)}>{`${c.label} · ${mhz(c.centre, 0)} MHz`}</option>
               ))}
             </optgroup>
-            <optgroup label="5 GHz · 40 MHz">
+            <optgroup label="5 GHz · centre of a 40 MHz pair">
               {CHANNELS.filter((c) => c.width === 40).map((c) => (
-                <option key={channelKey(c)} value={channelKey(c)}>{`${c.label} · ${mhz(c.centre, 0)} MHz`}</option>
+                <option key={channelKey(c)} value={channelKey(c)}>{`${c.ch + 2} · ${mhz(c.centre, 0)} MHz (centre of ${c.label})`}</option>
               ))}
             </optgroup>
           </select>
@@ -589,7 +587,13 @@ export default function App() {
             onChange={(e) => {
               const rs = Number(e.target.value);
               const w = rs === 1 && (caps.wide_capable ?? true) ? 40 : 20;
-              set({ rate_sel: rs, wide: true, freq: snap(cur.freq, w) }); // 40 MHz centres are a subset
+              const f = snap(cur.freq, w); // a 40 MHz span is centred on a channel pair (radio limit)
+              if (Math.abs(f - cur.freq) > 1) {
+                const p = channelAt(f, 40);
+                addBanner(`40 MHz spans are centred on channel pairs: now ${mhz(f, 0)} MHz${p ? ` (${p.label})` : ''}`);
+                setFreqText(mhz(f, 3));
+              }
+              set({ rate_sel: rs, wide: true, freq: f });
             }}
             title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
               sel && sel.max_msps < 40 && sel.model === 'RTL8812BU' ? ' (10-40 MHz need USB 3)' : ''
@@ -787,13 +791,13 @@ export default function App() {
         <span>{stateText}</span>
         {!open && !opening && connected && sel && (
           <span className="muted">
-            next Start: {chan ? `ch ${chan.label} · ` : ''}
+            next Start: {chan ? `${chanName(chan)} · ` : ''}
             {mhz(cur.freq)} MHz · {spanLabel(fsNow)} span
           </span>
         )}
         {open && st && (
           <span>
-            {chan && !offGrid ? `ch ${chan.label} · ` : ''}
+            {chan && !offGrid ? `${chanName(chan)} · ` : ''}
             {offGrid ? `${mhz(cur.freq)} MHz requested · tuned ${mhz(tuned)} MHz (5 MHz steps)` : `${mhz(cur.freq)} MHz`} · {spanLabel(st.fs)} span
             {st.gapped && (
               <span className="muted" title="Each slice is 8192 samples; the gaps between them are the time USB 2 needs to ship one">

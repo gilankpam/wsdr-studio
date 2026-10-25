@@ -14,7 +14,7 @@ export type DisplayOpts = {
   smooth: number;               // 0 = off .. 0.9 = heavy averaging of the average trace across rows
   marker: number | null;        // requested frequency (Hz), drawn when it is not the band centre
   markerLabel: string;          // e.g. "requested" or "next Start"
-  chipNotch: boolean;           // 8822C: shade its DC-rejection notch at the hardware centre
+  chipNotch: boolean;           // 8822C: shade its DC-rejection notch at the hardware centre (gapped rows)
   badge: string | null;         // e.g. "GAPPED · ~12 % sampled", top right of the spectrum
   overlay: string | null;       // message over the plot (stopped, starting, ...)
   staleText: string;            // shown when rows stop arriving
@@ -462,7 +462,7 @@ export class Display {
       // 8822C: its RX DC rejection leaves a notch at the hardware centre (in the raw samples; ~-6 dB at
       // +-1.5 % of fs). Shade it so it is not read as a missing signal.
       const mid0 = (s.f0 + s.f1) / 2;
-      if (this.opts.chipNotch) {
+      if (this.opts.chipNotch && (this.last[0] ?? this.last[1])?.gapped) { // measured in gapped runs only
         const hw = (s.f1 - s.f0) * 0.015;
         const x0 = xOf(mid0 - hw), x1 = xOf(mid0 + hw);
         if (x1 - x0 >= 3 * d) {

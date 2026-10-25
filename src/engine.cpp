@@ -161,6 +161,7 @@ json Engine::run(const json &c) {
       s.freq = num(c, "freq", 2.3e9, 6.2e9);
     if (c.contains("rate_sel"))
       s.rate_sel = integer(c, "rate_sel", 1, 5);
+    s.allow_gapped = true; // a span picked in the app (gapped ones are labelled there)
     if (c.contains("wide"))
       s.wide = flag(c, "wide");
     if (c.contains("agc"))
@@ -317,7 +318,8 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   s.gain_db = c.contains("gain_db") ? num(c, "gain_db", 0, 100) : 30.0;
   s.agc = c.contains("agc") ? flag(c, "agc") : false;
   s.wide = c.contains("wide") ? flag(c, "wide") : true;
-  s.allow_gapped = true; // the 8812CU's wide spans (the UI marks them)
+  // the 8812CU's wide spans (the UI marks them); the command line opens without them
+  s.allow_gapped = c.contains("allow_gapped") ? flag(c, "allow_gapped") : true;
   {
     std::lock_guard<std::mutex> l(_sm);
     _state = "opening";

@@ -543,7 +543,7 @@ export class Display {
         c.fillText(label, lx + 18 * d, T + 19 * d);
       }
       // badge (gapped runs): on the plot itself, not only in the footer
-      if (this.opts.badge) {
+      if (this.opts.badge && (this.last[0] ?? this.last[1])?.gapped) { // follows the rows, like the separators
         c.font = `bold ${11 * d}px system-ui, sans-serif`;
         const bw = c.measureText(this.opts.badge).width + 12 * d;
         c.fillStyle = 'rgba(255,183,77,0.16)';

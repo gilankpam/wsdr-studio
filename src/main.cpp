@@ -187,6 +187,11 @@ json open_cmd(const Args &a) {
     c["freq"] = a.freq;
   if (a.rate_msps > 0)
     c["rate_sel"] = rate_sel_for(a.rate_msps);
+  // From the command line, rates the link cannot carry fall back to the fastest continuous one (the
+  // 8812CU's gapped spans are chosen in the app, where they are labelled).
+  c["allow_gapped"] = false;
+  if (a.pid == wsdr::kPid8812cu && a.rate_msps > 5)
+    std::fprintf(stderr, "wsdr-studiod: the 8812CU streams up to 5 MS/s; wider spans (gapped) are in Span / rate\n");
   return c;
 }
 

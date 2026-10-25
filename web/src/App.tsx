@@ -94,6 +94,7 @@ export default function App() {
   const rate = useRef({ banks: 0, t: 0 });
   const drops = useRef({ ring: 0, client: 0, at: 0 });
   const bannerId = useRef(1);
+  const narrowNoted = useRef(false);
   const live = useRef({ open: false, recording: false, opening: false, freq: 5180e6, width: 20 }); // for callbacks that outlive a render
   const autoOn = useRef(loadPrefs().scale === null); // Auto scale on (mirrors prefs.scale === null; storage may be blocked)
   const [home, setHome] = useState('');
@@ -391,7 +392,7 @@ export default function App() {
         wfPath: dsp.paths === 'b' ? 1 : 0, marker: open || hadPicture ? cur.freq : null,
         markerLabel: open ? 'requested' : 'next Start',
         chipNotch: (caps.chip ?? sel?.chip ?? '').includes('8822C'),
-        badge: open && run?.gapped ? `GAPPED · ${gappedPct !== null ? `~${gappedPct} %` : 'part of the time'} sampled` : null,
+        badge: `GAPPED · ${gappedPct !== null ? `~${gappedPct} %` : 'part of the time'} sampled`, // shown on gapped rows
         staleText: rxState === 'starting' ? 'Applying settings…' : 'No data from the adapter',
       }),
     [scale, prefs.wfMode, prefs.smooth, overlay, open, dsp.paths, cur.freq, hadPicture, rxState, caps.chip, sel?.chip, run?.gapped, gappedPct],
@@ -429,10 +430,20 @@ export default function App() {
     const c = CHANNELS.find((x) => channelKey(x) === key);
     if (!c) return;
     updatePrefs({ retuned: true }); // the tip is no longer needed
-    // A channel only moves the centre; the width shown is Span / rate alone.
-    if (fsNow < c.width * 1e6 - 1)
-      addBanner(`Showing ${spanLabel(fsNow)} of this ${c.width} MHz channel; widen it with Span / rate`);
-    set({ freq: c.centre });
+    // A channel only moves the centre; the width shown is Span / rate alone. Said once per session,
+    // and only what this adapter can actually do.
+    if (fsNow < c.width * 1e6 - 1 && !narrowNoted.current) {
+      narrowNoted.current = true;
+      const wider = rates.filter((r) => r.fs >= c.width * 1e6);
+      addBanner(
+        wider.some((r) => !r.gapped)
+          ? `Showing ${spanLabel(fsNow)} of this ${c.width} MHz channel; widen it with Span / rate`
+          : wider.length
+            ? `Showing ${spanLabel(fsNow)} of this ${c.width} MHz channel; on this adapter wider spans are gapped (Span / rate)`
+            : `Showing ${spanLabel(fsNow)} of this ${c.width} MHz channel (the most this adapter shows)`,
+      );
+    }
+    set({ freq: snap(c.centre, width) });
   };
   const commitFreq = () => {
     const f = Math.round(parseFloat(freqText) * 1e6);
@@ -512,7 +523,7 @@ export default function App() {
           {open ? (
             <button
               className={recording ? 'rec on' : 'rec'}
-              disabled={!recording && (rxState !== 'streaming' || gapped)}
+              disabled={!recording && (rxState !== 'streaming' || gapped || !!run?.gapped)}
               onClick={toggleRecord}
               title={
                 !recording && gapped
@@ -587,10 +598,9 @@ export default function App() {
             onChange={(e) => {
               const rs = Number(e.target.value);
               const w = rs === 1 && (caps.wide_capable ?? true) ? 40 : 20;
-              const f = snap(cur.freq, w); // a 40 MHz span is centred on a channel pair (radio limit)
+              const f = snap(cur.freq, w); // a 40 MHz span centres within 2422-2462 / 5090-6155 MHz
               if (Math.abs(f - cur.freq) > 1) {
-                const p = channelAt(f, 40);
-                addBanner(`40 MHz spans are centred on channel pairs: now ${mhz(f, 0)} MHz${p ? ` (${p.label})` : ''}`);
+                addBanner(`A 40 MHz span centres between ${f < 3.7e9 ? '2422 and 2462' : '5090 and 6155'} MHz: now ${mhz(f, 0)} MHz`);
                 setFreqText(mhz(f, 3));
               }
               set({ rate_sel: rs, wide: true, freq: f });

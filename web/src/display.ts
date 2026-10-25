@@ -16,16 +16,16 @@ export type DisplayOpts = {
   markerLabel: string;          // e.g. "requested" or "next Start"
   chipNotch: boolean;           // 8822C: shade its DC-rejection notch at the hardware centre (gapped rows)
   notchWide: boolean;           // 8822B at 40 MHz on 2.4 GHz: its own ~+-1 MHz centre dip (shade it)
-  ghostLabel: string;           // legend name of the other view's trace (dual mode)
-  badge: string | null;         // e.g. "GAPPED · ~12 % sampled", top right of the spectrum
+  colour: string;               // the average trace: the view's colour
+  pathColours: [string, string] | null; // two antennas (8812CU): Ant 1, Ant 2 instead
+  ghostColour: string;          // the other view's average (Compare): its view's colour
+  showAvg: boolean; showPeak: boolean;
   overlay: string | null;       // message over the plot (stopped, starting, ...)
   staleText: string;            // shown when rows stop arriving
   dim: boolean;                 // stopped: the last picture stays, faded
 };
 
-const AVG = ['#4fc3f7', '#ff8a65']; // average trace, path A / B
 const PEAK = ['#8d99a8', '#c9a28f']; // peak trace, path A / B
-const GHOST = '#c792ea'; // the other view's average (dual mode)
 const AXIS_W = 46; // CSS px reserved on the left (dB axis / colour bar + time ticks)
 const AXIS_H = 22; // CSS px for the frequency axis under the spectrum
 const TOP = 16;    // CSS px headroom above the spectrum (the "dBFS" caption sits there)
@@ -63,7 +63,7 @@ export class Display {
   private dpr = 1;
   private off: (() => void)[] = [];
   opts: DisplayOpts = {
-    dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, markerLabel: 'requested', chipNotch: false, notchWide: false, ghostLabel: 'other view', badge: null,
+    dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, markerLabel: 'requested', chipNotch: false, notchWide: false, colour: '#4fc3f7', pathColours: null, ghostColour: '#c792ea', showAvg: true, showPeak: true,
     overlay: null, staleText: 'No data from the adapter', dim: false,
   };
   onRetune: (freq: number) => void = () => {};
@@ -497,7 +497,12 @@ export class Display {
           c.fillStyle = '#8a95a5';
           c.textAlign = 'center';
           c.textBaseline = 'top';
-          c.fillText('chip notch (not a signal)', (x0 + x1) / 2, T + 30 * d);
+          const label = this.opts.notchWide ? 'centre dip (8812BU, 40 MHz on 2.4 GHz)' : 'chip notch: what the adapter itself sees';
+          const lw = c.measureText(label).width;
+          c.fillStyle = 'rgba(11,14,19,0.85)';
+          c.fillRect((x0 + x1) / 2 - lw / 2 - 4 * d, T + 22 * d, lw + 8 * d, 14 * d);
+          c.fillStyle = '#a3aebb';
+          c.fillText(label, (x0 + x1) / 2, T + 24 * d);
           c.textBaseline = 'middle';
         }
       }
@@ -513,7 +518,7 @@ export class Display {
         c.lineTo(x, ph);
         c.stroke();
         c.setLineDash([]);
-        const label = `${this.opts.markerLabel} ${(m / 1e6).toFixed(1)}`;
+        const label = `${this.opts.markerLabel} ${(m / 1e6).toFixed((m / 1e6) % 1 ? 1 : 0)}`;
         c.font = `${11 * d}px system-ui, sans-serif`;
         const lw = c.measureText(label).width;
         const lx = Math.min(W - lw - 4 * d, Math.max(L + 2 * d, x - lw / 2));
@@ -545,8 +550,8 @@ export class Display {
           c.stroke();
         };
         const h = this.hold[p];
-        if (h) draw(h, PEAK[p], 1);
-        draw(this.smoothed[p] ?? r.avg, AVG[p], 1.3);
+        if (h && this.opts.showPeak) draw(h, PEAK[p], 1);
+        if (this.opts.showAvg) draw(this.smoothed[p] ?? r.avg, this.opts.pathColours?.[p] ?? this.opts.colour, 1.3);
       }
       c.globalAlpha = 1;
       // the other view (dual mode), when it shows the same axis
@@ -555,7 +560,7 @@ export class Display {
       const ghostOn = !!(g && gs && own && performance.now() - this.ghostAt < 1500 && g.bins === own.bins && Math.abs(g.f0 - own.f0) < own.df / 2 && Math.abs(g.df - own.df) < 1e-6);
       if (ghostOn && g && gs) {
         c.globalAlpha = stale || this.opts.dim ? 0.35 : 0.9;
-        c.strokeStyle = GHOST;
+        c.strokeStyle = this.opts.ghostColour;
         c.lineWidth = 1.1 * d;
         c.beginPath();
         for (let x = 0; x < w; x++) {
@@ -568,35 +573,6 @@ export class Display {
         }
         c.stroke();
         c.globalAlpha = 1;
-      }
-      // legend
-      const both = !!(this.last[0] && this.last[1]);
-      const pa = this.last[0] ? 0 : 1;
-      const items: [string, string][] = both
-        ? [['A average', AVG[0]], ['B average', AVG[1]], ['peak', PEAK[0]]]
-        : [['average', AVG[pa]], ['peak', PEAK[pa]]];
-      if (ghostOn) items.push([this.opts.ghostLabel, GHOST]);
-      c.font = `${11 * d}px system-ui, sans-serif`;
-      c.textBaseline = 'middle';
-      c.textAlign = 'left';
-      let lx = W - 8 * d;
-      for (let i = items.length - 1; i >= 0; i--) {
-        const [label, col] = items[i];
-        lx -= c.measureText(label).width + 26 * d;
-        c.fillStyle = col;
-        c.fillRect(lx, T + 18 * d, 14 * d, 2 * d);
-        c.fillStyle = '#aab4c0';
-        c.fillText(label, lx + 18 * d, T + 19 * d);
-      }
-      // badge (gapped runs): on the plot itself, not only in the footer
-      if (this.opts.badge && (this.last[0] ?? this.last[1])?.gapped) { // follows the rows, like the separators
-        c.font = `bold ${11 * d}px system-ui, sans-serif`;
-        const bw = c.measureText(this.opts.badge).width + 12 * d;
-        c.fillStyle = 'rgba(255,183,77,0.16)';
-        c.fillRect(W - bw - 8 * d, T + 30 * d, bw, 18 * d);
-        c.fillStyle = '#ffb74d';
-        c.textAlign = 'left';
-        c.fillText(this.opts.badge, W - bw - 2 * d, T + 39 * d);
       }
       // hover readout
       if (this.hover !== null && !stale) {

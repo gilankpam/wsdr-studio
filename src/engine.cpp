@@ -66,7 +66,9 @@ int paths_from(const json &c) {
 const char *paths_name(int p) { return p == 2 ? "b" : p == 3 ? "ab" : "a"; }
 } // namespace
 
-Engine::Engine(Callbacks cb, std::string record_dir) : _cb(std::move(cb)), _rec(std::move(record_dir)) {
+Engine::Engine(Callbacks cb, std::string record_dir, int slot, std::shared_ptr<Claims> claims)
+    : _cb(std::move(cb)), _slot(slot), _claims(claims ? std::move(claims) : std::make_shared<Claims>()),
+      _rec(std::move(record_dir)) {
   _cmd = std::thread([this] { cmd_loop(); });
   _dsp = std::thread([this] { dsp_loop(); });
 }
@@ -317,14 +319,27 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   }
   // Always open one specific device (the first match when bus/port are not given), so caps can say
   // which one is open (a client that did not start it shows the right adapter).
+  // (an adapter the other view has open is skipped, or refused when asked for by bus/port)
+  const auto key = [](int b, const std::string &p) { return std::to_string(b) + "-" + p; };
   DeviceInfo dev;
+  bool skipped = false;
   for (const auto &d : scan_devices())
     if (d.pid == pid && (bus < 0 || d.bus == bus) && (port.empty() || d.port == port)) {
+      if (_claims->held_by_other(key(d.bus, d.port), _slot)) {
+        if (bus >= 0)
+          throw CmdError("busy", "this adapter is open in the other view");
+        skipped = true;
+        continue;
+      }
       dev = d;
       bus = d.bus;
       port = d.port;
       break;
     }
+  if (bus < 0 && skipped)
+    throw CmdError("busy", "every adapter of this kind is open in the other view");
+  if (bus >= 0 && !_claims->take(key(bus, port), _slot))
+    throw CmdError("busy", "this adapter is open in the other view");
   {
     std::lock_guard<std::mutex> l(_sm);
     _state = "opening";
@@ -363,7 +378,10 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
         }
       }
       if (!super && !back)
+      {
+        _claims->drop(_slot);
         throw CmdError("not_found", "the 8812BU did not come back after the USB 3 switch; replug it");
+      }
       _cb.event({{"type", "notice"},
                  {"text", super ? "The 8812BU now runs at USB 3 (until it is unplugged)"
                                 : "The 8812BU stayed at USB 2: this port or cable may not carry USB 3"}});
@@ -384,14 +402,17 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
     std::lock_guard<std::mutex> l(_sm);
     _cu = pid == wsdr::kPid8812cu;
   }
+  _claims->take(key(bus, port), _slot); // its bus may have changed (USB 3 switch)
   try {
     r->open(pid, hw_for(s), bus, port);
   } catch (const wsdr::OpenError &e) {
+    _claims->drop(_slot);
     std::lock_guard<std::mutex> l(_sm);
     _state = "closed";
     _error = e.what();
     throw CmdError(open_kind(e.kind), e.what());
   } catch (const std::exception &e) {
+    _claims->drop(_slot);
     std::lock_guard<std::mutex> l(_sm);
     _state = "closed";
     _error = std::string("bring-up failed: ") + e.what();
@@ -433,6 +454,7 @@ void Engine::close_adapter() {
   if (old)
     old->close();
   _ring.clear();
+  _claims->drop(_slot);
   std::lock_guard<std::mutex> l(_sm);
   _state = "closed";
   _caps = {};

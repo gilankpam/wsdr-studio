@@ -11,6 +11,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <map>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -30,13 +31,42 @@ namespace studio {
 
 using json = nlohmann::json;
 
+// Which adapter each engine (view slot) has open: two slots must never open the same dongle.
+class Claims {
+public:
+  bool take(const std::string &key, int slot) { // false: another slot holds it
+    std::lock_guard<std::mutex> l(_m);
+    for (auto it = _held.begin(); it != _held.end();)
+      it = it->second == slot ? _held.erase(it) : std::next(it); // a slot holds one adapter at most
+    if (_held.count(key))
+      return false;
+    _held[key] = slot;
+    return true;
+  }
+  void drop(int slot) {
+    std::lock_guard<std::mutex> l(_m);
+    for (auto it = _held.begin(); it != _held.end();)
+      it = it->second == slot ? _held.erase(it) : std::next(it);
+  }
+  bool held_by_other(const std::string &key, int slot) const {
+    std::lock_guard<std::mutex> l(_m);
+    const auto it = _held.find(key);
+    return it != _held.end() && it->second != slot;
+  }
+
+private:
+  mutable std::mutex _m;
+  std::map<std::string, int> _held; // "bus-port" -> slot
+};
+
 class Engine {
 public:
   struct Callbacks {
     std::function<void(std::vector<uint8_t> &&frame)> row;  // binary row frame (protocol.h)
     std::function<void(const json &event)> event;           // JSON event for all clients
   };
-  Engine(Callbacks cb, std::string record_dir);
+  // slot: which view this engine serves (0 = A, 1 = B); claims: shared between the slots' engines.
+  Engine(Callbacks cb, std::string record_dir, int slot = 0, std::shared_ptr<Claims> claims = nullptr);
   // Start switches an 8812BU found at USB 2 to USB 3 unless the open command says otherwise
   // (its "usb3" field) or this default is off (--no-usb3).
   void set_usb3_default(bool on) { _usb3_default = on; }
@@ -74,6 +104,8 @@ private:
   }
 
   Callbacks _cb;
+  int _slot = 0;
+  std::shared_ptr<Claims> _claims;
   mutable std::mutex _rxm;
   std::shared_ptr<wsdr::Receiver> _rx; // replaced on the command thread, read anywhere via rx()
   BankRing _ring{512};

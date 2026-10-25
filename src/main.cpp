@@ -22,6 +22,7 @@
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/steady_timer.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -291,16 +292,26 @@ int main(int argc, char **argv) {
   so.webroot = a.web.empty() ? default_webroot() : a.web;
   so.extra_origins = a.dev_origins;
   std::unique_ptr<Server> srv;
-  std::unique_ptr<Engine> eng;
+  // Two engines: view slots A (0) and B (1), each owning at most one adapter. Commands name their slot
+  // ("slot", default 0); events carry it; row frames carry it in the path byte (bit 4).
+  constexpr int kSlots = 2;
+  std::array<std::unique_ptr<Engine>, kSlots> engs;
+  const auto tagged = [](json e, int slot) {
+    e["slot"] = slot;
+    return e.dump();
+  };
   Server::Handlers h;
   h.on_open = [&](const Server::ClientPtr &c) {
     std::weak_ptr<WsClient> w = c;
     const char *home = std::getenv("HOME");
-    srv->send_text(w, json{{"type", "hello"}, {"version", 1}, {"app", "wsdr-studio"}, {"home", home ? home : ""}}.dump());
-    eng->submit({{"cmd", "scan"}}, nullptr); // broadcasts "devices"; USB enumeration stays off the I/O thread
-    srv->send_text(w, eng->caps().dump());
-    srv->send_text(w, eng->settings().dump());
-    srv->send_text(w, eng->status().dump());
+    srv->send_text(w, json{{"type", "hello"}, {"version", 1}, {"app", "wsdr-studio"}, {"home", home ? home : ""},
+                           {"slots", kSlots}}.dump());
+    engs[0]->submit({{"cmd", "scan"}}, nullptr); // broadcasts "devices"; USB enumeration stays off the I/O thread
+    for (int i = 0; i < kSlots; i++) {
+      srv->send_text(w, tagged(engs[i]->caps(), i));
+      srv->send_text(w, tagged(engs[i]->settings(), i));
+      srv->send_text(w, tagged(engs[i]->status(), i));
+    }
   };
   h.on_text = [&](const Server::ClientPtr &c, const std::string &t) {
     std::weak_ptr<WsClient> w = c;
@@ -316,7 +327,18 @@ int main(int argc, char **argv) {
       srv->send_text(w, e.dump());
       return; // internal commands (_lost, _rec_stop) are the engine's own
     }
-    eng->submit(std::move(cmd), [&srv, w](const json &r) { srv->send_text(w, r.dump()); });
+    int slot = 0;
+    if (cmd.contains("slot")) {
+      if (!cmd["slot"].is_number_integer() || cmd["slot"].get<int>() < 0 || cmd["slot"].get<int>() >= kSlots) {
+        json e = {{"type", "error"}, {"kind", "bad_request"}, {"msg", "slot must be 0 or 1"}};
+        if (cmd.contains("id"))
+          e["id"] = cmd["id"];
+        srv->send_text(w, e.dump());
+        return;
+      }
+      slot = cmd["slot"].get<int>();
+    }
+    engs[slot]->submit(std::move(cmd), [&srv, w](const json &r) { srv->send_text(w, r.dump()); });
   };
   std::string err;
   bool ok = false;
@@ -329,11 +351,19 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "wsdr-studiod: cannot listen on 127.0.0.1:%u..%u: %s\n", a.port, a.port + 9, err.c_str());
     return 1;
   }
-  eng = std::make_unique<Engine>(
-      Engine::Callbacks{[&](std::vector<uint8_t> &&f) { srv->broadcast_binary(std::move(f)); },
-                        [&](const json &e) { srv->broadcast_text(e.dump()); }},
-      a.record_dir.empty() ? data_dir() + "/recordings" : a.record_dir);
-  eng->set_usb3_default(a.usb3); // also for Start pressed in the app
+  const auto claims = std::make_shared<Claims>();
+  for (int i = 0; i < kSlots; i++) {
+    engs[i] = std::make_unique<Engine>(
+        Engine::Callbacks{[&, i](std::vector<uint8_t> &&f) {
+                            if (i && f.size() > 6)
+                              f[6] |= 0x10; // slot B
+                            srv->broadcast_binary(std::move(f));
+                          },
+                          [&, i](const json &e) { srv->broadcast_text(tagged(e, i)); }},
+        a.record_dir.empty() ? data_dir() + "/recordings" : a.record_dir, i, claims);
+    engs[i]->set_usb3_default(a.usb3); // also for Start pressed in the app
+  }
+  Engine *eng = engs[0].get(); // the command line opens view A
 
   if (!write_instance(std::to_string(getpid()) + " " + std::to_string(srv->port()) + " " + so.token + "\n"))
     std::fprintf(stderr, "wsdr-studiod: cannot write %s (a second launch will not find this one)\n",
@@ -363,11 +393,13 @@ int main(int argc, char **argv) {
     tick.async_wait([&](const boost::system::error_code &ec) {
       if (ec)
         return;
-      eng->poll(); // notices an unplugged adapter
-      if (srv->clients()) {
-        json st = eng->status();
-        st["client_drops"] = srv->frames_dropped();
-        srv->broadcast_text(st.dump());
+      for (int i = 0; i < kSlots; i++) {
+        engs[i]->poll(); // notices an unplugged adapter
+        if (srv->clients()) {
+          json st = engs[i]->status();
+          st["client_drops"] = srv->frames_dropped();
+          srv->broadcast_text(tagged(st, i));
+        }
       }
       on_tick();
     });
@@ -377,7 +409,8 @@ int main(int argc, char **argv) {
   finished = true; // a late stdin EOF must not signal us during the shutdown below
 
   remove_instance_if_ours(so.token);
-  eng.reset(); // closes the adapter before the server goes away
+  for (auto &e : engs)
+    e.reset(); // closes the adapters before the server goes away
   srv.reset();
   return 0;
 }

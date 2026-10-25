@@ -44,7 +44,8 @@ std::vector<uint8_t> encode_row(const Row &r, double t) {
 bool decode_row(const uint8_t *p, size_t n, DecodedRow &o) {
   if (n < kRowHeader || get<uint32_t>(p, 0) != kRowMagic || get<uint16_t>(p, 4) != kProtocolVersion)
     return false;
-  o.path = p[6] & 0x3f;
+  o.path = p[6] & 0x0f;
+  o.slot = (p[6] >> 4) & 1;
   o.gapped = (p[6] & 0x80) != 0;
   o.offset = (p[6] & 0x40) != 0;
   o.gen = p[7];

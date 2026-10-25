@@ -15,6 +15,7 @@ export type DisplayOpts = {
   marker: number | null;        // requested frequency (Hz), drawn when it is not the band centre
   markerLabel: string;          // e.g. "requested" or "next Start"
   overlay: string | null;       // message over the plot (stopped, starting, ...)
+  staleText: string;            // shown when rows stop arriving
   dim: boolean;                 // stopped: the last picture stays, faded
 };
 
@@ -45,13 +46,17 @@ export class Display {
   private raf = 0;
   private hover: number | null = null; // CSS x
   private hoverWfY = -1;               // CSS y over the waterfall (-1: over the spectrum)
-  private sepRows = -1;                // rows since the newest separator (older rows are another span)
+  private sepRows = -1;                // rows since the newest span separator (older rows: another span)
+  private lastGen = -1;                // run byte of the newest row
+  private genRows = 0;                 // rows of the current run
+  private genCount = 0;                // run changes seen
+  private frozen: HTMLCanvasElement | null = null; // waterfall before Stop dimmed it
   onHint: (text: string) => void = () => {};
   private dpr = 1;
   private off: (() => void)[] = [];
   opts: DisplayOpts = {
     dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, markerLabel: 'requested',
-    overlay: null, dim: false,
+    overlay: null, staleText: 'No data from the adapter', dim: false,
   };
   onRetune: (freq: number) => void = () => {};
 
@@ -139,7 +144,14 @@ export class Display {
 
   // New stream (Start): forget the traces. The waterfall keeps its history below a separator.
   newStream() {
+    if (this.frozen) {
+      // undo Stop's dimming: the old rows keep their true colours (they matched the colour bar)
+      this.wfCtx.drawImage(this.frozen, 0, 0);
+      this.frozen = null;
+    }
     this.seen = 0;
+    this.lastGen = -1;
+    this.genRows = 0;
     this.lastRowT = 0;
     this.last = [null, null];
     this.hold = [null, null];
@@ -151,6 +163,10 @@ export class Display {
   // Stream ended (Stop): keep the picture, faded, for a last look.
   freeze() {
     this.seen = 0; // not "stale": stopped on purpose
+    this.frozen = document.createElement('canvas');
+    this.frozen.width = this.wf.width;
+    this.frozen.height = this.wf.height;
+    this.frozen.getContext('2d')!.drawImage(this.wf, 0, 0);
     this.wfCtx.fillStyle = 'rgba(0,0,0,0.45)';
     const L = this.plotLeft();
     this.wfCtx.fillRect(L, 0, this.wf.width - L, this.wf.height);
@@ -186,6 +202,15 @@ export class Display {
     return this.seen;
   }
 
+  // Rows of the current stream run, and how many run changes have been seen (for Auto: refit on
+  // rows of the NEW setting only).
+  runRows() {
+    return this.genRows;
+  }
+  runCount() {
+    return this.genCount;
+  }
+
   // Scales fitted to the signal: the spectrum from a little under the average noise floor to a little
   // over the strongest peak; the waterfall floor just above that noise floor.
   suggestRange(): { dbMin: number; dbMax: number; wfFloor: number } | null {
@@ -208,6 +233,15 @@ export class Display {
   push(r: Row) {
     this.seen++;
     this.lastRowAt = performance.now();
+    if (r.gen !== this.lastGen) {
+      // a new run (tuning, gain, rate): peaks and averages of the old setting no longer apply
+      if (this.lastGen >= 0) this.genCount++;
+      this.lastGen = r.gen;
+      this.genRows = 0;
+      this.hold = [null, null];
+      this.smoothed = [null, null];
+    }
+    this.genRows++;
     const shown = r.path === this.opts.wfPath || !this.last[this.opts.wfPath];
     if (this.lastRowT && r.t > this.lastRowT && shown) {
       const rate = 1 / (r.t - this.lastRowT);
@@ -316,8 +350,8 @@ export class Display {
       const d = this.dpr;
       const label = this.stopPending ? `▼ before Stop: ${this.wfSpan}` : `▼ before: ${this.wfSpan}`;
       if (this.stopPending) this.stopRows = 0;
+      if (span !== this.wfSpan) this.sepRows = 0; // a Stop at the same span keeps the frequency axis
       this.stopPending = false;
-      this.sepRows = 0;
       c.fillStyle = '#ffffff';
       c.fillRect(L, 0, w, Math.max(1, Math.round(d)));
       c.font = `${11 * d}px system-ui, sans-serif`;
@@ -487,10 +521,14 @@ export class Display {
           const b = Math.max(0, Math.min(r.bins - 1, Math.round((f - r.f0) / r.df)));
           const sm = this.smoothed[r.path] ?? r.avg;
           const pk = this.hold[r.path] ?? r.max;
+          // over the waterfall: frequency and age (the levels shown live are not that row's)
           const older = this.hoverWfY >= 0 && this.sepRows >= 0 && this.hoverWfY * d > this.sepRows;
+          const age = this.hoverWfY >= 0 ? (this.hoverWfY * d) / this.rowsPerS : 0;
           const txt = older
             ? 'older rows: another frequency/span (see the label at the line)'
-            : `${(f / 1e6).toFixed(3)} MHz · avg ${sm[b].toFixed(1)} · peak ${pk[b].toFixed(1)} dBFS`;
+            : this.hoverWfY >= 0
+              ? `${(f / 1e6).toFixed(3)} MHz · ${age.toFixed(1)} s ago`
+              : `${(f / 1e6).toFixed(3)} MHz · avg ${sm[b].toFixed(1)} · peak ${pk[b].toFixed(1)} dBFS`;
           c.font = `${12 * d}px system-ui, sans-serif`;
           const tw = c.measureText(txt).width + 12 * d;
           const tx = Math.min(W - tw, x + 8 * d);
@@ -504,7 +542,7 @@ export class Display {
       }
     }
     // overlay message: explicit (stopped/starting) or stale data
-    const msg = this.opts.overlay ?? (stale ? 'No data from the adapter' : null);
+    const msg = this.opts.overlay ?? (stale ? this.opts.staleText : null);
     if (msg) {
       c.font = `${14 * d}px system-ui, sans-serif`;
       const tw = c.measureText(msg).width + 28 * d;

@@ -87,7 +87,7 @@ export default function App() {
   const bannerId = useRef(1);
   const live = useRef({ open: false, recording: false, opening: false, freq: 5180e6, width: 20 }); // for callbacks that outlive a render
   const autoOn = useRef(loadPrefs().scale === null); // Auto scale on (mirrors prefs.scale === null; storage may be blocked)
-  const home = useRef('');
+  const [home, setHome] = useState('');
   const setRef = useRef<(a: Partial<RxSettings>) => void>(() => {});
   const popRef = useRef<HTMLDivElement>(null);
 
@@ -131,10 +131,12 @@ export default function App() {
   };
   const dropBanner = (id: number) => setBanners((b) => b.filter((x) => x.id !== id));
   const req = (cmd: string, args: Record<string, unknown> = {}) =>
-    (clientRef.current ? clientRef.current.request(cmd, args) : Promise.reject(new Error('not connected'))).catch((e: Error) => {
-      addBanner(e.message, 'error');
-      throw e;
-    });
+    (clientRef.current ? clientRef.current.request(cmd, args) : Promise.reject(new Error('not connected'))).catch(
+      (e: Error & { kind?: string }) => {
+        addBanner(e.message, e.kind === 'busy' ? 'info' : 'error'); // "try again in a moment" is not a fault
+        throw e;
+      },
+    );
 
   // socket + display wiring (the effect owns the client and the renderer)
   useEffect(() => {
@@ -147,10 +149,17 @@ export default function App() {
     d.resize();
     // Auto scale: refit once enough rows of a new setting have arrived (Start, retune, gain change),
     // unless the user fixed the scale. autoAt = the row count to refit at (-1: nothing pending).
+    // Auto refit: after Start; after an rx change once 25 rows of the NEW run arrived (rows of the old
+    // run may still be in flight); after a display change (FFT) once 25 more rows arrived.
     let autoAt = autoOn.current ? 25 : -1;
-    const autoAgain = () => {
-      d.resetPeaks(); // the peak-hold describes the old setting
-      if (autoOn.current) autoAt = d.rowsSeen() + 25;
+    let autoRun = -1; // run count to wait for (-1: none)
+    const autoAgain = (rx: boolean) => {
+      if (!autoOn.current) return;
+      if (rx) autoRun = d.runCount() + 1;
+      else {
+        d.resetPeaks();
+        autoAt = d.rowsSeen() + 25;
+      }
     };
     d.onHint = (t) => addBanner(t);
     let wasOpen = false;
@@ -178,8 +187,11 @@ export default function App() {
         clientRef.current = c;
         c.onRow = (r) => {
           d.push(r);
-          if (autoAt >= 0 && d.rowsSeen() >= autoAt) {
+          const runDone = autoRun >= 0 && d.runCount() >= autoRun && d.runRows() >= 25;
+          if (runDone || (autoAt >= 0 && d.rowsSeen() >= autoAt)) {
             autoAt = -1;
+            autoRun = -1;
+            if (!autoOn.current) return; // the user fixed a scale meanwhile
             const s = d.suggestRange();
             if (s) setScale(s);
           }
@@ -196,6 +208,7 @@ export default function App() {
               if (e.open && !wasOpen) {
                 d.newStream();
                 autoAt = autoOn.current ? 25 : -1;
+                autoRun = -1;
               } else if (!e.open && wasOpen) {
                 setHadPicture(d.hasPicture());
                 d.freeze();
@@ -209,7 +222,7 @@ export default function App() {
             case 'settings':
               if (e.rx) {
                 if (lastRx && (lastRx.freq !== e.rx.freq || lastRx.rate_sel !== e.rx.rate_sel || lastRx.gain_db !== e.rx.gain_db || lastRx.agc !== e.rx.agc))
-                  autoAgain();
+                  autoAgain(true);
                 lastRx = e.rx;
                 setRx(e.rx);
                 lastSentFreq.current = null;
@@ -217,7 +230,7 @@ export default function App() {
                 setGainUi(null);
               }
               if (e.dsp) {
-                if (e.dsp.fft !== lastFft) autoAgain();
+                if (lastFft && e.dsp.fft !== lastFft) autoAgain(false);
                 lastFft = e.dsp.fft;
                 if (e.dsp.paths !== lastPaths) {
                   if (!e.dsp.paths.includes('a')) d.dropPath(0);
@@ -251,7 +264,7 @@ export default function App() {
               break;
             }
             case 'hello':
-              home.current = e.home ?? '';
+              setHome(e.home ?? '');
               break;
             case 'recorded':
               setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error });
@@ -332,8 +345,9 @@ export default function App() {
         ...scale, wfMode: prefs.wfMode, smooth: prefs.smooth, overlay, dim: !open,
         wfPath: dsp.paths === 'b' ? 1 : 0, marker: open || hadPicture ? cur.freq : null,
         markerLabel: open ? 'requested' : 'next Start',
+        staleText: rxState === 'starting' ? 'Applying settings…' : 'No data from the adapter',
       }),
-    [scale, prefs.wfMode, prefs.smooth, overlay, open, dsp.paths, cur.freq, hadPicture],
+    [scale, prefs.wfMode, prefs.smooth, overlay, open, dsp.paths, cur.freq, hadPicture, rxState],
   );
 
   // A settings change: sent now when streaming, kept as a draft until Start otherwise.
@@ -362,6 +376,7 @@ export default function App() {
   const pickChannel = (key: string) => {
     const c = CHANNELS.find((x) => channelKey(x) === key);
     if (!c) return;
+    updatePrefs({ retuned: true }); // the tip is no longer needed
     if (c.width === 40 && (caps.wide_capable ?? sel?.max_msps === 40)) set({ freq: c.centre, rate_sel: 1, wide: true });
     else set({ freq: c.centre });
   };
@@ -377,6 +392,7 @@ export default function App() {
     setFreqText(mhz(t, 3));
     if (t === lastSentFreq.current || Math.abs(t - cur.freq) < 1) return; // Enter then blur: send once
     lastSentFreq.current = t;
+    updatePrefs({ retuned: true });
     set({ freq: t });
   };
   const onGain = (v: number) => {
@@ -404,7 +420,7 @@ export default function App() {
   }
   const dotClass =
     fatal || !connected ? 'dot bad'
-    : opening || rxState === 'starting' ? 'dot warn' // a routine restart (retune, span) is not a fault
+    : opening || (rxState === 'starting' && !st?.error) ? 'dot warn' // a routine restart (retune, span) is not a fault
     : !open ? 'dot'
     : rxState === 'streaming' ? 'dot ok'
     : 'dot bad';
@@ -444,7 +460,11 @@ export default function App() {
               className={recording ? 'rec on' : 'rec'}
               disabled={!recording && rxState !== 'streaming'}
               onClick={toggleRecord}
-              title={`Record raw IQ (SigMF), about ${bytes(recRate)}/s at this span${diskFree ? `; ${bytes(diskFree)} free (~${fmtDur(diskFree / recRate)})` : ''}`}
+              title={
+                !recording && rxState !== 'streaming'
+                  ? 'Available while streaming'
+                  : `Record raw IQ (SigMF), about ${bytes(recRate)}/s at this span${diskFree ? `; ${bytes(diskFree)} free (~${fmtDur(diskFree / recRate)})` : ''}`
+              }
             >
               {recording ? '■ End recording' : '● Record'}
             </button>
@@ -498,7 +518,17 @@ export default function App() {
 
         <div className="group" title={locked ? LOCKED : undefined}>
           <label htmlFor="span">Span</label>
-          <select id="span" disabled={locked} value={cur.rate_sel} onChange={(e) => set({ rate_sel: Number(e.target.value), wide: true })} title="Bandwidth shown (= sample rate)">
+          <select
+            id="span"
+            disabled={locked}
+            value={cur.rate_sel}
+            onChange={(e) => {
+              const rs = Number(e.target.value);
+              const w = rs === 1 && (caps.wide_capable ?? true) ? 40 : 20;
+              set({ rate_sel: rs, wide: true, freq: snap(cur.freq, w) }); // 40 MHz centres are a subset
+            }}
+            title="Bandwidth shown (= sample rate)"
+          >
             {rates.map((r) => (
               <option key={r.rate_sel} value={r.rate_sel}>
                 {spanLabel(r.fs)}
@@ -548,7 +578,7 @@ export default function App() {
             title={
               prefs.scale === null
                 ? 'Auto scale is on: refits after Start, retune, span, gain or FFT change. Type a value to fix the scale.'
-                : 'Fit the scale to the signal now and keep refitting after each Start'
+                : 'Fit the scale to the signal now, and keep refitting after Start, retune, span, gain or FFT changes'
             }
             onClick={() => {
               const s = display.current?.suggestRange();
@@ -630,8 +660,8 @@ export default function App() {
           <span className="one-line" title={saved.file}>
             {saved.error ? `Recording stopped: ${saved.error}. ` : saved.reason ? `Recording stopped (${saved.reason}). ` : ''}
             Saved <code>{baseName(saved.file)}</code> · {bytes(saved.bytes)} · {saved.seconds.toFixed(1)} s · in{' '}
-            {home.current && saved.file.startsWith(home.current + '/')
-              ? '~' + saved.file.slice(home.current.length, saved.file.lastIndexOf('/') + 1)
+            {home && saved.file.startsWith(home + '/')
+              ? '~' + saved.file.slice(home.length, saved.file.lastIndexOf('/') + 1)
               : saved.file.slice(0, saved.file.lastIndexOf('/') + 1)}
           </span>
           <button onClick={() => copy(saved.file)}>Copy path</button>
@@ -666,7 +696,7 @@ export default function App() {
         ))}
 
       <main className="plots">
-        <div className={overlay ? 'toasts low' : 'toasts'}>
+        <div className="toasts">
           {banners
             .filter((b) => b.kind === 'info')
             .map((b) => (

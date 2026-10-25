@@ -26,7 +26,7 @@ std::vector<uint8_t> encode_row(const Row &r, double t) {
   put<uint32_t>(b, 0, kRowMagic);
   put<uint16_t>(b, 4, kProtocolVersion);
   put<uint8_t>(b, 6, static_cast<uint8_t>(r.path));
-  put<uint8_t>(b, 7, 0);
+  put<uint8_t>(b, 7, r.gen);
   put<uint32_t>(b, 8, r.seq);
   put<uint32_t>(b, 12, bins);
   put<double>(b, 16, t);
@@ -45,6 +45,7 @@ bool decode_row(const uint8_t *p, size_t n, DecodedRow &o) {
   if (n < kRowHeader || get<uint32_t>(p, 0) != kRowMagic || get<uint16_t>(p, 4) != kProtocolVersion)
     return false;
   o.path = p[6];
+  o.gen = p[7];
   o.seq = get<uint32_t>(p, 8);
   o.bins = get<uint32_t>(p, 12);
   if (n != kRowHeader + 2 * static_cast<size_t>(o.bins))

@@ -184,6 +184,7 @@ static void test_reduce_and_frame() {
   DecodedRow d;
   CHECK(decode_row(frame.data(), frame.size(), d));
   CHECK(d.bins == kMaxBins && d.seq == rows[0].seq && d.f0 == rows[0].f0 && d.df == rows[0].df);
+  CHECK(d.gen == 1); // the run byte (meta.gen & 0xff) travels with every row
   for (size_t i = 0; i < d.bins; i++) {
     if (rows[0].avg[i] > kDbMin && rows[0].avg[i] < kDbMin + 255 * kDbStep)
       CHECK(std::abs(d.avg[i] - rows[0].avg[i]) <= kDbStep / 2 + 1e-3f);

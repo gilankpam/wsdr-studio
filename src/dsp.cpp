@@ -159,6 +159,7 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       Row r;
       r.path = p.index;
       r.seq = _seq++;
+      r.gen = static_cast<uint8_t>(_gen & 0xff);
       r.df = _fs / n * dec;
       r.f0 = _freq - _fs / 2 + (_fs / n) * (dec - 1) / 2.0;
       r.avg.resize(bins);

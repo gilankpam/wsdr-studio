@@ -298,8 +298,8 @@ void open_browser(const std::string &secret_url) {
     posix_spawnattr_destroy(&at);
     if (rc == 0) {
       std::thread([pid] { waitpid(pid, nullptr, 0); }).detach();
-      std::fprintf(stderr, "wsdr-studiod: opened the UI with %s; if no window appears, open %s (single use, 30 s)\n",
-                   argv[0], secret_url.c_str());
+      std::fprintf(stderr, "wsdr-studiod: opened the UI with %s (if no window appears, run wsdr-studiod again)\n",
+                   argv[0]);
       return;
     }
   }

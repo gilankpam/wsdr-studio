@@ -1,0 +1,3 @@
+[submodule "external/wifi-sdr"]
+	path = external/wifi-sdr
+	url = https://github.com/snokvist/wifi-sdr.git

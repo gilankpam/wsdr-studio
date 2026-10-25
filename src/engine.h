@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Engine: the app's model. Owns the Receiver (one adapter), the bank ring, the DSP thread and the
+// recorder, and executes UI commands on its own command thread (bring-up blocks for ~5 s; commands
+// that arrive meanwhile queue up behind it).
+//
+// Threads: command thread (open/close/set/record), stream thread (inside Receiver: copies banks into
+// the ring), DSP thread (unpack, FFT, rows, recorder feed). Rows and events go out through callbacks,
+// which must not block (the server posts them to its I/O thread).
+#pragma once
+
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "device_scan.h"
+#include "dsp.h"
+#include "receiver.h"
+#include "recorder.h"
+#include "ring.h"
+
+namespace studio {
+
+using json = nlohmann::json;
+
+class Engine {
+public:
+  struct Callbacks {
+    std::function<void(std::vector<uint8_t> &&frame)> row;  // binary row frame (protocol.h)
+    std::function<void(const json &event)> event;           // JSON event for all clients
+  };
+  Engine(Callbacks cb, std::string record_dir);
+  ~Engine();
+
+  // A command from a client ({"cmd": ..., ...}); `reply` gets {"type":"ack"|"error", ...}. Non-blocking.
+  void submit(json cmd, std::function<void(const json &)> reply);
+  json status() const;   // {"type":"status", ...}
+  json settings() const; // {"type":"settings", rx, dsp}
+  json caps() const;     // {"type":"caps", ...} (empty adapter if closed)
+  static json devices_json(const std::vector<DeviceInfo> &d);
+
+  // Headless / test helpers.
+  uint64_t rows_emitted() const { return _rows; }
+  uint64_t ring_dropped() const { return _ring.dropped(); }
+  double dsp_load() const { return _dsp_load; }
+
+private:
+  void cmd_loop();
+  void dsp_loop();
+  json run(const json &c); // on the command thread; throws std::exception -> error reply
+  void open_adapter(uint16_t pid, const json &c);
+  void close_adapter();
+  void publish_settings();
+
+  // The Receiver is replaced on the command thread and read from others: hand out copies.
+  std::shared_ptr<wsdr::Receiver> rx() const {
+    std::lock_guard<std::mutex> l(_rxm);
+    return _rx;
+  }
+
+  Callbacks _cb;
+  mutable std::mutex _rxm;
+  std::shared_ptr<wsdr::Receiver> _rx;
+  BankRing _ring{512};
+  Recorder _rec;
+
+  // command queue
+  std::mutex _qm;
+  std::condition_variable _qcv;
+  std::deque<std::pair<json, std::function<void(const json &)>>> _q;
+  bool _quit = false;
+  std::thread _cmd, _dsp;
+
+  // DSP settings handoff (UI -> DSP thread)
+  mutable std::mutex _dm;
+  DspConfig _dsp_cfg;
+  bool _dsp_dirty = true;
+  std::atomic<bool> _dsp_quit{false};
+  std::atomic<bool> _record_req{false};
+
+  // state for status/caps
+  mutable std::mutex _sm;
+  std::string _state = "closed", _error, _adapter;
+  wsdr::RxCaps _caps;
+  bool _open = false;
+
+  std::atomic<uint64_t> _rows{0};
+  std::atomic<double> _dsp_load{0};
+  std::atomic<uint64_t> _rec_gen{0};
+};
+
+} // namespace studio

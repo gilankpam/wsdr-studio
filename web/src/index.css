@@ -210,6 +210,7 @@ canvas.waterfall { flex: 1; min-height: 100px; background: #000; cursor: crossha
   flex: none; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 10px; align-items: end;
   padding: 4px 12px 2px; background: #0e131a; border-bottom: 1px solid var(--line);
 }
+.ruler.map { grid-template-columns: 46px minmax(0, 1fr) auto; column-gap: 0; padding-left: 0; padding-right: 0; }
 .ruler:focus-visible { outline: 2px solid var(--on-line); outline-offset: -2px; }
 /* what the ruler shows: 2.4 GHz | 5 GHz on top, the 5 GHz sections below */
 .rbands { display: grid; grid-template-columns: repeat(6, auto); gap: 3px; margin-bottom: 2px; }
@@ -281,3 +282,16 @@ button.rtab.s1 { background: var(--view-b); }
 /* Compare: a card in a short plot drops its icon */
 .views.compare .vcard svg { display: none; }
 .views.compare .vcard { gap: 6px; padding: 12px 16px; }
+
+/* Spectral Map (SpectralMap.tsx): the views are hidden, the map fills the workspace */
+.mode-map .views > .view { display: none; }
+.smap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.maphead .mtitle { font-weight: 600; color: #e6ebf1; white-space: nowrap; }
+.smap-plots { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; overflow: hidden; }
+.smap-plots canvas.spectrum { flex: 0 0 38%; min-height: 140px; cursor: pointer; }
+.smap-plots canvas.waterfall { flex: 1; min-height: 100px; cursor: pointer; background: #0b0e13; }
+.smap-hover {
+  position: absolute; z-index: 6; pointer-events: none; padding: 3px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap;
+  background: rgba(20, 26, 34, 0.94); color: #e0e6ee;
+}
+.views.map { display: flex; flex-direction: column; }

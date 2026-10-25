@@ -645,45 +645,48 @@ export function Station(p: {
           </span>
         )}
       </section>
-      <section className="sbgroup" title={lockTitle}>
-        <h3>Span</h3>
-        <select
-          aria-label={`Span of view ${name}`}
-          disabled={locked}
-          value={cur.rate_sel}
-          // the centre stays as asked; a 40 MHz span centres within 2422-2462 / 5090-6155 MHz, so the
-          // radio may sit beside it (the plot marks the requested frequency)
-          onChange={(e) => userSet({ rate_sel: Number(e.target.value), wide: true })}
-          title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
-            rates.some((r) => r.gapped)
-              ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording)'
-              : ''
-          }`}
-        >
-          {rates.map((r) => (
-            <option key={r.rate_sel} value={r.rate_sel}>
-              {r.gapped ? `${spanLabel(r.fs)} · gapped ~${Math.round(gappedDuty(r.hw_fs ?? r.fs) * 100)} %` : `${spanLabel(r.fs)} · ${r.fs / 1e6} MS/s`}
-            </option>
-          ))}
-        </select>
-        {gapped && (
-          <span className="note">
-            Gapped: the adapter captures short slices of this span and ships each over USB 2, so only part of the time is
-            seen. Spectrum and waterfall, no recording.
-          </span>
-        )}
-        {fsNow >= 40e6 && bandOf(cur.freq) === '2.4' && (
-          <span className="note">A 40 MHz span centres between 2422 and 2462 MHz: the requested frequency is marked on the plot.</span>
-        )}
-        {chip.includes('8822C') &&
-          toggle(
-            'Avoid the chip’s centre notch',
-            prefs.offsetTuning ? 'tunes beside the channel' : 'shows what the chip sees',
-            prefs.offsetTuning,
-            (v) => updatePrefs({ offsetTuning: v }),
-            "Off: the view is what the adapter's own receiver sees, its centre notch included. On: the 10 and 20 MHz views are cut from a 40 MHz capture tuned beside the channel, so the notch stays out of view (less of the time is sampled).",
+      {/* Map: the sweep picks its own steps */}
+      {mode !== 'map' && (
+        <section className="sbgroup" title={lockTitle}>
+          <h3>Span</h3>
+          <select
+            aria-label={`Span of view ${name}`}
+            disabled={locked}
+            value={cur.rate_sel}
+            // the centre stays as asked; a 40 MHz span centres within 2422-2462 / 5090-6155 MHz, so the
+            // radio may sit beside it (the plot marks the requested frequency)
+            onChange={(e) => userSet({ rate_sel: Number(e.target.value), wide: true })}
+            title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
+              rates.some((r) => r.gapped)
+                ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording)'
+                : ''
+            }`}
+          >
+            {rates.map((r) => (
+              <option key={r.rate_sel} value={r.rate_sel}>
+                {r.gapped ? `${spanLabel(r.fs)} · gapped ~${Math.round(gappedDuty(r.hw_fs ?? r.fs) * 100)} %` : `${spanLabel(r.fs)} · ${r.fs / 1e6} MS/s`}
+              </option>
+            ))}
+          </select>
+          {gapped && (
+            <span className="note">
+              Gapped: the adapter captures short slices of this span and ships each over USB 2, so only part of the time is
+              seen. Spectrum and waterfall, no recording.
+            </span>
           )}
-      </section>
+          {fsNow >= 40e6 && bandOf(cur.freq) === '2.4' && (
+            <span className="note">A 40 MHz span centres between 2422 and 2462 MHz: the requested frequency is marked on the plot.</span>
+          )}
+          {chip.includes('8822C') &&
+            toggle(
+              'Avoid the chip’s centre notch',
+              prefs.offsetTuning ? 'tunes beside the channel' : 'shows what the chip sees',
+              prefs.offsetTuning,
+              (v) => updatePrefs({ offsetTuning: v }),
+              "Off: the view is what the adapter's own receiver sees, its centre notch included. On: the 10 and 20 MHz views are cut from a 40 MHz capture tuned beside the channel, so the notch stays out of view (less of the time is sampled).",
+            )}
+        </section>
+      )}
       <section className="sbgroup" title={lockTitle}>
         <h3>Gain</h3>
         <div className="row">

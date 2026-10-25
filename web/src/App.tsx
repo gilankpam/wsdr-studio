@@ -7,12 +7,14 @@ import { useEffect, useRef, useState } from 'react';
 import { Hub } from './hub';
 import type { Device, RxSettings } from './protocol';
 import { Station, type Link, type StationHandle, type ViewInfo } from './Station';
+import { RANGES, planId, sweepPlan, type Range } from './bands';
 import { BandRuler } from './BandRuler';
 import { Panorama } from './Panorama';
+import { SpectralMap } from './SpectralMap';
 import { survey, type Survey } from './survey';
 import { NumField, Seg } from './ui';
 import {
-  FFTS, LOCKED, SLOT_NAME, bandOf, baseName, bytes, loadPrefs, savePrefs, snap, spanLabel, type Locks, type Mode, type Prefs, type Scale,
+  FFTS, LOCKED, SLOT_NAME, bandOf, baseName, bytes, devKey, isDual, loadPrefs, savePrefs, snap, spanLabel, type Locks, type Mode, type Prefs, type Scale,
 } from './util';
 
 // [keys, what, two-view modes only]
@@ -35,6 +37,7 @@ const MODES: [Mode, string, string][] = [
   ['single', 'Single', 'One view'],
   ['panorama', 'Panorama', 'Two adapters, one picture: B continues where A ends'],
   ['compare', 'Compare', 'Two adapters on the same frequencies, one above the other'],
+  ['map', 'Map', 'One adapter sweeps the band: a heatmap of what each channel had'],
 ];
 
 export default function App() {
@@ -58,7 +61,13 @@ export default function App() {
   const [openKey, setOpenKey] = useState<(string | null)[]>([null, null]); // the adapter open in each slot
   const [views, setViews] = useState<(ViewInfo | null)[]>([null, null]);
   const [selSlot, setSelSlot] = useState(0);
-  const [confirmSingle, setConfirmSingle] = useState(false);
+  const [confirm, setConfirm] = useState<{ to: Mode; slot: number } | null>(null); // stop that view first?
+  const [mapSlot, setMapSlot] = useState(0);   // Map: the view whose adapter sweeps
+  const [mapRun, setMapRun] = useState(false); // Map: sweeping
+  const [mapStep, setMapStep] = useState<{ c: number; fs: number } | null>(null); // where the sweep is
+  // Map: what to put back on leaving it (the sweeping view's tuning; the other view, if it ran)
+  const mapReturn = useRef<{ mode: Mode; freq: number; rate_sel: number; other: number | null } | null>(null);
+  const restartOther = useRef<number | null>(null);
   const [help, setHelp] = useState(false); // the keyboard sheet
   const [narrow, setNarrow] = useState(() => matchMedia('(max-width: 1279px)').matches);
   const [drawer, setDrawer] = useState(false);
@@ -67,8 +76,9 @@ export default function App() {
   const leaving = useRef(0); // "Stop B" sent (and a few seconds after): B's recording note goes to A
   const [surveyMap] = useState<Survey>(() => new Map()); // grows in place; the ruler redraws it itself
   const { mode, locks } = prefs;
-  const dual = mode !== 'single';
-  const sel = dual ? selSlot : 0;
+  const dual = isDual(mode);
+  const inMap = mode === 'map';
+  const sel = inMap ? mapSlot : dual ? selSlot : 0;
   const now = useRef({ mode, locks });
 
   useEffect(() => {
@@ -79,9 +89,9 @@ export default function App() {
         if (e.type === 'devices') setDevices(e.devices);
         else if (e.type === 'caps' && e.slot !== undefined)
           setOpenKey((k) => k.map((x, i) => (i === e.slot ? (e.open && e.bus >= 0 ? `${e.bus}-${e.port}` : null) : x)));
-        else if (e.type === 'recorded' && e.slot === 1 && (now.current.mode === 'single' || leaving.current > 0))
-          // view B ended after leaving the two-view modes: its note goes to view A
-          handles.current[0]?.notice(`View B's recording saved: ${baseName(e.file)} · ${bytes(e.bytes)}`);
+        else if (e.type === 'recorded' && e.slot !== undefined && (!handles.current[e.slot] || leaving.current > 0))
+          // a view that is not shown (it was stopped on leaving the two-view modes): its note goes to one that is
+          handles.current.find((h, i) => h && i !== e.slot)?.notice(`View ${SLOT_NAME[e.slot]}'s recording saved: ${baseName(e.file)} · ${bytes(e.bytes)}`);
       },
     });
     return () => {
@@ -117,7 +127,7 @@ export default function App() {
   // the tuning grid, in its band), a span only when its adapter shows it continuously, gain and AGC.
   const forward = (slot: number, args: Partial<RxSettings>, use: Locks) => {
     const other = handles.current[slot ^ 1], me = handles.current[slot];
-    if (now.current.mode === 'single' || !other || !me) return;
+    if (!isDual(now.current.mode) || !other || !me) return;
     const name = SLOT_NAME[slot ^ 1];
     const a: Partial<RxSettings> = {};
     if (use.freq && args.freq !== undefined) {
@@ -143,8 +153,9 @@ export default function App() {
   const fwd = useRef(forward);
   // One scale for both views, fitted to both pictures.
   const fit = (wfMode?: 'max' | 'avg') => {
+    if (now.current.mode === 'map') return; // the map fits its own
     const s = handles.current
-      .filter((_, i) => i === 0 || now.current.mode !== 'single')
+      .filter((_, i) => i === 0 || isDual(now.current.mode))
       .map((h) => h?.suggest(wfMode) ?? null)
       .filter((x): x is Scale => x !== null);
     if (s.length)
@@ -186,11 +197,11 @@ export default function App() {
   // Entering Panorama puts B one span above A; Compare puts it on A's frequency. Pending until both
   // views have appeared and reported.
   const prevMode = useRef(mode);
-  const alignPending = useRef<Mode | null>(mode === 'single' ? null : mode); // also at a start in a two-view mode
+  const alignPending = useRef<Mode | null>(isDual(mode) ? mode : null); // also at a start in a two-view mode
   useEffect(() => {
     if (prevMode.current !== mode) {
       prevMode.current = mode;
-      alignPending.current = mode === 'single' ? null : mode;
+      alignPending.current = isDual(mode) ? mode : null;
     }
     const a = handles.current[0], b = handles.current[1], va = views[0];
     if (!alignPending.current || !a || !b || !va?.ready || !views[1]?.ready) return; // what A runs, B's rates known
@@ -217,24 +228,62 @@ export default function App() {
     else a.notice(`View B stays: ${(want / 1e6).toFixed(0)} MHz is outside the band`);
     if (Object.keys(args).length) b.linkedSet(args);
   }, [mode, views]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Switching modes. Single and Map show one view: a running other view is stopped first (asked).
   const setMode = (m: Mode) => {
-    setConfirmSingle(false);
-    if (m === 'single' && dual && (views[1]?.open || views[1]?.locked || openKey[1])) {
-      setConfirmSingle(true); // view B is running: ask first
-      return;
+    setConfirm(null);
+    if (m === mode) return;
+    if (dual && !isDual(m)) {
+      const other = m === 'single' ? 1 : selSlot ^ 1;
+      if (views[other]?.open || views[other]?.locked || openKey[other]) {
+        setConfirm({ to: m, slot: other }); // that view is running: ask first
+        return;
+      }
     }
+    enter(m, null);
+  };
+  // stopped: the view stopped for it (Map starts it again on leaving)
+  const enter = (m: Mode, stopped: number | null) => {
+    if (m === 'map') {
+      const slot = dual ? selSlot : 0;
+      setMapSlot(slot);
+      setMapRun(false);
+      const v = views[slot];
+      mapReturn.current = v ? { mode, freq: v.freq, rate_sel: v.rate_sel, other: stopped } : null;
+    } else if (mode === 'map') leaveMap(m, null);
     updatePrefs({ mode: m });
   };
-  // the close waits for a Start still running (the engine's queue is serial); on failure B stays shown
-  // (B's recording note may come after the reply: it goes to A for a few seconds more)
-  const stopBAndSingle = () => {
-    setConfirmSingle(false);
+  // Leaving the map: the sweeping view back where it was (or onto the channel picked in the map); in
+  // Single only view A is shown, so a sweeping B stops; a view stopped for the map starts again.
+  const leaveMap = (to: Mode, f: number | null) => {
+    const r = mapReturn.current, h = handles.current[mapSlot];
+    setMapRun(false);
+    setMapStep(null);
+    if (h && (f !== null || r)) h.linkedSet(f !== null ? { freq: snap(f) } : { freq: r!.freq, rate_sel: r!.rate_sel, wide: true });
+    if (to === 'single' && mapSlot === 1) hub.request('close', { slot: 1 }).catch(() => {});
+    if (r?.other !== null && r?.other !== undefined && isDual(to)) restartOther.current = r.other;
+    mapReturn.current = null;
+  };
+  const pickFromMap = (f: number) => {
+    const to = mapReturn.current?.mode ?? 'single';
+    leaveMap(to === 'map' ? 'single' : to, f);
+    updatePrefs({ mode: to === 'map' ? 'single' : to });
+  };
+  useEffect(() => {
+    const o = restartOther.current;
+    if (o === null || !handles.current[o] || !views[o]?.ready || views[o]?.open) return;
+    restartOther.current = null;
+    handles.current[o]!.toggleRun();
+  }, [views, mode]);
+  // the close waits for a Start still running (the engine's queue is serial); on failure the view stays
+  // (its recording note may come after the reply: it goes to a shown view for a few seconds more)
+  const stopAndEnter = (to: Mode, slot: number) => {
+    setConfirm(null);
     leaving.current++;
     const from = mode;
     hub
-      .request('close', { slot: 1 })
-      .then(() => now.current.mode === from && updatePrefs({ mode: 'single' })) // unless the user picked a mode meanwhile
-      .catch((e: Error) => handles.current[1]?.notice(`Could not stop view B: ${e.message}`))
+      .request('close', { slot })
+      .then(() => now.current.mode === from && enter(to, slot)) // unless the user picked a mode meanwhile
+      .catch((e: Error) => handles.current[slot]?.notice(`Could not stop view ${SLOT_NAME[slot]}: ${e.message}`))
       .finally(() => window.setTimeout(() => leaving.current--, 5000));
   };
   // n steps of the selected view along the tuning grid (5 MHz; at the 2.4 GHz edges and channel 14,
@@ -258,6 +307,18 @@ export default function App() {
     updatePrefs({ scale: n }); // a scale the user chose survives restarts (no automatic refit)
   };
 
+  // Map: the sweeping view's adapter; Start opens it (when stopped) and sweeps, Stop ends both
+  const mapDev = inMap ? devices.find((d) => devKey(d) === views[mapSlot]?.selKey) : undefined;
+  const mapPlan = inMap ? sweepPlan(prefs.mapRange, mapDev, prefs.mapGapped) : null;
+  const mapStart = () => {
+    setMapRun(true);
+    if (!views[mapSlot]?.open) handles.current[mapSlot]?.toggleRun();
+  };
+  const mapStop = () => {
+    setMapRun(false);
+    if (views[mapSlot]?.open) hub.request('close', { slot: mapSlot }).catch(() => {});
+  };
+  const mapToggle = () => (mapRun ? mapStop() : mapDev?.can_open && mapStart());
   // keyboard shortcuts (see KEYS)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -268,7 +329,7 @@ export default function App() {
       const typing = !!t.closest('input, select, textarea, [contenteditable="true"]');
       // held keys repeat only tuning and span steps (not Start/Stop, Record, the toggles)
       if (e.repeat && !['ArrowLeft', 'ArrowRight', '[', ']'].includes(k)) return;
-      if (confirmSingle && k === 'Escape') return setConfirmSingle(false);
+      if (confirm && k === 'Escape') return setConfirm(null);
       if (help) {
         // the sheet is modal: it takes only its own keys
         if (k === 'Escape' || k === '?') {
@@ -279,13 +340,21 @@ export default function App() {
       }
       if (e.ctrlKey) {
         if (k.toLowerCase() === 'b' && !e.shiftKey) toggleSidebar();
-        else if (k.toLowerCase() === 'r' && !e.shiftKey && !typing) h?.toggleRec();
+        else if (k.toLowerCase() === 'r' && !e.shiftKey && !typing && !inMap) h?.toggleRec(); // no recording in a sweep
         else return;
         e.preventDefault();
         return;
       }
       if (typing) return; // typing there
       const onButton = !!t.closest('button');
+      if (inMap) {
+        // the sweep tunes: Space starts or stops it
+        if (k === ' ' && !onButton) mapToggle();
+        else if (k === '?') setHelp((v) => !v);
+        else return;
+        e.preventDefault();
+        return;
+      }
       if (k === 'ArrowLeft' || k === 'ArrowRight') stepSel((k === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 4 : 1));
       else if (k === '[' || k === ']') h?.spanStep(k === ']' ? 1 : -1);
       else if (dual && (k === 'a' || k === 'b' || k === 'A' || k === 'B')) setSelSlot(k.toLowerCase() === 'a' ? 0 : 1);
@@ -356,9 +425,9 @@ export default function App() {
         <span className="brand">wsdr-studio</span>
         <div className="seg modes" role="group" aria-label="Mode">
           {MODES.map(([m, label, hint]) => {
-            const off = m !== 'single' && m !== mode && devices.length < 2;
+            const off = m !== mode && (isDual(m) ? devices.length < 2 : m === 'map' && !devices.length);
             return (
-              <button key={m} className={m === mode ? 'on' : ''} aria-pressed={m === mode} disabled={off} title={off ? 'Needs a second adapter' : hint} onClick={() => setMode(m)}>
+              <button key={m} className={m === mode ? 'on' : ''} aria-pressed={m === mode} disabled={off} title={off ? (m === 'map' ? 'Needs an adapter' : 'Needs a second adapter') : hint} onClick={() => setMode(m)}>
                 {label}
               </button>
             );
@@ -369,11 +438,13 @@ export default function App() {
         <button className="icon" aria-label="Keyboard shortcuts (?)" title="Keyboard shortcuts (?)" aria-expanded={help} onClick={() => setHelp((v) => !v)}>
           ?
         </button>
-        {confirmSingle && (
+        {confirm && (
           <div className="confirm" role="alertdialog" aria-label="Leave the two-view mode">
-            View B is {views[1]?.recording ? 'recording' : views[1]?.open ? 'running' : 'starting'}. Single stops it{views[1]?.recording ? ' and saves the recording' : ''}.
-            <button onClick={stopBAndSingle}>Stop B</button>
-            <button autoFocus onClick={() => setConfirmSingle(false)}>
+            View {SLOT_NAME[confirm.slot]} is {views[confirm.slot]?.recording ? 'recording' : views[confirm.slot]?.open ? 'running' : 'starting'}.{' '}
+            {confirm.to === 'map' ? 'Map stops it (it starts again when you leave Map)' : 'Single stops it'}
+            {views[confirm.slot]?.recording ? ' and saves the recording' : ''}.
+            <button onClick={() => stopAndEnter(confirm.to, confirm.slot)}>Stop {SLOT_NAME[confirm.slot]}</button>
+            <button autoFocus onClick={() => setConfirm(null)}>
               Cancel
             </button>
           </div>
@@ -418,6 +489,51 @@ export default function App() {
                     ))}
                   </div>
                 </div>
+              )}
+              {inMap && (
+                <section className="sbgroup" aria-label="Sweep">
+                  <h3>Sweep</h3>
+                  <div className="rbands" role="group" aria-label="Channels swept">
+                    {(['2.4', '5', 'u12', 'u2e', 'u3'] as Range[]).map((r) => (
+                      <button key={r} className={r === prefs.mapRange ? 'on' : ''} aria-pressed={r === prefs.mapRange} onClick={() => updatePrefs({ mapRange: r })} title={RANGES[r].title}>
+                        {RANGES[r].label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="kv">
+                    <span>Listen</span>
+                    <Seg
+                      wide
+                      value={String(prefs.mapDwell)}
+                      options={[['120', '120 ms'], ['250', '250 ms'], ['1000', '1 s']]}
+                      title="How long each step is heard: Wi-Fi beacons come every ~102 ms"
+                      onChange={(v) => updatePrefs({ mapDwell: Number(v) })}
+                    />
+                  </div>
+                  {mapDev && mapDev.max_msps < 40 && (mapDev.gapped_msps ?? 0) >= 40 && (
+                    <button
+                      className={prefs.mapGapped ? 'toggle on' : 'toggle'}
+                      role="switch"
+                      aria-checked={prefs.mapGapped}
+                      onClick={() => updatePrefs({ mapGapped: !prefs.mapGapped })}
+                      title="Over USB 2 this adapter shows 40 MHz only in short slices (gapped): fewer steps, but only part of the time is sampled"
+                    >
+                      <span className="tlabel">
+                        Gapped 40 MHz steps
+                        <small>{prefs.mapGapped ? 'faster, ~21 % sampled' : `continuous ${mapDev.max_msps} MHz steps`}</small>
+                      </span>
+                      <span className="switch" aria-hidden="true">
+                        <i />
+                      </span>
+                    </button>
+                  )}
+                  {mapPlan && (
+                    <span className="note">
+                      {mapPlan.centres.length} steps of {mapPlan.fs / 1e6} MHz. Each: retune ~120 ms, then listen{' '}
+                      {prefs.mapDwell >= 1000 ? '1 s' : `${prefs.mapDwell} ms`}. Leaving Map puts view {SLOT_NAME[mapSlot]} back where it was.
+                    </span>
+                  )}
+                </section>
               )}
               <div className="sbviews" ref={setSbEl} />
               <section className="sbgroup" aria-label="Display">
@@ -499,21 +615,28 @@ export default function App() {
         )}
         <main className="workspace">
           <BandRuler
-            views={views.flatMap((v, i) =>
-              v && (i === 0 || dual) ? [{ slot: i, lo: v.centre - v.fsNow / 2, hi: v.centre + v.fsNow / 2, locked: v.locked, gapped: v.gapped }] : [],
-            )}
+            views={
+              inMap
+                ? mapStep
+                  ? [{ slot: mapSlot, lo: mapStep.c - mapStep.fs / 2, hi: mapStep.c + mapStep.fs / 2, locked: false, gapped: !!mapPlan?.gapped }]
+                  : []
+                : views.flatMap((v, i) =>
+                    v && (i === 0 || dual) ? [{ slot: i, lo: v.centre - v.fsNow / 2, hi: v.centre + v.fsNow / 2, locked: v.locked, gapped: v.gapped }] : [],
+                  )
+            }
+            range={inMap ? prefs.mapRange : undefined}
             sel={sel}
             compact={mode === 'compare'}
             survey={surveyMap}
             linkLabel={dual && locks.freq && distLabel ? distLabel.slice(3) : null}
             otherBusy={dual && views[sel ^ 1]?.recording ? `${SLOT_NAME[sel ^ 1]} paused: recording` : null}
-            onTune={(f) => handles.current[sel]?.tune(f)}
-            onStep={stepSel}
+            onTune={(f) => (inMap ? pickFromMap(f) : handles.current[sel]?.tune(f))}
+            onStep={inMap ? () => {} : stepSel}
             onSelect={setSelSlot}
           />
           <div className={`views ${mode}`}>
             {[0, 1]
-              .filter((i) => i === 0 || dual)
+              .filter((i) => (inMap ? i === mapSlot : i === 0 || dual))
               .map((i) => (
                 <Station
                   key={i}
@@ -531,6 +654,27 @@ export default function App() {
                   otherWaiting={i === 1 && !!(views[0]?.lost || views[0]?.locked)}
                 />
               ))}
+            {inMap && (
+              <SpectralMap
+                key={`${mapSlot}:${prefs.mapRange}:${planId(mapPlan)}`}
+                hub={hub}
+                slot={mapSlot}
+                range={prefs.mapRange}
+                dev={mapDev}
+                open={!!views[mapSlot]?.open}
+                opening={!!views[mapSlot]?.locked && !views[mapSlot]?.open}
+                running={mapRun}
+                dwell={prefs.mapDwell}
+                gappedOk={prefs.mapGapped}
+                prefs={prefs}
+                scale={scale}
+                setScale={setScale}
+                onStart={mapStart}
+                onStop={mapStop}
+                onPick={pickFromMap}
+                onStep={(c, fs) => setMapStep(c === null ? null : { c, fs })}
+              />
+            )}
             {mode === 'panorama' && (
               <Panorama
                 hub={hub}

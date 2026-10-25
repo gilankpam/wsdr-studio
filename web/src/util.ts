@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Formatting, the tuning grid, adapter capabilities and the viewer's preferences.
+import type { Range } from './bands';
 import type { Channel } from './channels';
 import type { Device, Rate } from './protocol';
 
@@ -49,7 +50,8 @@ const PREFS_KEY = 'wsdr-studio.prefs';
 export type Scale = { dbMin: number; dbMax: number; wfFloor: number };
 export type Tuning = { freq: number; rate_sel: number; gain_db: number; agc: boolean };
 export type Locks = { freq: boolean; span: boolean; gain: boolean };
-export type Mode = 'single' | 'panorama' | 'compare';
+export type Mode = 'single' | 'panorama' | 'compare' | 'map';
+export const isDual = (m: Mode) => m === 'panorama' || m === 'compare'; // both views shown
 export type Prefs = {
   smooth: number; wfMode: 'max' | 'avg'; scale: Scale | null; retuned: boolean; fft: number;
   tuning: Tuning | null; tuningB: Tuning | null;  // the last tuning of view A / B
@@ -57,12 +59,13 @@ export type Prefs = {
   offsetTuning: boolean;                          // off: show what the adapter sees (notch included)
   sidebar: boolean;                               // sidebar shown
   showAvg: boolean; showPeak: boolean;            // traces drawn
+  mapRange: Range; mapDwell: number; mapGapped: boolean; // Spectral Map: what it sweeps, ms per step, gapped steps allowed
 };
 export function loadPrefs(): Prefs {
   const d: Prefs = {
     smooth: 0.7, wfMode: 'max', scale: null, retuned: false, fft: 8192, tuning: null, tuningB: null,
     mode: 'single', locks: { freq: true, span: true, gain: false }, ghost: true, offsetTuning: false,
-    sidebar: true, showAvg: true, showPeak: true,
+    sidebar: true, showAvg: true, showPeak: true, mapRange: 'u12', mapDwell: 250, mapGapped: false,
   };
   try {
     const p = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}');

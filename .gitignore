@@ -1,0 +1,5 @@
+build*/
+*.cs16
+*.sigmf-data
+.cache/
+compile_commands.json

@@ -8,8 +8,10 @@
 #include <boost/beast/websocket.hpp>
 
 #include <chrono>
+#include <cstdio>
 #include <deque>
 #include <filesystem>
+#include <random>
 
 namespace studio {
 
@@ -23,6 +25,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr size_t kMaxQueuedBinary = 32;
+constexpr size_t kMaxQueuedText = 1024; // a client this far behind is dropped
 
 bool host_ok(const ServerOptions &o, beast::string_view host) {
   const std::string p = ":" + std::to_string(o.port);
@@ -41,26 +44,42 @@ bool origin_ok(const ServerOptions &o, beast::string_view origin) {
   return false;
 }
 
-bool token_ok(const ServerOptions &o, beast::string_view target) {
-  const auto q = target.find('?');
-  if (q == beast::string_view::npos || o.token.empty())
+bool same(const std::string &a, const std::string &b) { // constant time for equal lengths
+  if (a.size() != b.size() || a.empty())
     return false;
-  std::string want = "t=" + o.token, got;
-  for (size_t i = q + 1; i <= target.size();) {
-    size_t e = target.find('&', i);
+  unsigned char diff = 0;
+  for (size_t i = 0; i < a.size(); i++)
+    diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+  return diff == 0;
+}
+
+// Value of `key` in a "a=1&b=2" (sep '&') or "a=1; b=2" (sep ';') list.
+std::string param(beast::string_view list, const std::string &key, char sep) {
+  for (size_t i = 0; i <= list.size();) {
+    size_t e = list.find(sep, i);
     if (e == beast::string_view::npos)
-      e = target.size();
-    const auto kv = target.substr(i, e - i);
-    if (kv.substr(0, 2) == "t=")
-      got = std::string(kv);
+      e = list.size();
+    auto kv = list.substr(i, e - i);
+    while (!kv.empty() && kv.front() == ' ')
+      kv.remove_prefix(1);
+    if (kv.size() > key.size() && kv.substr(0, key.size()) == key && kv[key.size()] == '=')
+      return std::string(kv.substr(key.size() + 1));
     i = e + 1;
   }
-  if (got.size() != want.size())
-    return false;
-  unsigned char diff = 0; // constant time
-  for (size_t i = 0; i < want.size(); i++)
-    diff |= static_cast<unsigned char>(got[i] ^ want[i]);
-  return diff == 0;
+  return {};
+}
+
+std::string query(beast::string_view target) {
+  const auto q = target.find('?');
+  return q == beast::string_view::npos ? std::string() : std::string(target.substr(q + 1));
+}
+
+std::string cookie_name(const ServerOptions &o) { return "wsdr_" + std::to_string(o.port); }
+
+bool token_ok(const ServerOptions &o, beast::string_view target) { return same(param(query(target), "t", '&'), o.token); }
+
+bool cookie_ok(const ServerOptions &o, beast::string_view cookies) {
+  return same(param(cookies, cookie_name(o), ';'), o.token);
 }
 
 const char *mime(const std::string &ext) {
@@ -99,6 +118,12 @@ public:
   void send(std::shared_ptr<const std::string> text, std::shared_ptr<const std::vector<uint8_t>> bin) {
     if (_closed)
       return;
+    if (text && _q.size() >= kMaxQueuedText) {
+      close();
+      beast::error_code ignored;
+      beast::get_lowest_layer(_ws).socket().close(ignored);
+      return;
+    }
     if (bin && _queued_bin >= kMaxQueuedBinary) {
       _srv.count_drop();
       return;
@@ -203,7 +228,8 @@ private:
     res.set(http::field::content_type, type);
     res.set(http::field::cache_control, "no-store");
     res.keep_alive(_req.keep_alive());
-    res.body() = std::move(body);
+    if (_req.method() != http::verb::head) // a HEAD response never carries a body
+      res.body() = std::move(body);
     res.prepare_payload();
     reply(std::move(res));
   }
@@ -215,15 +241,33 @@ private:
     const std::string target(_req.target());
     const std::string path = target.substr(0, target.find('?'));
     if (websocket::is_upgrade(_req)) {
-      if (path != "/ws" || !token_ok(o, _req.target()) || !origin_ok(o, _req[http::field::origin]))
+      const bool authed = token_ok(o, _req.target()) || cookie_ok(o, _req[http::field::cookie]);
+      if (path != "/ws" || !authed || !origin_ok(o, _req[http::field::origin]))
         return text(http::status::forbidden, "forbidden\n");
       std::make_shared<WsClient>(_stream.release_socket(), _srv)->accept(std::move(_req));
       return;
     }
-    if (_req.method() != http::verb::get && _req.method() != http::verb::head)
+    if (_req.method() != http::verb::get)
       return text(http::status::method_not_allowed, "GET only\n");
     if (path == "/api/hello")
       return text(http::status::ok, "{\"app\":\"wsdr-studio\",\"protocol\":1}\n", "application/json");
+    if (path == "/api/launch-key") {
+      if (!token_ok(o, _req.target()))
+        return text(http::status::forbidden, "forbidden\n");
+      return text(http::status::ok, "{\"key\":\"" + _srv.new_launch_key() + "\"}\n", "application/json");
+    }
+    if (path == "/" && !param(query(_req.target()), "k", '&').empty()) {
+      // Launch key -> session cookie, then a clean URL (the key is single-use).
+      if (!_srv.consume_launch_key(param(query(_req.target()), "k", '&')))
+        return text(http::status::forbidden, "This link has expired. Start wsdr-studio again.\n");
+      http::response<http::string_body> res{http::status::found, _req.version()};
+      res.set(http::field::location, "/");
+      res.set(http::field::set_cookie, cookie_name(o) + "=" + o.token + "; HttpOnly; SameSite=Strict; Path=/");
+      res.set(http::field::cache_control, "no-store");
+      res.keep_alive(_req.keep_alive());
+      res.prepare_payload();
+      return reply(std::move(res));
+    }
     if (path.find("..") != std::string::npos || path.find('%') != std::string::npos ||
         path.find('\\') != std::string::npos || path.empty() || path[0] != '/')
       return text(http::status::bad_request, "bad path\n");
@@ -293,6 +337,30 @@ bool Server::listen(std::string &err) {
   };
   (*accept)();
   return true;
+}
+
+std::string Server::new_launch_key() {
+  std::random_device rd;
+  char b[33];
+  for (int i = 0; i < 16; i++)
+    std::snprintf(b + 2 * i, 3, "%02x", rd() & 0xff);
+  std::lock_guard<std::mutex> l(_km);
+  const auto now = std::chrono::steady_clock::now();
+  std::erase_if(_keys, [&](const auto &k) { return now - k.second > std::chrono::seconds(60); });
+  _keys.emplace_back(b, now);
+  return b;
+}
+
+bool Server::consume_launch_key(const std::string &key) {
+  std::lock_guard<std::mutex> l(_km);
+  const auto now = std::chrono::steady_clock::now();
+  for (auto it = _keys.begin(); it != _keys.end(); ++it)
+    if (same(it->first, key)) {
+      const bool fresh = now - it->second <= std::chrono::seconds(60);
+      _keys.erase(it);
+      return fresh;
+    }
+  return false;
 }
 
 void Server::add(const ClientPtr &c) {

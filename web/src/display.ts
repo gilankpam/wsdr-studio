@@ -6,11 +6,23 @@ import { channelsIn } from './channels';
 import { TURBO } from './colormap';
 import type { Row } from './protocol';
 
-export type DisplayOpts = { dbMin: number; dbMax: number; wfMode: 'max' | 'avg'; wfPath: number; smooth: number };
+export type DisplayOpts = {
+  dbMin: number; dbMax: number; // spectrum scale (dBFS)
+  wfLift: number;               // the waterfall's colour scale starts this many dB above dbMin
+  wfMode: 'max' | 'avg';
+  wfPath: number;
+  smooth: number;               // 0 = off .. 0.9 = heavy averaging of the average trace across rows
+  rowsPerS: number;             // for the waterfall's time ticks
+  marker: number | null;        // requested frequency (Hz), drawn when it is not the band centre
+  overlay: string | null;       // message over the plot (stopped, starting, ...)
+};
 
-const COLORS = ['#4fc3f7', '#ff8a65']; // path A, path B
-const AXIS_W = 46; // px (CSS) reserved for the dB axis on the left
-const AXIS_H = 22; // px (CSS) for the frequency axis under the spectrum
+const AVG = ['#4fc3f7', '#ff8a65']; // average trace, path A / B
+const PEAK = ['#8d99a8', '#c9a28f']; // peak trace, path A / B
+const AXIS_W = 46; // CSS px reserved on the left (dB axis / colour bar + time ticks)
+const AXIS_H = 22; // CSS px for the frequency axis under the spectrum
+const TOP = 16;    // CSS px headroom above the spectrum (the "dBFS" caption sits there)
+const STALE_MS = 1000;
 
 export class Display {
   private sp: HTMLCanvasElement;
@@ -19,37 +31,50 @@ export class Display {
   private wfCtx: CanvasRenderingContext2D;
   private last: (Row | null)[] = [null, null];
   private hold: (Float32Array | null)[] = [null, null];
-  private dirty = false;
-  private raf = 0;
-  private hover: { x: number; y: number } | null = null;
-  private dpr = 1;
-  private seen = 0;
-  // smooth: exponential averaging of the average trace across rows (0 = off .. 0.9 = heavy), like
-  // gqrx's FFT averaging; the waterfall stays unsmoothed.
-  opts: DisplayOpts = { dbMin: -110, dbMax: -20, wfMode: 'max', wfPath: 0, smooth: 0.7 };
   private smoothed: (Float32Array | null)[] = [null, null];
+  private wfSpan = '';
+  private lastRowAt = 0;
+  private seen = 0;
+  private dirty = true;
+  private raf = 0;
+  private hover: number | null = null; // CSS x
+  private dpr = 1;
+  private off: (() => void)[] = [];
+  opts: DisplayOpts = {
+    dbMin: -110, dbMax: -20, wfLift: 0, wfMode: 'max', wfPath: 0, smooth: 0.7, rowsPerS: 25, marker: null, overlay: null,
+  };
   onRetune: (freq: number) => void = () => {};
 
   constructor(sp: HTMLCanvasElement, wf: HTMLCanvasElement) {
     this.sp = sp;
     this.wf = wf;
     this.spCtx = sp.getContext('2d')!;
-    this.wfCtx = wf.getContext('2d', { willReadFrequently: false })!;
+    this.wfCtx = wf.getContext('2d')!;
+    const on = <K extends keyof HTMLElementEventMap>(el: HTMLElement, ev: K, fn: (e: HTMLElementEventMap[K]) => void) => {
+      el.addEventListener(ev, fn);
+      this.off.push(() => el.removeEventListener(ev, fn));
+    };
     for (const c of [sp, wf]) {
-      c.addEventListener('mousemove', (e) => {
-        this.hover = { x: e.offsetX, y: c === sp ? e.offsetY : -1 };
+      on(c, 'mousemove', (e) => {
+        this.hover = e.offsetX;
         this.dirty = true;
       });
-      c.addEventListener('mouseleave', () => {
+      on(c, 'mouseleave', () => {
         this.hover = null;
         this.dirty = true;
       });
-      c.addEventListener('dblclick', (e) => {
+      on(c, 'dblclick', (e) => {
         const f = this.freqAt(e.offsetX);
         if (f !== null) this.onRetune(Math.round(f / 1e5) * 1e5);
       });
     }
+    let wasStale = false;
     const loop = () => {
+      const stale = this.isStale();
+      if (stale !== wasStale) {
+        wasStale = stale;
+        this.dirty = true;
+      }
       if (this.dirty) this.drawSpectrum();
       this.raf = requestAnimationFrame(loop);
     };
@@ -58,83 +83,133 @@ export class Display {
 
   destroy() {
     cancelAnimationFrame(this.raf);
+    for (const f of this.off) f();
+    this.off = [];
   }
 
+  private isStale() {
+    return this.seen > 0 && performance.now() - this.lastRowAt > STALE_MS;
+  }
+
+  // Layout change (window resize, a strip appearing): keep the waterfall's history, rescaled to the
+  // new width and anchored at the top (newest rows).
   resize() {
+    const oldDpr = this.dpr;
     this.dpr = window.devicePixelRatio || 1;
-    for (const c of [this.sp, this.wf]) {
-      const w = Math.max(1, Math.round(c.clientWidth * this.dpr));
-      const h = Math.max(1, Math.round(c.clientHeight * this.dpr));
-      if (c.width !== w || c.height !== h) {
-        c.width = w;
-        c.height = h;
+    let keep: HTMLCanvasElement | null = null;
+    const wf = this.wf;
+    const w = Math.max(1, Math.round(wf.clientWidth * this.dpr)), h = Math.max(1, Math.round(wf.clientHeight * this.dpr));
+    if ((wf.width !== w || wf.height !== h) && wf.width > 1 && wf.height > 1) {
+      keep = document.createElement('canvas');
+      keep.width = wf.width;
+      keep.height = wf.height;
+      keep.getContext('2d')!.drawImage(wf, 0, 0);
+    }
+    for (const c of [this.sp, wf]) {
+      const cw = Math.max(1, Math.round(c.clientWidth * this.dpr));
+      const ch = Math.max(1, Math.round(c.clientHeight * this.dpr));
+      if (c.width !== cw || c.height !== ch) {
+        c.width = cw;
+        c.height = ch;
       }
     }
     this.wfCtx.fillStyle = '#000';
-    this.wfCtx.fillRect(0, 0, this.wf.width, this.wf.height);
+    this.wfCtx.fillRect(0, 0, wf.width, wf.height);
+    if (keep) {
+      const oL = AXIS_W * oldDpr, L = this.plotLeft();
+      const rows = Math.min(keep.height, wf.height);
+      this.wfCtx.drawImage(keep, oL, 0, keep.width - oL, rows, L, 0, wf.width - L, rows);
+    }
+    this.drawGutter();
     this.dirty = true;
   }
 
+  // New stream (Start): forget traces and wipe the waterfall.
   clear() {
     this.seen = 0;
     this.last = [null, null];
     this.hold = [null, null];
     this.smoothed = [null, null];
+    this.wfSpan = '';
     this.wfCtx.fillStyle = '#000';
     this.wfCtx.fillRect(0, 0, this.wf.width, this.wf.height);
+    this.drawGutter();
     this.dirty = true;
   }
 
-  // A colour/plot range from the newest rows: a little under the noise floor (10th percentile of the
-  // average) to a little over the strongest peak-hold value.
-  suggestRange(): { dbMin: number; dbMax: number } | null {
+  // Stream ended (Stop): keep the picture, dimmed, for a last look.
+  freeze() {
+    this.seen = 0; // not "stale": stopped on purpose
+    this.wfCtx.fillStyle = 'rgba(0,0,0,0.45)';
+    const L = this.plotLeft();
+    this.wfCtx.fillRect(L, 0, this.wf.width - L, this.wf.height);
+    this.dirty = true;
+  }
+
+  // Drop one path's traces (e.g. after switching A+B -> A).
+  dropPath(p: number) {
+    this.last[p] = null;
+    this.hold[p] = null;
+    this.smoothed[p] = null;
+    this.dirty = true;
+  }
+
+  setOpts(o: Partial<DisplayOpts>) {
+    const rescale = o.dbMin !== undefined || o.dbMax !== undefined || o.wfLift !== undefined || o.rowsPerS !== undefined;
+    this.opts = { ...this.opts, ...o };
+    if (rescale) this.drawGutter();
+    this.dirty = true;
+  }
+
+  rowsSeen() {
+    return this.seen;
+  }
+
+  // Scales fitted to the signal: the spectrum from a little under the average noise floor to a little
+  // over the strongest peak; the waterfall lifted to the floor of the data it actually draws.
+  suggestRange(): { dbMin: number; dbMax: number; wfLift: number } | null {
     const r = this.last[0] ?? this.last[1];
     if (!r) return null;
-    const sorted = Float32Array.from(r.avg).sort();
-    const floor = sorted[Math.floor(sorted.length * 0.1)];
+    const pct = (a: Float32Array, q: number) => Float32Array.from(a).sort()[Math.floor(a.length * q)];
+    const floor = pct(r.avg, 0.1);
     let peak = -200;
     for (const h of this.hold) if (h) for (let i = 0; i < h.length; i++) peak = Math.max(peak, h[i]);
     const dbMin = Math.floor((floor - 8) / 5) * 5;
     const dbMax = Math.max(dbMin + 30, Math.ceil((peak + 5) / 5) * 5);
-    return { dbMin, dbMax };
-  }
-
-  rowsSeen(): number {
-    return this.seen;
-  }
-
-  setOpts(o: Partial<DisplayOpts>) {
-    this.opts = { ...this.opts, ...o };
-    this.dirty = true;
+    const wfFloor = pct(this.opts.wfMode === 'max' ? r.max : r.avg, 0.2);
+    const wfLift = Math.max(0, Math.min(dbMax - dbMin - 10, Math.round(wfFloor - 2 - dbMin)));
+    return { dbMin, dbMax, wfLift };
   }
 
   push(r: Row) {
     this.seen++;
+    this.lastRowAt = performance.now();
     const prev = this.last[r.path];
     if (!prev || prev.bins !== r.bins || prev.f0 !== r.f0 || prev.df !== r.df) {
       this.hold[r.path] = null;
       this.smoothed[r.path] = null;
     }
-    const sm = this.smoothed[r.path];
-    const a = this.opts.smooth;
-    if (!sm || a <= 0) this.smoothed[r.path] = Float32Array.from(r.avg);
-    else for (let i = 0; i < r.bins; i++) sm[i] = a * sm[i] + (1 - a) * r.avg[i];
     this.last[r.path] = r;
     const h = this.hold[r.path];
     if (!h) this.hold[r.path] = Float32Array.from(r.max);
     else for (let i = 0; i < r.bins; i++) h[i] = Math.max(h[i] - 0.4, r.max[i]);
+    const sm = this.smoothed[r.path];
+    const a = this.opts.smooth;
+    if (!sm || a <= 0) this.smoothed[r.path] = Float32Array.from(r.avg);
+    else for (let i = 0; i < r.bins; i++) sm[i] = a * sm[i] + (1 - a) * r.avg[i];
     if (r.path === this.opts.wfPath || !this.last[this.opts.wfPath]) this.drawWaterfallRow(r);
     this.dirty = true;
   }
 
-  // frequency span shown (from the newest row)
   private span(): { f0: number; f1: number } | null {
     const r = this.last[0] ?? this.last[1];
     if (!r) return null;
     return { f0: r.f0 - r.df / 2, f1: r.f0 + r.df * (r.bins - 0.5) };
   }
 
-  private plotLeft() { return AXIS_W * this.dpr; }
+  private plotLeft() {
+    return AXIS_W * this.dpr;
+  }
 
   private freqAt(cssX: number): number | null {
     const s = this.span();
@@ -145,21 +220,77 @@ export class Display {
     return s.f0 + (s.f1 - s.f0) * (x / w);
   }
 
+  private colour(db: number) {
+    const lo = this.opts.dbMin + this.opts.wfLift, hi = this.opts.dbMax;
+    return TURBO[Math.max(0, Math.min(255, Math.round(((db - lo) * 255) / Math.max(1, hi - lo))))];
+  }
+
+  // Left gutter of the waterfall: colour bar (scale) and time ticks.
+  private drawGutter() {
+    const c = this.wfCtx, d = this.dpr, H = this.wf.height, L = this.plotLeft();
+    c.fillStyle = '#0b0e13';
+    c.fillRect(0, 0, L, H);
+    const lo = this.opts.dbMin + this.opts.wfLift, hi = this.opts.dbMax;
+    const barW = Math.round(6 * d), barH = Math.min(H - 20 * d, 160 * d), y0 = 6 * d;
+    if (barH > 10) {
+      const img = c.createImageData(barW, Math.round(barH));
+      const px = new Uint32Array(img.data.buffer);
+      for (let y = 0; y < img.height; y++) {
+        const v = TURBO[Math.round(255 * (1 - y / Math.max(1, img.height - 1)))];
+        for (let x = 0; x < barW; x++) px[y * barW + x] = v;
+      }
+      c.putImageData(img, Math.round(4 * d), Math.round(y0));
+    }
+    c.fillStyle = '#7d8896';
+    c.font = `${10 * d}px system-ui, sans-serif`;
+    c.textAlign = 'left';
+    c.textBaseline = 'top';
+    c.fillText(`${Math.round(hi)}`, 13 * d, y0);
+    c.textBaseline = 'bottom';
+    c.fillText(`${Math.round(lo)}`, 13 * d, y0 + barH);
+    // time ticks: one row = one device pixel
+    const pxPerS = this.opts.rowsPerS;
+    const step = pxPerS * 10 > 60 * d ? 10 : 30;
+    c.textAlign = 'right';
+    c.textBaseline = 'middle';
+    for (let s = step; s * pxPerS < H; s += step) {
+      const y = s * pxPerS;
+      if (y < y0 + barH + 12 * d) continue;
+      c.fillRect(L - 5 * d, y, 4 * d, 1);
+      c.fillText(`−${s} s`, L - 7 * d, y);
+    }
+  }
+
   private drawWaterfallRow(r: Row) {
     const c = this.wfCtx, W = this.wf.width, H = this.wf.height, L = this.plotLeft();
     const w = W - L;
     if (w <= 0) return;
     c.drawImage(this.wf, L, 0, w, H - 1, L, 1, w, H - 1);
+    const span = `${((r.f0 + r.df * (r.bins / 2 - 0.5)) / 1e6).toFixed(1)} MHz · ${((r.df * r.bins) / 1e6).toFixed(1)} MHz span`;
+    if (this.wfSpan && span !== this.wfSpan) {
+      // a retune or span change: a separator with the new setting, so old rows are not misread
+      const d = this.dpr;
+      c.fillStyle = '#ffffff';
+      c.fillRect(L, 0, w, Math.max(1, Math.round(d)));
+      c.font = `${11 * d}px system-ui, sans-serif`;
+      c.textAlign = 'left';
+      c.textBaseline = 'top';
+      c.fillStyle = 'rgba(0,0,0,0.6)';
+      c.fillRect(L + 4 * d, 2 * d, c.measureText(span).width + 8 * d, 15 * d);
+      c.fillStyle = '#ffffff';
+      c.fillText(span, L + 8 * d, 4 * d);
+      this.wfSpan = span;
+      return;
+    }
+    this.wfSpan = span;
     const img = c.createImageData(w, 1);
     const px = new Uint32Array(img.data.buffer);
     const src = this.opts.wfMode === 'max' ? r.max : r.avg;
-    const { dbMin, dbMax } = this.opts;
-    const k = 255 / Math.max(1, dbMax - dbMin);
     for (let x = 0; x < w; x++) {
       const b0 = Math.floor((x * r.bins) / w), b1 = Math.max(b0 + 1, Math.floor(((x + 1) * r.bins) / w));
       let v = -1e9;
       for (let b = b0; b < b1; b++) v = Math.max(v, src[b]);
-      px[x] = TURBO[Math.max(0, Math.min(255, Math.round((v - dbMin) * k)))];
+      px[x] = this.colour(v);
     }
     c.putImageData(img, L, 0);
   }
@@ -167,114 +298,159 @@ export class Display {
   private drawSpectrum() {
     this.dirty = false;
     const c = this.spCtx, W = this.sp.width, H = this.sp.height, d = this.dpr, L = this.plotLeft();
-    const B = AXIS_H * d;
+    const B = AXIS_H * d, T = TOP * d;
     const ph = H - B;
     c.fillStyle = '#0b0e13';
     c.fillRect(0, 0, W, H);
     const { dbMin, dbMax } = this.opts;
-    const yOf = (db: number) => ph * (1 - (db - dbMin) / (dbMax - dbMin));
+    const yOf = (db: number) => T + (ph - T) * (1 - (db - dbMin) / (dbMax - dbMin));
     c.font = `${11 * d}px system-ui, sans-serif`;
     c.textBaseline = 'middle';
-    // dB grid
+    // dB grid + axis caption
     const step = dbMax - dbMin > 60 ? 10 : 5;
     c.strokeStyle = '#1f2630';
     c.fillStyle = '#7d8896';
     c.lineWidth = 1;
+    c.textAlign = 'right';
     for (let db = Math.ceil(dbMin / step) * step; db <= dbMax; db += step) {
       const y = Math.round(yOf(db)) + 0.5;
       c.beginPath();
       c.moveTo(L, y);
       c.lineTo(W, y);
       c.stroke();
-      c.textAlign = 'right';
       c.fillText(`${db}`, L - 6 * d, y);
     }
-    const s = this.span();
-    if (!s) {
-      c.textAlign = 'center';
-      c.fillText('no signal', (L + W) / 2, ph / 2);
-      return;
-    }
-    const w = W - L;
-    const xOf = (f: number) => L + ((f - s.f0) / (s.f1 - s.f0)) * w;
-    // frequency grid + labels
-    const spanMHz = (s.f1 - s.f0) / 1e6;
-    const fstep = spanMHz > 30 ? 5 : spanMHz > 12 ? 2 : spanMHz > 6 ? 1 : 0.5;
-    c.textAlign = 'center';
-    for (let f = Math.ceil(s.f0 / 1e6 / fstep) * fstep; f <= s.f1 / 1e6; f += fstep) {
-      const x = Math.round(xOf(f * 1e6)) + 0.5;
-      c.strokeStyle = '#1f2630';
-      c.beginPath();
-      c.moveTo(x, 0);
-      c.lineTo(x, ph);
-      c.stroke();
-      c.fillStyle = '#7d8896';
-      c.fillText(f.toFixed(fstep < 1 ? 1 : 0), x, ph + B / 2);
-    }
-    // Wi-Fi channel markers (20 MHz channels)
-    c.fillStyle = '#5c6b7a';
+    c.textAlign = 'left';
     c.textBaseline = 'top';
-    for (const ch of channelsIn(s.f0, s.f1)) {
-      const x = Math.round(xOf(ch.centre)) + 0.5;
-      c.strokeStyle = '#2b3a4a';
-      c.setLineDash([3 * d, 3 * d]);
-      c.beginPath();
-      c.moveTo(x, 0);
-      c.lineTo(x, ph);
-      c.stroke();
-      c.setLineDash([]);
-      c.fillText(`ch ${ch.label}`, x, 3 * d);
-    }
+    c.fillText('dBFS', 4 * d, 1 * d);
     c.textBaseline = 'middle';
-    // traces: max-hold (thin) then average
-    for (let p = 0; p < 2; p++) {
-      const r = this.last[p];
-      if (!r) continue;
-      const draw = (arr: Float32Array, alpha: number, lw: number) => {
-        c.strokeStyle = COLORS[p];
-        c.globalAlpha = alpha;
-        c.lineWidth = lw * d;
+    const s = this.span();
+    const stale = this.isStale();
+    if (s) {
+      const w = W - L;
+      const xOf = (f: number) => L + ((f - s.f0) / (s.f1 - s.f0)) * w;
+      // frequency grid + labels
+      const spanMHz = (s.f1 - s.f0) / 1e6;
+      const fstep = spanMHz > 30 ? 5 : spanMHz > 12 ? 2 : spanMHz > 6 ? 1 : 0.5;
+      c.textAlign = 'center';
+      for (let f = Math.ceil(s.f0 / 1e6 / fstep) * fstep; f <= s.f1 / 1e6; f += fstep) {
+        const x = Math.round(xOf(f * 1e6)) + 0.5;
+        c.strokeStyle = '#1f2630';
         c.beginPath();
-        const n = r.bins;
-        for (let x = 0; x < w; x++) {
-          const b0 = Math.floor((x * n) / w), b1 = Math.max(b0 + 1, Math.floor(((x + 1) * n) / w));
-          let v = -1e9;
-          for (let b = b0; b < b1; b++) v = Math.max(v, arr[b]);
-          const y = Math.max(0, Math.min(ph, yOf(v)));
-          if (x === 0) c.moveTo(L + x, y);
-          else c.lineTo(L + x, y);
-        }
+        c.moveTo(x, T);
+        c.lineTo(x, ph);
         c.stroke();
-        c.globalAlpha = 1;
-      };
-      const h = this.hold[p];
-      if (h) draw(h, 0.35, 1);
-      draw(this.smoothed[p] ?? r.avg, 1, 1.2);
-    }
-    // hover readout
-    if (this.hover) {
-      const f = this.freqAt(this.hover.x);
-      const r = this.last[0] ?? this.last[1];
-      if (f !== null && r) {
-        const x = this.hover.x * d;
-        c.strokeStyle = '#e0e6ee';
-        c.globalAlpha = 0.5;
-        c.beginPath();
-        c.moveTo(x + 0.5, 0);
-        c.lineTo(x + 0.5, ph);
-        c.stroke();
-        c.globalAlpha = 1;
-        const b = Math.max(0, Math.min(r.bins - 1, Math.round((f - r.f0) / r.df)));
-        const txt = `${(f / 1e6).toFixed(3)} MHz   ${r.avg[b].toFixed(1)} dBFS`;
-        c.font = `${12 * d}px system-ui, sans-serif`;
-        const tw = c.measureText(txt).width + 12 * d;
-        const tx = Math.min(W - tw, x + 8 * d);
-        c.fillStyle = 'rgba(20,26,34,0.9)';
-        c.fillRect(tx, 6 * d, tw, 20 * d);
-        c.fillStyle = '#e0e6ee';
-        c.textAlign = 'left';
-        c.fillText(txt, tx + 6 * d, 16 * d);
+        c.fillStyle = '#7d8896';
+        c.fillText(f.toFixed(fstep < 1 ? 1 : 0), x, ph + B / 2);
       }
+      // Wi-Fi channel markers (20 MHz channels)
+      c.fillStyle = '#5c6b7a';
+      c.textBaseline = 'top';
+      for (const ch of channelsIn(s.f0, s.f1)) {
+        const x = Math.round(xOf(ch.centre)) + 0.5;
+        c.strokeStyle = '#2b3a4a';
+        c.setLineDash([3 * d, 3 * d]);
+        c.beginPath();
+        c.moveTo(x, T);
+        c.lineTo(x, ph);
+        c.stroke();
+        c.setLineDash([]);
+        c.fillText(`ch ${ch.label}`, x, T + 2 * d);
+      }
+      // requested frequency, when the hardware centre differs (5 MHz synthesizer grid)
+      const m = this.opts.marker;
+      const mid = (s.f0 + s.f1) / 2;
+      if (m !== null && m > s.f0 && m < s.f1 && Math.abs(m - mid) > (s.f1 - s.f0) / 200) {
+        const x = Math.round(xOf(m)) + 0.5;
+        c.strokeStyle = '#ffd54f';
+        c.setLineDash([6 * d, 4 * d]);
+        c.beginPath();
+        c.moveTo(x, T);
+        c.lineTo(x, ph);
+        c.stroke();
+        c.setLineDash([]);
+      }
+      c.globalAlpha = stale ? 0.3 : 1;
+      for (let p = 0; p < 2; p++) {
+        const r = this.last[p];
+        if (!r) continue;
+        const draw = (arr: Float32Array, colour: string, lw: number) => {
+          c.strokeStyle = colour;
+          c.lineWidth = lw * d;
+          c.beginPath();
+          const n = r.bins;
+          for (let x = 0; x < w; x++) {
+            const b0 = Math.floor((x * n) / w), b1 = Math.max(b0 + 1, Math.floor(((x + 1) * n) / w));
+            let v = -1e9;
+            for (let b = b0; b < b1; b++) v = Math.max(v, arr[b]);
+            const y = Math.max(T, Math.min(ph, yOf(v)));
+            if (x === 0) c.moveTo(L + x, y);
+            else c.lineTo(L + x, y);
+          }
+          c.stroke();
+        };
+        const h = this.hold[p];
+        if (h) draw(h, PEAK[p], 1);
+        draw(this.smoothed[p] ?? r.avg, AVG[p], 1.3);
+      }
+      c.globalAlpha = 1;
+      // legend
+      const both = !!(this.last[0] && this.last[1]);
+      const pa = this.last[0] ? 0 : 1;
+      const items: [string, string][] = both
+        ? [['A average', AVG[0]], ['B average', AVG[1]], ['peak', PEAK[0]]]
+        : [['average', AVG[pa]], ['peak', PEAK[pa]]];
+      c.font = `${11 * d}px system-ui, sans-serif`;
+      c.textBaseline = 'middle';
+      c.textAlign = 'left';
+      let lx = W - 8 * d;
+      for (let i = items.length - 1; i >= 0; i--) {
+        const [label, col] = items[i];
+        lx -= c.measureText(label).width + 26 * d;
+        c.fillStyle = col;
+        c.fillRect(lx, T + 18 * d, 14 * d, 2 * d);
+        c.fillStyle = '#aab4c0';
+        c.fillText(label, lx + 18 * d, T + 19 * d);
+      }
+      // hover readout
+      if (this.hover !== null && !stale) {
+        const f = this.freqAt(this.hover);
+        const r = this.last[0] ?? this.last[1];
+        if (f !== null && r) {
+          const x = this.hover * d;
+          c.strokeStyle = '#e0e6ee';
+          c.globalAlpha = 0.5;
+          c.beginPath();
+          c.moveTo(x + 0.5, T);
+          c.lineTo(x + 0.5, ph);
+          c.stroke();
+          c.globalAlpha = 1;
+          const b = Math.max(0, Math.min(r.bins - 1, Math.round((f - r.f0) / r.df)));
+          const sm = this.smoothed[r.path] ?? r.avg;
+          const txt = `${(f / 1e6).toFixed(3)} MHz   ${sm[b].toFixed(1)} dBFS`;
+          c.font = `${12 * d}px system-ui, sans-serif`;
+          const tw = c.measureText(txt).width + 12 * d;
+          const tx = Math.min(W - tw, x + 8 * d);
+          c.fillStyle = 'rgba(20,26,34,0.92)';
+          c.fillRect(tx, T + 30 * d, tw, 20 * d);
+          c.fillStyle = '#e0e6ee';
+          c.textAlign = 'left';
+          c.fillText(txt, tx + 6 * d, T + 40 * d);
+        }
+      }
+    }
+    // overlay message: explicit (stopped/starting) or stale data
+    const msg = this.opts.overlay ?? (stale ? 'No data from the adapter' : null);
+    if (msg) {
+      c.font = `${14 * d}px system-ui, sans-serif`;
+      const tw = c.measureText(msg).width + 28 * d;
+      const cx = (L + W) / 2, cy = (T + ph) / 2;
+      c.fillStyle = 'rgba(19,24,32,0.92)';
+      c.fillRect(cx - tw / 2, cy - 16 * d, tw, 32 * d);
+      c.fillStyle = '#d6dde6';
+      c.textAlign = 'center';
+      c.textBaseline = 'middle';
+      c.fillText(msg, cx, cy);
     }
   }
 }

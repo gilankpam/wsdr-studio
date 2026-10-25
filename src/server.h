@@ -2,8 +2,11 @@
 // HTTP + WebSocket server (Boost.Beast, one I/O thread) for the web UI.
 //
 // Security model: local only. Binds 127.0.0.1. Every request must carry Host 127.0.0.1:PORT or
-// localhost:PORT (DNS rebinding). The WebSocket /ws additionally needs the per-launch token (?t=...)
-// and, when a browser sends one, an Origin from the same two hosts (cross-site WebSocket). Static files
+// localhost:PORT (DNS rebinding). The WebSocket /ws needs the session token, either as the cookie
+// wsdr_PORT (browsers) or as ?t=TOKEN (scripts), plus, when a browser sends one, an Origin from the same
+// two hosts (cross-site WebSocket). The session token never appears on a command line: the browser is
+// started with a single-use launch key (/?k=KEY, valid 60 s), exchanged for the HttpOnly SameSite=Strict
+// cookie on first load. /api/launch-key?t=TOKEN mints a new key (used by a second launch). Static files
 // come from one directory, canonicalised; nothing else on disk is reachable.
 //
 // Thread safety: broadcast_* and send_text may be called from any thread; they post to the I/O thread.
@@ -11,6 +14,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -45,6 +49,10 @@ public:
   bool listen(std::string &err);
   uint16_t port() const { return _o.port; }
 
+  // A single-use key for /?k=KEY (thread-safe).
+  std::string new_launch_key();
+  bool consume_launch_key(const std::string &k);
+
   void broadcast_binary(std::vector<uint8_t> &&frame);
   void broadcast_text(std::string text);
   void send_text(const std::weak_ptr<WsClient> &c, std::string text);
@@ -66,6 +74,8 @@ private:
   std::unique_ptr<Impl> _impl;
   std::mutex _cm;
   std::set<ClientPtr> _clients;
+  std::mutex _km;
+  std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> _keys;
   std::atomic<size_t> _nclients{0};
   std::atomic<uint64_t> _dropped{0};
 };

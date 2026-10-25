@@ -23,7 +23,11 @@ export function channelsIn(lo: number, hi: number): Channel[] {
   return CHANNELS.filter((c) => c.width === 20 && c.centre >= lo && c.centre <= hi);
 }
 
-// The picker entry matching a centre frequency and width, if any.
+// The picker entry for a centre frequency, preferring the given width (a 20 MHz channel can be
+// viewed with a 40 MHz span and the other way round).
 export function channelAt(freq: number, width: number): Channel | undefined {
-  return CHANNELS.find((c) => c.width === width && Math.abs(c.centre - freq) < 1e3);
+  const at = CHANNELS.filter((c) => Math.abs(c.centre - freq) < 1e3);
+  return at.find((c) => c.width === width) ?? at[0];
 }
+
+export const channelKey = (c: Channel) => `${c.band}:${c.width}:${c.ch}`;

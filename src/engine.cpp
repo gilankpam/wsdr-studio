@@ -29,7 +29,27 @@ struct CmdError : std::runtime_error {
   CmdError(std::string k, const std::string &m) : std::runtime_error(m), kind(std::move(k)) {}
 };
 
-int paths_from(const std::string &s) { return s == "b" ? 2 : s == "ab" ? 3 : 1; }
+// Validated field access for client JSON: wrong types and out-of-range values are request errors.
+double num(const json &c, const char *k, double lo, double hi) {
+  const json &v = c.at(k);
+  if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() < lo || v.get<double>() > hi)
+    throw CmdError("bad_request", std::string(k) + " must be a number in [" + std::to_string(lo) + ", " +
+                                      std::to_string(hi) + "]");
+  return v.get<double>();
+}
+bool flag(const json &c, const char *k) {
+  if (!c.at(k).is_boolean())
+    throw CmdError("bad_request", std::string(k) + " must be true or false");
+  return c.at(k).get<bool>();
+}
+int paths_from(const json &c) {
+  const json &v = c.at("paths");
+  const std::string s = v.is_string() ? v.get<std::string>() : "";
+  if (s == "a") return 1;
+  if (s == "b") return 2;
+  if (s == "ab") return 3;
+  throw CmdError("bad_request", "paths must be \"a\", \"b\" or \"ab\"");
+}
 const char *paths_name(int p) { return p == 2 ? "b" : p == 3 ? "ab" : "a"; }
 } // namespace
 
@@ -46,12 +66,11 @@ Engine::~Engine() {
   _qcv.notify_all();
   if (_cmd.joinable())
     _cmd.join();
-  close_adapter();
+  close_adapter(); // stops the recorder and the stream; the DSP thread then idles
   _dsp_quit = true;
   _ring.wake();
   if (_dsp.joinable())
     _dsp.join();
-  _rec.stop();
 }
 
 void Engine::submit(json cmd, std::function<void(const json &)> reply) {
@@ -60,6 +79,15 @@ void Engine::submit(json cmd, std::function<void(const json &)> reply) {
     _q.emplace_back(std::move(cmd), std::move(reply));
   }
   _qcv.notify_one();
+}
+
+void Engine::poll() {
+  const auto r = rx();
+  if (!r)
+    return;
+  const wsdr::RxState s = r->status().state;
+  if ((s == wsdr::RxState::Lost || s == wsdr::RxState::Error) && !_lost_requested.exchange(true))
+    submit({{"cmd", "_lost"}}, nullptr);
 }
 
 void Engine::cmd_loop() {
@@ -80,6 +108,8 @@ void Engine::cmd_loop() {
       r["type"] = "ack";
     } catch (const CmdError &e) {
       r = {{"type", "error"}, {"kind", e.kind}, {"msg", e.what()}};
+    } catch (const json::exception &e) {
+      r = {{"type", "error"}, {"kind", "bad_request"}, {"msg", e.what()}};
     } catch (const std::exception &e) {
       r = {{"type", "error"}, {"kind", "other"}, {"msg", e.what()}};
     }
@@ -93,14 +123,17 @@ void Engine::cmd_loop() {
 }
 
 json Engine::run(const json &c) {
-  const std::string cmd = c.value("cmd", "");
+  if (!c.contains("cmd") || !c["cmd"].is_string())
+    throw CmdError("bad_request", "missing cmd");
+  const std::string cmd = c["cmd"].get<std::string>();
   if (cmd == "scan") {
     json d = devices_json(scan_devices());
     _cb.event(d);
     return {{"devices", d["devices"]}};
   }
   if (cmd == "open") {
-    open_adapter(static_cast<uint16_t>(c.value("pid", 0)), c);
+    const double pid = num(c, "pid", 0, 65535);
+    open_adapter(static_cast<uint16_t>(pid), c);
     return {};
   }
   if (cmd == "close") {
@@ -109,74 +142,123 @@ json Engine::run(const json &c) {
     return {};
   }
   if (cmd == "set") {
-    const auto rxp = rx();
-    if (!rxp || !rxp->is_open())
+    const auto r = rx();
+    if (!r || !r->is_open())
       throw CmdError("closed", "no adapter open");
-    wsdr::RxSettings s = rxp->settings();
+    wsdr::RxSettings s = r->settings();
     if (c.contains("freq"))
-      s.freq = c["freq"].get<double>();
+      s.freq = num(c, "freq", 2.3e9, 6.2e9);
     if (c.contains("rate_sel"))
-      s.rate_sel = c["rate_sel"].get<int>();
+      s.rate_sel = static_cast<int>(num(c, "rate_sel", 1, 5));
     if (c.contains("wide"))
-      s.wide = c["wide"].get<bool>();
+      s.wide = flag(c, "wide");
     if (c.contains("agc"))
-      s.agc = c["agc"].get<bool>();
+      s.agc = flag(c, "agc");
     if (c.contains("gain_db"))
-      s.gain_db = c["gain_db"].get<double>();
-    if (s.freq < 2.3e9 || s.freq > 6.2e9)
-      throw CmdError("range", "frequency out of range (2.3-6.2 GHz)");
-    rxp->set(s);
-    publish_settings();
+      s.gain_db = num(c, "gain_db", 0, 100);
+    r->set(s);
+    _cb.event(settings());
     return {};
   }
   if (cmd == "dsp") {
+    DspConfig n;
     {
       std::lock_guard<std::mutex> l(_dm);
-      if (c.contains("fft"))
-        _dsp_cfg.fft = c["fft"].get<int>();
-      if (c.contains("rows_per_s"))
-        _dsp_cfg.rows_per_s = c["rows_per_s"].get<double>();
-      if (c.contains("paths"))
-        _dsp_cfg.paths = paths_from(c["paths"].get<std::string>());
-      if (c.contains("dc_remove"))
-        _dsp_cfg.dc_remove = c["dc_remove"].get<bool>();
+      n = _dsp_cfg;
+    }
+    // validate everything first, then apply
+    if (c.contains("fft"))
+      n.fft = static_cast<int>(num(c, "fft", 1024, 16384));
+    if (c.contains("rows_per_s"))
+      n.rows_per_s = num(c, "rows_per_s", 1, 30);
+    if (c.contains("paths")) {
+      n.paths = paths_from(c);
+      std::lock_guard<std::mutex> l(_sm);
+      if (n.paths != 1 && _caps.paths < 2)
+        throw CmdError("bad_request", "this adapter has one receive path (A)");
+    }
+    if (c.contains("dc_remove"))
+      n.dc_remove = flag(c, "dc_remove");
+    {
+      std::lock_guard<std::mutex> l(_dm);
+      _dsp_cfg = n;
       _dsp_dirty = true;
     }
-    publish_settings();
+    _cb.event(settings());
     return {};
   }
   if (cmd == "record") {
     const std::string a = c.value("action", "");
     if (a == "stop") {
-      _record_req = false;
-      _rec.stop();
-      _cb.event(status());
-      return {{"file", _rec.info().path}};
+      const std::string file = _rec.info().path;
+      stop_recording("");
+      return {{"file", file}};
     }
     if (a != "start")
       throw CmdError("bad_request", "record action must be start or stop");
-    const auto rxp = rx();
-    if (!rxp || !rxp->is_open())
+    const auto r = rx();
+    if (!r || !r->is_open())
       throw CmdError("closed", "no adapter open");
-    const wsdr::RxStatus st = rxp->status();
+    const wsdr::RxStatus st = r->status();
     if (st.state != wsdr::RxState::Streaming)
       throw CmdError("not_streaming", "not streaming");
-    const wsdr::RxSettings s = rxp->settings();
+    const wsdr::RxSettings s = r->settings();
     int path;
     {
       std::lock_guard<std::mutex> l(_dm);
-      path = _dsp_cfg.paths == 2 ? 1 : 0;
+      path = _dsp_cfg.paths == 2 ? 1 : 0; // B only when B alone is shown; A otherwise
     }
-    std::string file;
+    std::string adapter;
     {
       std::lock_guard<std::mutex> l(_sm);
-      file = _rec.start(st.fs, st.centre_hz, _adapter, path, s.gain_db, s.agc);
+      adapter = _adapter;
     }
-    _record_req = true;
+    _recording = false;
+    const std::string file = _rec.start(st.fs, st.centre_hz, adapter, path, s.gain_db, s.agc);
+    _rec_path = path;
+    _rec_stop_requested = false;
+    _recording = true;
     _cb.event(status());
     return {{"file", file}};
   }
+  if (cmd == "_rec_stop") { // from the DSP thread
+    stop_recording(c.value("reason", ""));
+    return {};
+  }
+  if (cmd == "_lost") { // from poll()
+    const auto r = rx();
+    const wsdr::RxStatus st = r ? r->status() : wsdr::RxStatus{};
+    const bool lost = st.state == wsdr::RxState::Lost;
+    stop_recording(lost ? "adapter disconnected" : "stream failed");
+    close_adapter();
+    {
+      std::lock_guard<std::mutex> l(_sm);
+      _error = lost ? "Adapter disconnected. Plug it back in, then press Start."
+                    : "The stream kept failing (" + st.error + "). Press Start to try again.";
+    }
+    _cb.event(caps());
+    _cb.event({{"type", "alert"}, {"msg", lost ? "Adapter disconnected. Plug it back in, then press Start."
+                                                : "The stream kept failing. Press Start to try again."}});
+    _cb.event(devices_json(scan_devices()));
+    return {};
+  }
   throw CmdError("bad_request", "unknown command '" + cmd + "'");
+}
+
+void Engine::stop_recording(const std::string &why) {
+  _recording = false;
+  if (!_rec.info().active && !_rec.failed())
+    return;
+  _rec.stop();
+  const RecordInfo ri = _rec.info();
+  json e = {{"type", "recorded"}, {"file", ri.path}, {"samples", ri.samples}, {"dropped", ri.dropped},
+            {"seconds", ri.fs > 0 ? ri.samples / ri.fs : 0.0}, {"bytes", ri.samples * 4}};
+  if (!why.empty())
+    e["reason"] = why;
+  if (!ri.error.empty())
+    e["error"] = ri.error;
+  _cb.event(e);
+  _cb.event(status());
 }
 
 void Engine::open_adapter(uint16_t pid, const json &c) {
@@ -184,19 +266,20 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
     throw CmdError("bad_request", "pid must be 0xb812 or 0xc812");
   close_adapter();
   wsdr::RxSettings s;
-  s.freq = c.value("freq", 5180e6);
-  s.rate_sel = c.value("rate_sel", pid == wsdr::kPid8812cu ? 4 : 2);
-  s.gain_db = c.value("gain_db", 30.0);
-  s.agc = c.value("agc", false);
+  s.freq = c.contains("freq") ? num(c, "freq", 2.3e9, 6.2e9) : 5180e6;
+  s.rate_sel = c.contains("rate_sel") ? static_cast<int>(num(c, "rate_sel", 1, 5)) : (pid == wsdr::kPid8812cu ? 4 : 2);
+  s.gain_db = c.contains("gain_db") ? num(c, "gain_db", 0, 100) : 30.0;
+  s.agc = c.contains("agc") ? flag(c, "agc") : false;
+  s.wide = c.contains("wide") ? flag(c, "wide") : true;
   {
     std::lock_guard<std::mutex> l(_sm);
     _state = "opening";
     _error.clear();
   }
   _cb.event(status());
-  auto rx = std::make_shared<wsdr::Receiver>(std::make_shared<Logger>());
+  auto r = std::make_shared<wsdr::Receiver>(std::make_shared<Logger>());
   try {
-    rx->open(pid, s);
+    r->open(pid, s);
   } catch (const wsdr::OpenError &e) {
     std::lock_guard<std::mutex> l(_sm);
     _state = "closed";
@@ -210,30 +293,29 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   }
   {
     std::lock_guard<std::mutex> l(_dm);
-    if (rx->caps().paths < 2)
+    if (r->caps().paths < 2)
       _dsp_cfg.paths = 1; // path B exists on the 8812CU only
     _dsp_dirty = true;
   }
   _ring.clear();
-  rx->start([this](const uint8_t *b, size_t n, const wsdr::BankMeta &m) { _ring.push(b, n, m); });
+  _lost_requested = false;
+  r->start([this](const uint8_t *b, size_t n, const wsdr::BankMeta &m) { _ring.push(b, n, m); });
   {
     std::lock_guard<std::mutex> l(_sm);
-    _caps = rx->caps();
+    _caps = r->caps();
     _adapter = (_caps.cu ? std::string("RTL8812CU (") : std::string("RTL8812BU (")) + _caps.chip + ")";
-    _open = true;
     _state = "open";
   }
   {
     std::lock_guard<std::mutex> l(_rxm);
-    _rx = std::move(rx);
+    _rx = std::move(r);
   }
   _cb.event(caps());
-  publish_settings();
+  _cb.event(settings());
 }
 
 void Engine::close_adapter() {
-  _record_req = false;
-  _rec.stop();
+  stop_recording("");
   std::shared_ptr<wsdr::Receiver> old;
   {
     std::lock_guard<std::mutex> l(_rxm);
@@ -243,17 +325,14 @@ void Engine::close_adapter() {
     old->close();
   _ring.clear();
   std::lock_guard<std::mutex> l(_sm);
-  _open = false;
   _state = "closed";
   _caps = {};
 }
 
-void Engine::publish_settings() { _cb.event(settings()); }
-
 json Engine::settings() const {
   json j = {{"type", "settings"}};
-  if (const auto rxp = rx(); rxp && rxp->is_open()) {
-    const wsdr::RxSettings s = rxp->settings();
+  if (const auto r = rx(); r && r->is_open()) {
+    const wsdr::RxSettings s = r->settings();
     j["rx"] = {{"freq", s.freq}, {"rate_sel", s.rate_sel}, {"wide", s.wide}, {"agc", s.agc}, {"gain_db", s.gain_db}};
   }
   std::lock_guard<std::mutex> l(_dm);
@@ -263,9 +342,10 @@ json Engine::settings() const {
 }
 
 json Engine::caps() const {
+  const bool open = rx() != nullptr;
   std::lock_guard<std::mutex> l(_sm);
-  json j = {{"type", "caps"}, {"open", _open}};
-  if (_open) {
+  json j = {{"type", "caps"}, {"open", open}};
+  if (open) {
     json rates = json::array();
     for (int r = 5; r >= _caps.min_rate_sel; r--)
       rates.push_back({{"rate_sel", r}, {"fs", wsdr::Receiver::rate_of(r)}});
@@ -290,20 +370,18 @@ json Engine::status() const {
     j["adapter"] = _adapter;
     j["error"] = _error;
   }
-  if (const auto rxp = rx(); rxp && rxp->is_open()) {
-    const wsdr::RxStatus st = rxp->status();
+  if (const auto r = rx(); r && r->is_open()) {
+    const wsdr::RxStatus st = r->status();
     j["rx"] = {{"state", wsdr::rx_state_name(st.state)}, {"banks", st.banks}, {"restarts", st.restarts},
                {"channel", st.channel}, {"width", st.width}, {"centre", st.centre_hz}, {"fs", st.fs},
                {"error", st.error}};
-    if (st.state == wsdr::RxState::Lost || st.state == wsdr::RxState::Error)
-      j["state"] = wsdr::rx_state_name(st.state);
   }
   j["ring_dropped"] = _ring.dropped();
   j["rows"] = _rows.load();
   j["dsp_load"] = _dsp_load.load();
   const RecordInfo ri = _rec.info();
   j["record"] = {{"active", ri.active}, {"file", ri.path}, {"samples", ri.samples}, {"dropped", ri.dropped},
-                 {"seconds", ri.fs > 0 ? ri.samples / ri.fs : 0.0}};
+                 {"seconds", ri.fs > 0 ? ri.samples / ri.fs : 0.0}, {"bytes", ri.samples * 4}, {"error", ri.error}};
   j["t"] = now_s();
   return j;
 }
@@ -319,11 +397,17 @@ json Engine::devices_json(const std::vector<DeviceInfo> &d) {
 
 void Engine::dsp_loop() {
   Spectrum sp;
-  uint32_t gen = ~0u;
+  uint32_t gen = ~0u, cfg = ~0u;
   std::vector<int16_t> iq(2 * 8192);
   std::vector<wsdr::cf> tmp(8192);
   double busy = 0;
   auto win = clk::now();
+  // Ask the command thread to stop the recording (once); stop feeding it right away.
+  auto request_stop = [&](const char *reason) {
+    _recording = false;
+    if (!_rec_stop_requested.exchange(true))
+      submit({{"cmd", "_rec_stop"}, {"reason", reason}}, nullptr);
+  };
   while (!_dsp_quit) {
     Bank *b = _ring.pop(std::chrono::milliseconds(100));
     const auto t0 = clk::now();
@@ -336,21 +420,18 @@ void Engine::dsp_loop() {
         }
       }
       if (b->meta.gen != gen) {
+        // Every file has one centre, one rate and no gaps: a retune or a restart ends it.
+        if (_recording && gen != ~0u)
+          request_stop(b->meta.cfg != cfg ? "settings changed" : "the stream restarted after a fault");
         gen = b->meta.gen;
-        _rec_gen = gen;
-        if (_rec.active() && _record_req) {
-          // A retune or rate change ends the recording: one file, one centre, one rate.
-          _record_req = false;
-          _rec.stop();
-          _cb.event({{"type", "notice"}, {"msg", "recording stopped: settings changed"}});
-        }
+        cfg = b->meta.cfg;
       }
       sp.process(b->data.data(), b->bytes, b->meta, [&](const Row &r) {
         _rows++;
         _cb.row(encode_row(r, now_s()));
       });
-      if (_record_req && _rec.active()) {
-        const int path = sp.config().paths == 2 && b->meta.paths > 1 ? 1 : 0;
+      if (_recording) {
+        const int path = b->meta.paths > 1 ? _rec_path.load() : 0;
         const size_t ns = b->bytes / 8;
         Spectrum::unpack(b->data.data(), ns, path, tmp.data());
         for (size_t i = 0; i < ns; i++) {
@@ -358,6 +439,8 @@ void Engine::dsp_loop() {
           iq[2 * i + 1] = static_cast<int16_t>(static_cast<int>(tmp[i].imag()) * 16);
         }
         _rec.push(iq.data(), ns);
+        if (_rec.failed())
+          request_stop("the recording could not be written");
       }
       _ring.release(b);
       busy += std::chrono::duration<double>(clk::now() - t0).count();

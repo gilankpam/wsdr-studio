@@ -14,7 +14,8 @@ export type DspSettings = { fft: number; rows_per_s: number; paths: 'a' | 'b' | 
 export type Status = {
   state: string; adapter: string; error: string; t: number; rows: number; ring_dropped: number; dsp_load: number;
   rx?: { state: string; banks: number; restarts: number; channel: number; width: number; centre: number; fs: number; error: string };
-  record: { active: boolean; file: string; samples: number; dropped: number; seconds: number };
+  record: { active: boolean; file: string; samples: number; dropped: number; seconds: number; bytes: number; error: string };
+  client_drops?: number;
 };
 export type Row = {
   path: number; seq: number; bins: number; t: number; f0: number; df: number;
@@ -60,10 +61,12 @@ export class Client {
     this.url = url;
   }
 
+  // The session cookie (set when the launch link was opened) authenticates the socket; ?t= in the
+  // page URL is accepted too (scripts, development).
   static fromLocation(): Client {
-    const t = new URLSearchParams(location.search).get('t') ?? '';
+    const t = new URLSearchParams(location.search).get('t');
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return new Client(`${proto}//${location.host}/ws?t=${encodeURIComponent(t)}`);
+    return new Client(`${proto}//${location.host}/ws${t ? `?t=${encodeURIComponent(t)}` : ''}`);
   }
 
   connect() {

@@ -7,19 +7,18 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import http from 'node:http';
 
-const inst = readFileSync(`${process.env.XDG_RUNTIME_DIR ?? '/tmp'}/wsdr-studio-${process.getuid()}.url`, 'utf8').trim().split(' ')[1];
-const url = new URL(inst);
-const port = Number(url.port), token = url.searchParams.get('t');
+const [, portS, token] = readFileSync(`${process.env.XDG_RUNTIME_DIR}/wsdr-studio.instance`, 'utf8').trim().split(' ');
+const port = Number(portS);
 let fails = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) fails++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function get(path, headers = {}) {
+function get(path, headers = {}, method = 'GET') {
   return new Promise((resolve) => {
-    const req = http.request({ host: '127.0.0.1', port, path, headers: { Host: `127.0.0.1:${port}`, ...headers } }, (res) => {
+    const req = http.request({ host: '127.0.0.1', port, path, method, headers: { Host: `127.0.0.1:${port}`, ...headers } }, (res) => {
       let body = '';
       res.on('data', (d) => (body += d));
-      res.on('end', () => resolve({ status: res.statusCode, body }));
+      res.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
     });
     req.on('error', () => resolve({ status: 0, body: '' }));
     req.end();
@@ -47,6 +46,17 @@ check((await upgrade('/ws', {})) === 403, 'WebSocket without token -> 403');
 check((await upgrade('/ws?t=wrong' + token.slice(5), {})) === 403, 'WebSocket with a wrong token -> 403');
 check((await upgrade(`/ws?t=${token}`, { Origin: 'https://evil.example' })) === 403, 'WebSocket from a foreign Origin -> 403');
 check((await upgrade(`/ws?t=${token}`, { Origin: `http://127.0.0.1:${port}` })) === 101, 'WebSocket with token + own Origin -> 101');
+check((await get('/', {}, 'HEAD')).status === 405, 'HEAD -> 405');
+check((await get('/api/launch-key')).status === 403, 'launch key without token -> 403');
+check((await get('/?k=0123456789abcdef0123456789abcdef')).status === 403, 'unknown launch key -> 403');
+const key = JSON.parse((await get(`/api/launch-key?t=${token}`)).body).key;
+const first = await get(`/?k=${key}`);
+const cookie = (first.headers['set-cookie'] ?? [''])[0].split(';')[0];
+check(first.status === 302 && cookie === `wsdr_${port}=${token}`, 'launch key -> 302 + session cookie');
+check(/HttpOnly/.test(first.headers['set-cookie']?.[0] ?? '') && /SameSite=Strict/.test(first.headers['set-cookie']?.[0] ?? ''), 'cookie is HttpOnly + SameSite=Strict');
+check((await get(`/?k=${key}`)).status === 403, 'launch key is single-use');
+check((await upgrade('/ws', { Cookie: cookie, Origin: `http://127.0.0.1:${port}` })) === 101, 'WebSocket with the session cookie -> 101');
+check((await upgrade('/ws', { Cookie: `wsdr_${port}=nope`, Origin: `http://127.0.0.1:${port}` })) === 403, 'WebSocket with a wrong cookie -> 403');
 
 // --- protocol
 const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?t=${token}`);
@@ -80,7 +90,13 @@ check(rows.every((r) => r.len === 48 + 2 * r.bins), 'row frame length = header +
 const bad = await req('nonsense');
 check(bad.type === 'error' && bad.kind === 'bad_request', 'unknown command -> error with id');
 const badf = await req('set', { freq: 1e9 });
-check(badf.type === 'error' && badf.kind === 'range', 'out-of-range frequency -> error');
+check(badf.type === 'error' && badf.kind === 'bad_request', 'out-of-range frequency -> error');
+const badt = await req('set', { freq: '5180' });
+check(badt.type === 'error' && badt.kind === 'bad_request', 'frequency as a string -> error');
+const badp = await req('dsp', { fft: 1024, paths: 'b' });
+check(badp.type === 'error', 'path B on a one-path adapter -> error');
+const s1 = await new Promise((r) => setTimeout(r, 300)).then(() => events.filter((e) => e.type === 'settings').at(-1));
+check(s1.dsp.fft === settings0.dsp.fft, 'a rejected dsp request changes nothing');
 
 const target = f_orig + 40e6;
 check((await req('set', { freq: target })).type === 'ack', `retune to ${target / 1e6} MHz acked`);

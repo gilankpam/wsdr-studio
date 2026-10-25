@@ -84,10 +84,6 @@ public:
     }
   }
   uint64_t dropped() const { return _dropped; }
-  size_t depth() {
-    std::lock_guard<std::mutex> l(_m);
-    return _q.size();
-  }
 
 private:
   std::mutex _m;

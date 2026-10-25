@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Spectrum DSP: LA banks -> per-path complex samples (unpack, DC block, residual shift) -> windowed FFT
-// (FFTW3f) -> rows for the display.
+// Spectrum DSP: LA banks -> per-path complex samples (unpack, DC block) -> windowed FFT (FFTW3f) -> rows
+// for the display.
 //
-// Power is accumulated LINEAR per row interval (sum for the average, max for the max-hold trace) and
-// converted to dB once per row, then reduced to at most kMaxBins display bins. dBFS: a full-scale
-// complex sine (|x| = 2048 LSB) in one bin reads 0 dBFS (coherent-gain normalised window).
+// The rows always cover the HARDWARE band (centre +- fs/2). The requested frequency may sit off the
+// 5 MHz synthesizer grid; it is not shifted to the middle, because at 2.5/5 MS/s a residual of up to
+// +-2.5 MHz would wrap the band around (the UI marks the requested frequency instead).
+//
+// Power is accumulated LINEAR per row interval (sum for the average, max for the peak trace) and
+// converted to dB once per row. Above kMaxBins FFT bins, each display bin carries the summed power of
+// the FFT bins it covers (noise in display units is then independent of the FFT size; a tone reads
+// up to +1.8 dB high, the Hann leakage into the neighbour bin) and the max of their peaks.
+// dBFS: a full-scale complex sine (|x| = 2048 LSB) reads 0 dBFS (coherent-gain normalised window).
 #pragma once
 
 #include <complex>
@@ -22,7 +28,7 @@ constexpr int kMaxBins = 4096;
 
 struct DspConfig {
   int fft = 8192;         // 1024 .. 16384, power of two
-  double rows_per_s = 25; // display rows per second
+  double rows_per_s = 25; // display rows per second (1..30)
   int paths = 1;          // bit 0 = path A, bit 1 = path B (8812CU)
   bool dc_remove = true;
 };

@@ -59,7 +59,7 @@ static void test_spectrum_tone() {
   Spectrum sp;
   DspConfig c;
   c.fft = 4096;
-  c.rows_per_s = 50;
+  c.rows_per_s = 30;
   c.paths = 3;
   c.dc_remove = false;
   sp.configure(c);
@@ -69,7 +69,7 @@ static void test_spectrum_tone() {
   m.centre_hz = 5180e6;
   m.paths = 2;
   std::vector<Row> rows;
-  for (int k = 0; k < 64; k++) {
+  for (int k = 0; k < 160; k++) { // >= 2 rows at the 30 rows/s cap
     auto b = tone_bank(f, fs, 1024, static_cast<uint64_t>(k) * 8192);
     m.seq = k;
     sp.process(b.data(), b.size(), m, [&](const Row &r) { rows.push_back(r); });
@@ -94,32 +94,68 @@ static void test_spectrum_tone() {
   CHECK(a > 0 && bcount > 0);
 }
 
-static void test_shift() {
-  // Requested 5182 MHz, hardware centre 5180 MHz: a tone at the hardware's +2 MHz must land at 5182.
+static void test_offgrid() {
+  // Requested 5182 MHz at 5 MS/s: the hardware sits at 5180 (5 MHz grid). The rows must show the
+  // hardware band 5177.5..5182.5 (no wrap-around), with a tone at the hardware's +2 MHz at 5182.
   Spectrum sp;
   DspConfig c;
   c.fft = 2048;
-  c.rows_per_s = 50;
+  c.rows_per_s = 25;
   c.dc_remove = false;
   sp.configure(c);
   wsdr::BankMeta m;
   m.gen = 7;
-  m.fs = 20e6;
+  m.fs = 5e6;
   m.centre_hz = 5180e6;
   m.shift_hz = 2e6;
   std::vector<Row> rows;
   for (int k = 0; k < 64; k++) {
-    auto b = tone_bank(2e6, 20e6, 1024, static_cast<uint64_t>(k) * 8192);
+    auto b = tone_bank(2e6, 5e6, 1024, static_cast<uint64_t>(k) * 8192);
     sp.process(b.data(), b.size(), m, [&](const Row &r) { rows.push_back(r); });
   }
   CHECK(!rows.empty());
+  if (rows.empty())
+    return;
   const Row &r = rows.back();
   size_t pk = 0;
   for (size_t i = 1; i < r.avg.size(); i++)
     if (r.avg[i] > r.avg[pk])
       pk = i;
   CHECK(std::abs(r.f0 + r.df * pk - 5182e6) <= r.df);
-  CHECK(std::abs(r.f0 + r.df * r.avg.size() / 2 - 5182e6) <= r.df); // display centred on the request
+  CHECK(std::abs(r.f0 - r.df / 2 - 5177.5e6) <= r.df); // band starts at centre - fs/2
+}
+
+static void test_level_vs_fft() {
+  // A tone on a bin centre reads -6.02 dBFS at FFT 4096. At 16384 (reduced to 4096 display bins by
+  // summing power) the display bin also holds the Hann window's leakage: up to +1.76 dB.
+  for (int n : {4096, 16384}) {
+    Spectrum sp;
+    DspConfig c;
+    c.fft = n;
+    c.rows_per_s = 25;
+    c.dc_remove = false;
+    sp.configure(c);
+    wsdr::BankMeta m;
+    m.gen = 1;
+    m.fs = 20e6;
+    m.centre_hz = 5180e6;
+    std::vector<Row> rows;
+    const double f = 512 * 20e6 / 4096; // on a bin centre at both sizes
+    for (int k = 0; k < 120; k++) {
+      auto b = tone_bank(f, 20e6, 1024, static_cast<uint64_t>(k) * 8192);
+      sp.process(b.data(), b.size(), m, [&](const Row &r) { rows.push_back(r); });
+    }
+    CHECK(!rows.empty());
+    if (rows.empty())
+      continue;
+    float pk = -200;
+    for (float v : rows.back().avg)
+      pk = std::max(pk, v);
+    const float hi = n > 4096 ? -6.02f + 1.8f : -6.02f + 0.3f;
+    if (pk < -6.32f || pk > hi)
+      std::printf("  fft %d peak %.2f dBFS\n", n, pk);
+    CHECK(pk >= -6.32f && pk <= hi);
+  }
 }
 
 static void test_reduce_and_frame() {
@@ -184,7 +220,8 @@ int main(int argc, char **argv) {
     return bench();
   test_channels();
   test_spectrum_tone();
-  test_shift();
+  test_offgrid();
+  test_level_vs_fft();
   test_reduce_and_frame();
   std::printf(g_fail ? "%d FAILED\n" : "all tests passed\n", g_fail);
   return g_fail ? 1 : 0;

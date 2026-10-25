@@ -5,7 +5,6 @@
 #include <unistd.h>
 
 #include <cerrno>
-#include <chrono>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -30,47 +29,59 @@ std::string Recorder::start(double fs, double centre_hz, const std::string &hw, 
   std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
   std::strftime(dt, sizeof dt, "%Y-%m-%dT%H:%M:%SZ", &tm);
   std::snprintf(name, sizeof name, "wsdr-%s-%.3fMHz-%gMsps%s", stamp, centre_hz / 1e6, fs / 1e6, path ? "-B" : "");
-  _base = (std::filesystem::path(_dir) / name).string();
-  _datetime = dt;
-  _fs = fs;
-  _centre = centre_hz;
-  _hw = hw;
-  _path = path;
-  _gain = gain_db;
-  _agc = agc;
-  _fd = ::open((_base + ".sigmf-data").c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-  if (_fd < 0)
+  const std::string base = (std::filesystem::path(_dir) / name).string();
+  const int fd = ::open((base + ".sigmf-data").c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+  if (fd < 0)
     throw std::runtime_error(std::string("recording: ") + std::strerror(errno));
+  {
+    std::lock_guard<std::mutex> l(_m);
+    _base = base;
+    _datetime = dt;
+    _fs = fs;
+    _centre = centre_hz;
+    _hw = hw;
+    _path = path;
+    _gain = gain_db;
+    _agc = agc;
+    _error.clear();
+    _q.clear();
+    _queued = 0;
+    _quit = false;
+    _fd = fd;
+  }
   write_meta(false);
   _samples = 0;
   _dropped = 0;
-  _quit = false;
+  _failed = false;
   _active = true;
   _t = std::thread([this] { writer(); });
-  return _base + ".sigmf-data";
+  return base + ".sigmf-data";
 }
 
 void Recorder::stop() {
   if (!_t.joinable())
     return;
+  _active = false; // push() stops queueing; the writer drains what is queued
   {
     std::lock_guard<std::mutex> l(_m);
     _quit = true;
   }
   _cv.notify_all();
   _t.join();
-  _active = false;
-  ::close(_fd);
-  _fd = -1;
+  {
+    std::lock_guard<std::mutex> l(_m);
+    ::close(_fd);
+    _fd = -1;
+  }
   write_meta(true);
 }
 
 void Recorder::push(const int16_t *iq, size_t samples) {
-  if (!_active)
+  if (!_active || _failed)
     return;
   {
     std::lock_guard<std::mutex> l(_m);
-    if (_queued + 2 * samples > kMaxQueued) {
+    if (_quit || _queued + 2 * samples > kMaxQueued) {
       _dropped += samples;
       return;
     }
@@ -81,6 +92,11 @@ void Recorder::push(const int16_t *iq, size_t samples) {
 }
 
 void Recorder::writer() {
+  int fd;
+  {
+    std::lock_guard<std::mutex> l(_m);
+    fd = _fd;
+  }
   for (;;) {
     std::vector<int16_t> b;
     {
@@ -92,24 +108,33 @@ void Recorder::writer() {
       _q.pop_front();
       _queued -= b.size();
     }
+    if (_failed) {
+      _dropped += b.size() / 2;
+      continue;
+    }
     const char *p = reinterpret_cast<const char *>(b.data());
-    size_t left = b.size() * 2;
+    size_t left = b.size() * sizeof(int16_t);
     while (left) {
-      const ssize_t w = ::write(_fd, p, left);
+      const ssize_t w = ::write(fd, p, left);
+      if (w < 0 && errno == EINTR)
+        continue;
       if (w <= 0) {
-        if (errno == EINTR)
-          continue;
-        _dropped += left / 4;
+        std::lock_guard<std::mutex> l(_m);
+        _error = std::string("write failed: ") + (w < 0 ? std::strerror(errno) : "no space");
+        _failed = true;
         break;
       }
       p += w;
       left -= static_cast<size_t>(w);
+      _samples += static_cast<uint64_t>(w) / 4; // only what reached the file
     }
-    _samples += b.size() / 2;
+    if (left)
+      _dropped += left / 4;
   }
 }
 
 void Recorder::write_meta(bool final) {
+  std::lock_guard<std::mutex> l(_m);
   nlohmann::json g = {{"core:datatype", "ci16_le"},
                       {"core:sample_rate", _fs},
                       {"core:version", "1.0.0"},
@@ -121,6 +146,8 @@ void Recorder::write_meta(bool final) {
   if (final) {
     g["wsdr:samples"] = _samples.load();
     g["wsdr:dropped_samples"] = _dropped.load();
+    if (!_error.empty())
+      g["wsdr:error"] = _error;
   }
   const nlohmann::json meta = {
       {"global", g},
@@ -131,6 +158,7 @@ void Recorder::write_meta(bool final) {
 }
 
 RecordInfo Recorder::info() const {
+  std::lock_guard<std::mutex> l(_m);
   RecordInfo i;
   i.active = _active;
   i.path = _base.empty() ? "" : _base + ".sigmf-data";
@@ -138,6 +166,7 @@ RecordInfo Recorder::info() const {
   i.dropped = _dropped;
   i.fs = _fs;
   i.centre_hz = _centre;
+  i.error = _error;
   return i;
 }
 

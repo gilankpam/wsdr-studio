@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // wsdr-studiod — the wsdr-studio backend: owns the adapter (via wifi-sdr/devourer), computes the
-// spectrum and serves the web UI on http://127.0.0.1:PORT/?t=TOKEN, opened as a Chrome app window.
+// spectrum and serves the web UI on http://127.0.0.1:PORT/, opened as a Chrome app window with a
+// single-use launch key (see server.h for the security model).
 //
 //   wsdr-studiod [--port 8073] [--no-browser] [--web DIR] [--pid 0xb812] [--freq 5190e6] [--rate 40]
 //                [--record-dir DIR] [--dev-origin http://localhost:5173]
 //   wsdr-studiod --headless-seconds 20 --pid 0xb812 [--freq ..] [--rate ..] [--fft 8192]
 //       engine + DSP only (no server, no browser); prints status JSON each second and a summary.
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <spawn.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -84,9 +89,71 @@ std::string data_dir() {
   return x && *x ? std::string(x) + "/wsdr-studio" : std::string(h ? h : "/tmp") + "/.local/share/wsdr-studio";
 }
 
+// Private per-user file "pid port token" for the running instance (never in a shared /tmp).
 std::string instance_file() {
   const char *r = std::getenv("XDG_RUNTIME_DIR");
-  return std::string(r && *r ? r : "/tmp") + "/wsdr-studio-" + std::to_string(getuid()) + ".url";
+  if (r && *r)
+    return std::string(r) + "/wsdr-studio.instance";
+  const char *h = std::getenv("HOME");
+  const std::string dir = std::string(h ? h : ".") + "/.cache/wsdr-studio";
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  ::chmod(dir.c_str(), 0700);
+  return dir + "/instance";
+}
+
+bool write_instance(const std::string &text) {
+  const int fd = ::open(instance_file().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+  if (fd < 0)
+    return false;
+  ::fchmod(fd, 0600);
+  const bool ok = ::write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size());
+  ::close(fd);
+  return ok;
+}
+
+// Minimal blocking GET to 127.0.0.1:port (1 s timeout); returns the body of a 200 response.
+std::string local_get(uint16_t port, const std::string &path) {
+  const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0)
+    return {};
+  timeval tv{1, 0};
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  std::string resp;
+  if (::connect(fd, reinterpret_cast<sockaddr *>(&a), sizeof a) == 0) {
+    const std::string req = "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) +
+                            "\r\nConnection: close\r\n\r\n";
+    if (::write(fd, req.data(), req.size()) == static_cast<ssize_t>(req.size())) {
+      char buf[2048];
+      ssize_t n;
+      while ((n = ::read(fd, buf, sizeof buf)) > 0 && resp.size() < 16384)
+        resp.append(buf, static_cast<size_t>(n));
+    }
+  }
+  ::close(fd);
+  if (resp.rfind("HTTP/1.1 200", 0) != 0)
+    return {};
+  const auto e = resp.find("\r\n\r\n");
+  return e == std::string::npos ? std::string() : resp.substr(e + 4);
+}
+
+// A launch key from a running instance, or "" if none answers (stale file, crashed process).
+std::string running_instance_url() {
+  std::ifstream f(instance_file());
+  long pid = 0;
+  unsigned port = 0;
+  std::string token;
+  if (!(f >> pid >> port >> token) || port == 0 || port > 65535)
+    return {};
+  const json j = json::parse(local_get(static_cast<uint16_t>(port), "/api/launch-key?t=" + token), nullptr, false);
+  if (!j.is_object() || !j.contains("key") || !j["key"].is_string())
+    return {};
+  return "http://127.0.0.1:" + std::to_string(port) + "/?k=" + j["key"].get<std::string>();
 }
 
 // Open the UI: Chrome/Chromium as an app window, else the default browser. The child gets a clean
@@ -134,11 +201,16 @@ void open_browser(const std::string &url) {
   std::fprintf(stderr, "wsdr-studiod: no browser found; open %s\n", url.c_str());
 }
 
-bool parse(int argc, char **argv, Args &a) {
+bool parse(int argc, char **argv, Args &a) try {
   for (int i = 1; i < argc; i++) {
     const std::string k = argv[i];
     auto v = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
-    if (k == "--port") a.port = static_cast<uint16_t>(std::stoi(v()));
+    if (k == "--port") {
+      const int p = std::stoi(v());
+      if (p < 1 || p > 65535 - 9)
+        throw std::invalid_argument("port");
+      a.port = static_cast<uint16_t>(p);
+    }
     else if (k == "--no-browser") a.browser = false;
     else if (k == "--web") a.web = v();
     else if (k == "--record-dir") a.record_dir = v();
@@ -155,6 +227,9 @@ bool parse(int argc, char **argv, Args &a) {
     }
   }
   return true;
+} catch (const std::exception &) {
+  std::fprintf(stderr, "bad option value\n");
+  return false;
 }
 
 json open_cmd(const Args &a) {
@@ -220,17 +295,12 @@ int main(int argc, char **argv) {
   if (a.headless > 0)
     return run_headless(a);
 
-  // Single instance: if one is already serving, just open its URL.
-  {
-    std::ifstream f(instance_file());
-    std::string url;
-    long pid = 0;
-    if (f >> pid >> url && pid > 0 && kill(static_cast<pid_t>(pid), 0) == 0) {
-      std::fprintf(stderr, "wsdr-studiod: already running (pid %ld)\n", pid);
-      if (a.browser)
-        open_browser(url);
-      return 0;
-    }
+  // Single instance: if one is already serving, open a new window on it.
+  if (const std::string url = running_instance_url(); !url.empty()) {
+    std::fprintf(stderr, "wsdr-studiod: already running; opening a window on it\n");
+    if (a.browser)
+      open_browser(url);
+    return 0;
   }
 
   net::io_context io;
@@ -246,7 +316,7 @@ int main(int argc, char **argv) {
     seen_client = true;
     std::weak_ptr<WsClient> w = c;
     srv->send_text(w, json{{"type", "hello"}, {"version", 1}, {"app", "wsdr-studio"}}.dump());
-    srv->send_text(w, Engine::devices_json(scan_devices()).dump());
+    eng->submit({{"cmd", "scan"}}, nullptr); // broadcasts "devices"; USB enumeration stays off the I/O thread
     srv->send_text(w, eng->caps().dump());
     srv->send_text(w, eng->settings().dump());
     srv->send_text(w, eng->status().dump());
@@ -276,18 +346,17 @@ int main(int argc, char **argv) {
                         [&](const json &e) { srv->broadcast_text(e.dump()); }},
       a.record_dir.empty() ? data_dir() + "/recordings" : a.record_dir);
 
-  const std::string url = "http://127.0.0.1:" + std::to_string(srv->port()) + "/?t=" + so.token;
-  {
-    const std::string f = instance_file();
-    std::ofstream o(f, std::ios::trunc);
-    fs::permissions(f, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
-    o << getpid() << " " << url << "\n";
-  }
-  std::fprintf(stderr, "wsdr-studiod: serving %s from %s\n", url.c_str(), so.webroot.c_str());
+  if (!write_instance(std::to_string(getpid()) + " " + std::to_string(srv->port()) + " " + so.token + "\n"))
+    std::fprintf(stderr, "wsdr-studiod: cannot write %s (a second launch will not find this one)\n",
+                 instance_file().c_str());
+  std::fprintf(stderr, "wsdr-studiod: serving http://127.0.0.1:%u/ from %s\n", srv->port(), so.webroot.c_str());
   if (a.pid)
     eng->submit(open_cmd(a), nullptr);
   if (a.browser)
-    open_browser(url);
+    open_browser("http://127.0.0.1:" + std::to_string(srv->port()) + "/?k=" + srv->new_launch_key());
+  else
+    std::fprintf(stderr, "wsdr-studiod: open http://127.0.0.1:%u/?k=%s (single use, 60 s)\n", srv->port(),
+                 srv->new_launch_key().c_str());
 
   net::signal_set sig(io, SIGINT, SIGTERM);
   sig.async_wait([&](const boost::system::error_code &, int) { io.stop(); });
@@ -300,9 +369,12 @@ int main(int argc, char **argv) {
     tick.async_wait([&](const boost::system::error_code &ec) {
       if (ec)
         return;
+      eng->poll(); // notices an unplugged adapter
       if (srv->clients()) {
         idle_since = std::chrono::steady_clock::now();
-        srv->broadcast_text(eng->status().dump());
+        json st = eng->status();
+        st["client_drops"] = srv->frames_dropped();
+        srv->broadcast_text(st.dump());
       } else if (a.browser && seen_client &&
                  std::chrono::steady_clock::now() - idle_since > std::chrono::seconds(30)) {
         std::fprintf(stderr, "wsdr-studiod: no clients for 30 s, exiting\n");

@@ -20,7 +20,6 @@ int sext12(uint32_t v) { return static_cast<int>(static_cast<int32_t>(v << 20) >
 struct Spectrum::Path {
   int index = 0;
   wsdr::DcBlock dc;
-  wsdr::Nco nco;
   fftwf_complex *in = nullptr, *out = nullptr;
   fftwf_plan plan = nullptr;
   int fill = 0;                   // samples in `in`
@@ -53,7 +52,7 @@ void Spectrum::configure(const DspConfig &c) {
   while (f < n.fft && f < 16384)
     f <<= 1;
   n.fft = f;
-  n.rows_per_s = std::clamp(n.rows_per_s, 1.0, 60.0);
+  n.rows_per_s = std::clamp(n.rows_per_s, 1.0, 30.0);
   if (!(n.paths & 3))
     n.paths = 1;
   _c = n;
@@ -80,10 +79,9 @@ void Spectrum::rebuild() {
 void Spectrum::reset(const wsdr::BankMeta &m) {
   _gen = m.gen;
   _fs = m.fs;
-  _freq = m.centre_hz + m.shift_hz;
+  _freq = m.centre_hz; // hardware band; see the header
   for (auto &p : _paths) {
     p->dc = wsdr::DcBlock();
-    p->nco.set(m.shift_hz, m.fs);
     p->fill = 0;
     p->count = 0;
     p->row_samples = 0;
@@ -120,8 +118,6 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
     unpack(bank, ns, p.index, _tmp.data());
     if (_c.dc_remove)
       p.dc.process(_tmp.data(), ns);
-    if (meta.shift_hz != 0)
-      p.nco.process(_tmp.data(), ns);
     size_t i = 0;
     while (i < ns) {
       const size_t take = std::min<size_t>(ns - i, static_cast<size_t>(n - p.fill));
@@ -149,7 +145,7 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       p.count++;
       if (p.row_samples < row_len)
         continue;
-      // Emit: fftshift, reduce to <= kMaxBins (mean for avg, max for max), dB once per output bin.
+      // Emit: fftshift, reduce to <= kMaxBins (summed power for avg, max for peaks), dB once per bin.
       const int bins = std::min(n, kMaxBins);
       const int dec = n / bins;
       Row r;
@@ -167,7 +163,7 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
           s += sum[k];
           m = std::max(m, mx[k]);
         }
-        r.avg[b] = 10.f * std::log10(s / dec * inv + 1e-20f);
+        r.avg[b] = 10.f * std::log10(s * inv + 1e-20f);
         r.max[b] = 10.f * std::log10(m * _norm + 1e-20f);
       }
       emit(r);

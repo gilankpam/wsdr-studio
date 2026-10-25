@@ -36,7 +36,8 @@ button:hover:not(:disabled) { border-color: #3a4656; }
 button.primary { background: #1e5f86; border-color: #3f8fc0; font-weight: 600; }
 button.stop { background: #3a2226; border-color: #7a3a40; font-weight: 600; }
 button.on { background: #24425a; border-color: var(--accent); }
-button.rec { min-width: 96px; }
+button.rec { min-width: 132px; }
+button.primary, button.stop { min-width: 82px; }
 button.rec.on { background: #5a1f22; border-color: var(--bad); }
 input.freq { width: 92px; text-align: right; font-variant-numeric: tabular-nums; }
 input.num { width: 58px; }

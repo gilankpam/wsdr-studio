@@ -7,7 +7,7 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import http from 'node:http';
 
-const [, portS, token] = readFileSync(`${process.env.XDG_RUNTIME_DIR}/wsdr-studio.instance`, 'utf8').trim().split(' ');
+const [, portS, token] = readFileSync(`${process.env.XDG_RUNTIME_DIR}/wsdr-studio/instance`, 'utf8').trim().split(' ');
 const port = Number(portS);
 let fails = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) fails++; };

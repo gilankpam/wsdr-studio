@@ -14,6 +14,7 @@ const devTitle = (d: Device) =>
   `${d.model} (${d.chip}), bus ${d.bus} port ${d.port}, ${d.speed_mbps} Mbit/s${d.controller ? `, host controller ${d.controller}` : ''}`;
 const bytes = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(0)} MB`);
 const baseName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
+const fmtDur = (s: number) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : s >= 60 ? `${Math.floor(s / 60)} min` : `${Math.max(0, Math.floor(s))} s`);
 // The radio tunes in 5 MHz steps (2.4 GHz: 2407 + 5n MHz; 5 GHz: 5000 + 5n MHz).
 const snap = (f: number) => (f < 3.7e9 ? 2407e6 + Math.round((f - 2407e6) / 5e6) * 5e6 : Math.round(f / 5e6) * 5e6);
 const UDEV_CMD = 'sudo cp tools/99-wsdr.rules /etc/udev/rules.d/ && sudo udevadm control --reload';
@@ -74,6 +75,7 @@ export default function App() {
   const drops = useRef({ ring: 0, client: 0, at: 0 });
   const bannerId = useRef(1);
   const live = useRef({ open: false, recording: false }); // for callbacks that outlive a render
+  const setRef = useRef<(a: Partial<RxSettings>) => void>(() => {});
   const popRef = useRef<HTMLDivElement>(null);
 
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
@@ -140,7 +142,7 @@ export default function App() {
         addBanner(LOCKED);
         return;
       }
-      clientRef.current?.request('set', { freq: snap(f) }).catch((e: Error) => addBanner(e.message, 'error'));
+      setRef.current({ freq: snap(f) }); // live retune, or the draft for the next Start when stopped
       updatePrefs({ retuned: true });
     };
     Client.fromLocation()
@@ -198,6 +200,7 @@ export default function App() {
               break;
             case 'status': {
               setStatus(e);
+              if (e.record?.active && !live.current.recording) window.clearTimeout(gainTimer.current); // controls lock now
               live.current.recording = e.record?.active ?? false;
               const banks = e.rx?.banks ?? 0;
               const r = rate.current;
@@ -261,7 +264,7 @@ export default function App() {
   const sel = devices.find((d) => devKey(d) === selKey);
   const rxState = open ? status?.rx?.state ?? 'starting' : 'stopped';
   const recording = status?.record.active ?? false;
-  const locked = open && recording; // tuning/gain locked while recording (a change would end the file)
+  const locked = (open && recording) || opening; // recording: a change would end the file; opening: it would be lost
   const fsNow = 80e6 / (1 << cur.rate_sel);
   const width = cur.rate_sel === 1 && (caps.wide_capable ?? true) ? 40 : 20;
   const chan = channelAt(cur.freq, width);
@@ -300,6 +303,7 @@ export default function App() {
     }
     req('set', args).catch(() => {});
   };
+  setRef.current = set;
   const doStart = async () => {
     if (!sel) return;
     setStarting(true);
@@ -325,9 +329,12 @@ export default function App() {
       if (freqText.trim()) addBanner('Frequency must be between 2300 and 6200 MHz', 'error');
       return;
     }
-    if (f === lastSentFreq.current || Math.abs(f - cur.freq) < 1) return; // Enter then blur: send once
-    lastSentFreq.current = f;
-    set({ freq: f });
+    const t = snap(f); // the radio tunes in 5 MHz steps
+    if (t !== f) addBanner(`Tuned to ${mhz(t, 3)} MHz (the radio tunes in 5 MHz steps)`);
+    setFreqText(mhz(t, 3));
+    if (t === lastSentFreq.current || Math.abs(t - cur.freq) < 1) return; // Enter then blur: send once
+    lastSentFreq.current = t;
+    set({ freq: t });
   };
   const onGain = (v: number) => {
     setGainUi(v);
@@ -355,6 +362,8 @@ export default function App() {
   const dotClass = fatal || !connected ? 'dot bad' : opening ? 'dot warn' : !open ? 'dot' : rxState === 'streaming' ? 'dot ok' : 'dot bad';
   const stateText = fatal ? 'disconnected' : !connected ? 'connecting…' : opening ? 'starting…' : open ? rxState : 'stopped';
   const recRate = fsNow * 4; // bytes/s (int16 I + Q)
+  const diskFree = status?.disk_free ?? 0;
+  const secsLeft = diskFree / recRate;
 
   return (
     <div className="app">
@@ -374,7 +383,7 @@ export default function App() {
               {opening ? 'Starting…' : '▶ Start'}
             </button>
           ) : (
-            <button className="stop" onClick={() => req('close').catch(() => {})}>
+            <button className="stop" onClick={() => req('close').catch(() => {})} title={recording ? 'Stop the radio (also ends the recording)' : 'Stop the radio'}>
               ■ Stop
             </button>
           )}
@@ -383,9 +392,9 @@ export default function App() {
               className={recording ? 'rec on' : 'rec'}
               disabled={rxState !== 'streaming'}
               onClick={toggleRecord}
-              title={`Record raw IQ (SigMF), about ${bytes(recRate)}/s at this span`}
+              title={`Record raw IQ (SigMF), about ${bytes(recRate)}/s at this span${diskFree ? `; ${bytes(diskFree)} free (~${fmtDur(diskFree / recRate)})` : ''}`}
             >
-              {recording ? '■ Stop recording' : '● Record'}
+              {recording ? '■ End recording' : '● Record'}
             </button>
           ) : (
             <button disabled={opening || !connected} onClick={() => req('scan').catch(() => {})} title="Look for adapters again">
@@ -483,7 +492,12 @@ export default function App() {
           <NumField value={scale.dbMax} title="Top of the scale (dBFS); Enter to apply" onCommit={(v) => setUserScale({ ...scale, dbMax: v })} />
           <span className="unit">dBFS</span>
           <button
-            title="Fit the scale to the signal (noise floor to strongest peak) and refit after each Start"
+            className={prefs.scale === null ? 'on' : ''}
+            title={
+              prefs.scale === null
+                ? 'Auto scale is on: refits after each Start. Type a value to fix the scale.'
+                : 'Fit the scale to the signal now and keep refitting after each Start'
+            }
             onClick={() => {
               const s = display.current?.suggestRange();
               if (s) setScale(s);
@@ -540,6 +554,11 @@ export default function App() {
       {recording && status && (
         <div className="strip rec">
           ● REC {status.record.seconds.toFixed(1)} s · {bytes(status.record.bytes)} · {bytes(recRate)}/s → <code title={status.record.file}>{baseName(status.record.file)}</code>
+          {diskFree > 0 && (
+            <span className={secsLeft < 60 ? 'warn' : 'muted'}>
+              {bytes(diskFree)} free (~{fmtDur(secsLeft)})
+            </span>
+          )}
           <span className="muted">tuning locked</span>
           {status.record.dropped > 0 && <span className="warn">{status.record.dropped} samples dropped (disk too slow)</span>}
         </div>
@@ -591,7 +610,7 @@ export default function App() {
         {open && st && (
           <span>
             {chan && !offGrid ? `ch ${chan.label} · ` : ''}
-            {offGrid ? `${mhz(cur.freq)} MHz requested · tuned ${mhz(tuned)} (5 MHz steps)` : `${mhz(cur.freq)} MHz`} · {spanLabel(st.fs)} span
+            {offGrid ? `${mhz(cur.freq)} MHz requested · tuned ${mhz(tuned)} MHz (5 MHz steps)` : `${mhz(cur.freq)} MHz`} · {spanLabel(st.fs)} span
           </span>
         )}
         {warn.map((w) => (
@@ -601,7 +620,7 @@ export default function App() {
         ))}
         {status?.rx?.error && <span className="warn">{status.rx.error}</span>}
         {!open && status?.error && <span className="warn">{status.error}</span>}
-        {!prefs.retuned && open && <span className="hint">tip: double-click the plot to tune there</span>}
+        {!prefs.retuned && open && <span className="hint">tip: double-click the spectrum to tune there</span>}
       </footer>
     </div>
   );

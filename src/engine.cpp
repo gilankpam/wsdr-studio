@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "engine.h"
 
+#include <sys/statvfs.h>
+
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 
 #include "logger.h"
 #include "protocol.h"
@@ -215,6 +218,8 @@ json Engine::run(const json &c) {
     const wsdr::RxStatus st = r->status();
     if (st.state != wsdr::RxState::Streaming)
       throw CmdError("not_streaming", "not streaming");
+    if (st.settling)
+      throw CmdError("busy", "settings are being applied; try again in a moment");
     const wsdr::RxSettings s = r->settings();
     int path;
     {
@@ -231,13 +236,15 @@ json Engine::run(const json &c) {
     _rec_path = path;
     _rec_gen = st.gen; // only banks of this run (centre/fs as in st) go into the file
     _rec_cfg = st.cfg;
+    _rec_id++;
     _rec_stop_requested = false;
     _recording = true;
     _cb.event(status());
     return {{"file", file}};
   }
-  if (cmd == "_rec_stop") { // from the DSP thread
-    stop_recording(c.value("reason", ""));
+  if (cmd == "_rec_stop") { // from the DSP thread; ignore requests about an earlier recording
+    if (c.value("rec", uint64_t{0}) == _rec_id.load())
+      stop_recording(c.value("reason", ""));
     return {};
   }
   if (cmd == "_lost") { // from poll(); re-check: the user may have pressed Stop meanwhile
@@ -407,6 +414,14 @@ json Engine::status() const {
   const RecordInfo ri = _rec.info();
   j["record"] = {{"active", ri.active}, {"file", ri.path}, {"samples", ri.samples}, {"dropped", ri.dropped},
                  {"seconds", ri.fs > 0 ? ri.samples / ri.fs : 0.0}, {"bytes", ri.samples * 4}, {"error", ri.error}};
+  // free space where recordings go (the nearest existing directory)
+  std::error_code ec;
+  std::filesystem::path d = _rec.dir();
+  while (!d.empty() && !std::filesystem::exists(d, ec) && d.has_parent_path() && d != d.parent_path())
+    d = d.parent_path();
+  struct statvfs v {};
+  if (statvfs(d.c_str(), &v) == 0)
+    j["disk_free"] = static_cast<double>(v.f_bavail) * v.f_frsize;
   j["t"] = now_s();
   return j;
 }
@@ -431,9 +446,10 @@ void Engine::dsp_loop() {
   auto request_stop = [&](const char *reason) {
     _recording = false;
     if (!_rec_stop_requested.exchange(true))
-      submit({{"cmd", "_rec_stop"}, {"reason", reason}}, nullptr);
+      submit({{"cmd", "_rec_stop"}, {"reason", reason}, {"rec", _rec_id.load()}}, nullptr);
   };
   uint64_t rec_next = 0; // next bank seq expected in the file (0 = not started)
+  uint64_t rec_seen = 0; // the recording rec_next belongs to
   while (!_dsp_quit) {
     Bank *b = _ring.pop(std::chrono::milliseconds(100));
     const auto t0 = clk::now();
@@ -454,6 +470,10 @@ void Engine::dsp_loop() {
       // Every file has one centre, one rate and no gaps. Banks of the run the recording belongs to go
       // in; older ones (still queued from before a retune) are skipped; a newer run, or a gap in the
       // bank sequence (the DSP fell behind and the ring dropped banks), ends the file.
+      if (_rec_id != rec_seen) { // a new recording: its first bank starts the sequence
+        rec_seen = _rec_id;
+        rec_next = 0;
+      }
       if (!_recording) {
         rec_next = 0;
       } else if (gen > _rec_gen) {
@@ -472,6 +492,8 @@ void Engine::dsp_loop() {
         _rec.push(iq.data(), ns);
         if (_rec.failed())
           request_stop("the recording could not be written");
+        else if (_rec.dropped())
+          request_stop("the disk could not keep up; the file ends before the first lost sample");
       }
       _ring.release(b);
       busy += std::chrono::duration<double>(clk::now() - t0).count();

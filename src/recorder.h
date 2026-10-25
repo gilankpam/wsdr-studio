@@ -37,6 +37,8 @@ public:
   void push(const int16_t *iq, size_t samples);
   RecordInfo info() const;
   bool failed() const { return _failed; }
+  uint64_t dropped() const { return _dropped; }
+  const std::string &dir() const { return _dir; }
 
 private:
   void writer();

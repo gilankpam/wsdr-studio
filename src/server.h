@@ -4,7 +4,7 @@
 // Security model: local only. Binds 127.0.0.1. Every request must carry Host 127.0.0.1:PORT or
 // localhost:PORT (DNS rebinding). The WebSocket /ws needs the session token as ?t=TOKEN plus, when a
 // browser sends one, an Origin from the same two hosts (cross-site WebSocket). The token never appears
-// on a command line: the browser is started on /#k=KEY (a single-use launch key, valid 60 s, in the URL
+// on a command line: the browser is started on /#k=KEY (a single-use launch key, valid 30 s, in the URL
 // fragment, which browsers never send to a server); the page exchanges it once via /api/session?k=KEY
 // and keeps the token in sessionStorage, which is per origin (port included) and per tab. No cookies:
 // those would be shared with every other service on 127.0.0.1. /api/launch-key?t=TOKEN mints a new

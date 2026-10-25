@@ -65,13 +65,13 @@ running instance: security gates, protocol, a retune, and a recording.
 ## Security model
 
 The backend listens on 127.0.0.1 only and checks every request's `Host` header against DNS rebinding.
-- **The WebSocket:**
-  - It needs the per-launch session token, either as an HttpOnly, SameSite=Strict cookie (browsers)
-    or as `?t=` (scripts).
-  - A browser's `Origin` must be the app's own.
-- **The token never appears on a command line.** The browser is started with a single-use launch key
-  (`/?k=…`, valid 60 s), which is exchanged for the cookie. The token itself lives only in a private
-  per-user file (`$XDG_RUNTIME_DIR/wsdr-studio.instance`, mode 0600).
+- **The WebSocket** needs the per-launch session token (`?t=`), and a browser's `Origin` must be the
+  app's own.
+- **No secret on a command line.** The browser is pointed at a private 0600 page (deleted after 30 s)
+  that redirects to `/#k=KEY`: a single-use launch key, valid 30 s, in the URL fragment (never sent to
+  a server). The page exchanges it once for the session token and keeps that in sessionStorage (per
+  origin and tab; no cookies, which other services on 127.0.0.1 would see). The token itself lives
+  only in a private per-user file (`$XDG_RUNTIME_DIR/wsdr-studio/instance`, mode 0600).
 - **No remote access.**
 
 ## Layout

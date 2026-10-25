@@ -37,6 +37,8 @@ export class Display {
   private lastRowT = 0;       // server time of the previous row (s)
   private rowsPerS = 25;      // measured row rate, for the waterfall's time ticks
   private gutterRate = 25;    // the rate the ticks were last drawn with
+  private stopRows = -1;      // rows since the last Stop separator (-1: none); ticks end there
+  private stopPending = false;
   private seen = 0;
   private dirty = true;
   private raf = 0;
@@ -66,11 +68,12 @@ export class Display {
         this.hover = null;
         this.dirty = true;
       });
-      on(c, 'dblclick', (e) => {
-        const f = this.freqAt(e.offsetX);
-        if (f !== null) this.onRetune(f); // the app snaps it to the radio's tuning steps
-      });
     }
+    // Tune by double-click on the spectrum only: older waterfall rows may belong to another span.
+    on(sp, 'dblclick', (e) => {
+      const f = this.freqAt(e.offsetX);
+      if (f !== null) this.onRetune(f); // the app snaps it to the radio's tuning steps
+    });
     let wasStale = false;
     const loop = () => {
       const stale = this.isStale();
@@ -134,7 +137,7 @@ export class Display {
     this.last = [null, null];
     this.hold = [null, null];
     this.smoothed = [null, null];
-    if (this.wfSpan) this.wfSpan += ' (before Stop)';
+    this.stopPending = !!this.wfSpan;
     this.dirty = true;
   }
 
@@ -183,19 +186,21 @@ export class Display {
     const dbMax = Math.max(dbMin + 30, Math.ceil((peak + 5) / 5) * 5);
     // Waterfall floor just above the average noise floor: rows with no frame at all (common: 40 ms
     // windows without traffic) then show dark blue, not black; frames stand out above them.
-    const wfFloor = Math.min(dbMax - 10, Math.max(dbMin, Math.round(floor + (this.opts.wfMode === 'max' ? 3 : 1))));
+    // peak mode: the noise-only peak over a row sits ~7-8 dB above the average floor
+    const wfFloor = Math.min(dbMax - 10, Math.max(dbMin, Math.round(floor + (this.opts.wfMode === 'max' ? 6 : 1))));
     return { dbMin, dbMax, wfFloor };
   }
 
   push(r: Row) {
     this.seen++;
     this.lastRowAt = performance.now();
-    if (this.lastRowT && r.t > this.lastRowT && r.path === 0) {
+    const shown = r.path === this.opts.wfPath || !this.last[this.opts.wfPath];
+    if (this.lastRowT && r.t > this.lastRowT && shown) {
       const rate = 1 / (r.t - this.lastRowT);
       this.rowsPerS = 0.9 * this.rowsPerS + 0.1 * rate;
       if (Math.abs(this.rowsPerS - this.gutterRate) / this.gutterRate > 0.05) this.drawGutter();
     }
-    if (r.path === 0 || !this.last[0]) this.lastRowT = r.t;
+    if (shown) this.lastRowT = r.t;
     const prev = this.last[r.path];
     if (!prev || prev.bins !== r.bins || prev.f0 !== r.f0 || prev.df !== r.df) {
       this.hold[r.path] = null;
@@ -270,7 +275,8 @@ export class Display {
     const step = pxPerS * 10 > 60 * d ? 10 : 30;
     c.textAlign = 'right';
     c.textBaseline = 'middle';
-    for (let s = step; s * pxPerS < H; s += step) {
+    const end = this.stopRows >= 0 ? Math.min(H, this.stopRows) : H; // no ticks across a Stop gap
+    for (let s = step; s * pxPerS < end; s += step) {
       const y = s * pxPerS;
       if (y < y0 + barH + 12 * d) continue;
       c.fillRect(L - 5 * d, y, 4 * d, 1);
@@ -283,12 +289,18 @@ export class Display {
     const w = W - L;
     if (w <= 0) return;
     c.drawImage(this.wf, L, 0, w, H - 1, L, 1, w, H - 1);
-    const span = `${((r.f0 + r.df * (r.bins / 2 - 0.5)) / 1e6).toFixed(1)} MHz · ${((r.df * r.bins) / 1e6).toFixed(1)} MHz span`;
-    if (this.wfSpan && span !== this.wfSpan) {
+    if (this.stopRows >= 0) {
+      this.stopRows++;
+      if (this.stopRows <= H) this.drawGutter();
+    }
+    const span = `${((r.f0 + r.df * (r.bins / 2 - 0.5)) / 1e6).toFixed(1)} MHz · ${+((r.df * r.bins) / 1e6).toFixed(1)} MHz span`;
+    if (this.wfSpan && (span !== this.wfSpan || this.stopPending)) {
       // A retune, span change or new run: a separator. The label describes the OLD rows below it (the
       // new rows above match the axis), so nothing below the line is misread.
       const d = this.dpr;
-      const label = `▼ before: ${this.wfSpan}`;
+      const label = this.stopPending ? `▼ before Stop: ${this.wfSpan}` : `▼ before: ${this.wfSpan}`;
+      if (this.stopPending) this.stopRows = 0;
+      this.stopPending = false;
       c.fillStyle = '#ffffff';
       c.fillRect(L, 0, w, Math.max(1, Math.round(d)));
       c.font = `${11 * d}px system-ui, sans-serif`;
@@ -443,7 +455,7 @@ export class Display {
         c.fillText(label, lx + 18 * d, T + 19 * d);
       }
       // hover readout
-      if (this.hover !== null && !stale && !this.opts.dim) {
+      if (this.hover !== null && !stale) {
         const f = this.freqAt(this.hover);
         const r = this.last[0] ?? this.last[1];
         if (f !== null && r) {

@@ -168,13 +168,17 @@ void Recorder::write_meta(bool final) {
     f << meta.dump(2) << "\n";
     f.flush();
     if (!f) {
-      std::filesystem::remove(tmp);
+      std::error_code ec;
+      std::filesystem::remove(tmp, ec);
       if (_error.empty())
         _error = "writing the metadata file failed";
       return;
     }
   }
-  std::filesystem::rename(tmp, _base + ".sigmf-meta");
+  std::error_code ec;
+  std::filesystem::rename(tmp, _base + ".sigmf-meta", ec);
+  if (ec && _error.empty())
+    _error = "writing the metadata file failed: " + ec.message();
 }
 
 RecordInfo Recorder::info() const {

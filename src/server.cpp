@@ -332,7 +332,7 @@ std::string Server::new_launch_key() {
     std::snprintf(b + 2 * i, 3, "%02x", rd() & 0xff);
   std::lock_guard<std::mutex> l(_km);
   const auto now = std::chrono::steady_clock::now();
-  std::erase_if(_keys, [&](const auto &k) { return now - k.second > std::chrono::seconds(60); });
+  std::erase_if(_keys, [&](const auto &k) { return now - k.second > std::chrono::seconds(30); });
   _keys.emplace_back(b, now);
   return b;
 }
@@ -342,7 +342,7 @@ bool Server::consume_launch_key(const std::string &key) {
   const auto now = std::chrono::steady_clock::now();
   for (auto it = _keys.begin(); it != _keys.end(); ++it)
     if (same(it->first, key)) {
-      const bool fresh = now - it->second <= std::chrono::seconds(60);
+      const bool fresh = now - it->second <= std::chrono::seconds(30);
       _keys.erase(it);
       return fresh;
     }

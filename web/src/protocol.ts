@@ -16,6 +16,7 @@ export type Status = {
   rx?: { state: string; banks: number; restarts: number; channel: number; width: number; centre: number; fs: number; error: string };
   record: { active: boolean; file: string; samples: number; dropped: number; seconds: number; bytes: number; error: string };
   client_drops?: number;
+  disk_free?: number; // bytes free where recordings go
 };
 export type Row = {
   path: number; seq: number; bins: number; t: number; f0: number; df: number;
@@ -45,6 +46,7 @@ export function decodeRow(buf: ArrayBuffer): Row | null {
 }
 
 const TOKEN_KEY = 'wsdr-studio.token';
+let sessionPromise: Promise<string> | null = null;
 
 type Pending = { resolve: (r: any) => void; reject: (e: Error) => void };
 
@@ -68,7 +70,12 @@ export class Client {
   // The session token: the launch link carries a single-use key in the URL fragment (#k=, never sent to
   // the server by the browser); it is exchanged once for the token, which this tab keeps in
   // sessionStorage (per origin, so per port, and per tab: reloads keep working). ?t= also works.
-  static async fromLocation(): Promise<Client> {
+  static fromLocation(): Promise<Client> {
+    sessionPromise ??= Client.exchange();
+    return sessionPromise.then((url) => new Client(url));
+  }
+
+  private static async exchange(): Promise<string> {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = (t: string) => `${proto}//${location.host}/ws?t=${encodeURIComponent(t)}`;
     const key = new URLSearchParams(location.hash.slice(1)).get('k');
@@ -82,7 +89,7 @@ export class Client {
         } catch {
           /* storage blocked: this page still works until reload */
         }
-        return new Client(url(token));
+        return url(token);
       }
     }
     let t = new URLSearchParams(location.search).get('t');
@@ -92,7 +99,7 @@ export class Client {
       /* storage blocked */
     }
     if (!t) throw new Error('This window has no session. Start wsdr-studio again to open a new one.');
-    return new Client(url(t));
+    return url(t);
   }
 
   connect() {

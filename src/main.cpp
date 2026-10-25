@@ -90,17 +90,8 @@ std::string data_dir() {
 }
 
 // Private per-user file "pid port token" for the running instance (never in a shared /tmp).
-std::string instance_file() {
-  const char *r = std::getenv("XDG_RUNTIME_DIR");
-  if (r && *r)
-    return std::string(r) + "/wsdr-studio.instance";
-  const char *h = std::getenv("HOME");
-  const std::string dir = std::string(h ? h : ".") + "/.cache/wsdr-studio";
-  std::error_code ec;
-  fs::create_directories(dir, ec);
-  ::chmod(dir.c_str(), 0700);
-  return dir + "/instance";
-}
+std::string private_dir();
+std::string instance_file() { return private_dir() + "/instance"; }
 
 bool write_instance(const std::string &text) {
   const int fd = ::open(instance_file().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -168,9 +159,52 @@ void remove_instance_if_ours(const std::string &token) {
   }
 }
 
+// Private per-user directory for the instance file and launch pages (0700).
+std::string private_dir() {
+  const char *r = std::getenv("XDG_RUNTIME_DIR");
+  const char *h = std::getenv("HOME");
+  const std::string dir = r && *r ? std::string(r) + "/wsdr-studio" : std::string(h ? h : ".") + "/.cache/wsdr-studio";
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  ::chmod(dir.c_str(), 0700);
+  return dir;
+}
+
+// The launch URL carries a single-use key. Command lines are readable by every local user
+// (/proc/PID/cmdline), so the browser is not given the URL itself but a private 0600 page that
+// redirects to it; the page is deleted after 30 s. Returns "" if the page cannot be written.
+std::string launch_page(const std::string &url) {
+  std::random_device rd;
+  char name[48];
+  std::snprintf(name, sizeof name, "launch-%08x%08x.html", rd(), rd());
+  const std::string path = private_dir() + "/" + name;
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+  if (fd < 0)
+    return {};
+  const std::string html = "<!doctype html><meta charset=\"utf-8\"><title>wsdr-studio</title>"
+                           "<script>location.replace(\"" + url + "\")</script>\n";
+  const bool ok = ::write(fd, html.data(), html.size()) == static_cast<ssize_t>(html.size());
+  ::close(fd);
+  if (!ok) {
+    ::unlink(path.c_str());
+    return {};
+  }
+  std::thread([path] {
+    std::this_thread::sleep_for(std::chrono::seconds(30));
+    ::unlink(path.c_str());
+  }).detach();
+  return "file://" + path;
+}
+
 // Open the UI: Chrome/Chromium as an app window, else the default browser. The child gets a clean
 // environment for libraries (an AppImage's LD_LIBRARY_PATH must not leak into the browser).
-void open_browser(const std::string &url) {
+void open_browser(const std::string &secret_url) {
+  const std::string page = launch_page(secret_url);
+  if (page.empty()) {
+    std::fprintf(stderr, "wsdr-studiod: cannot write the launch page; open %s yourself\n", secret_url.c_str());
+    return;
+  }
+  const std::string url = page;
   std::vector<std::string> env;
   for (char **e = environ; *e; e++) {
     const std::string s = *e;
@@ -206,7 +240,7 @@ void open_browser(const std::string &url) {
     posix_spawnattr_destroy(&at);
     if (rc == 0) {
       std::thread([pid] { waitpid(pid, nullptr, 0); }).detach();
-      std::fprintf(stderr, "wsdr-studiod: opened %s with %s\n", url.c_str(), argv[0]);
+      std::fprintf(stderr, "wsdr-studiod: opened the UI with %s\n", argv[0]);
       return;
     }
   }
@@ -316,7 +350,7 @@ int main(int argc, char **argv) {
     if (a.browser)
       open_browser(url);
     else
-      std::fprintf(stderr, "wsdr-studiod: open %s (single use, 60 s)\n", url.c_str());
+      std::fprintf(stderr, "wsdr-studiod: open %s (single use, 30 s)\n", url.c_str());
     return 0;
   }
 
@@ -379,7 +413,7 @@ int main(int argc, char **argv) {
   if (a.browser)
     open_browser("http://127.0.0.1:" + std::to_string(srv->port()) + "/#k=" + srv->new_launch_key());
   else
-    std::fprintf(stderr, "wsdr-studiod: open http://127.0.0.1:%u/#k=%s (single use, 60 s)\n", srv->port(),
+    std::fprintf(stderr, "wsdr-studiod: open http://127.0.0.1:%u/#k=%s (single use, 30 s)\n", srv->port(),
                  srv->new_launch_key().c_str());
 
   net::signal_set sig(io, SIGINT, SIGTERM);

@@ -310,8 +310,8 @@ export default function App() {
       const stopAgain = !!r && !r.wasOpen && f === null && !!handles.current[slot]?.running();
       if ((to === 'single' && slot === 1) || stopAgain)
         hub.request('close', { slot }).catch((e: Error) => {
-          restore.current = restore.current.filter((x) => x.slot !== slot); // it keeps running as it is
-          handles.current[slot]?.notice(`Could not stop view ${SLOT_NAME[slot]}: ${e.message}`);
+          if (seq === mapSeq.current) restore.current = restore.current.filter((x) => x.slot !== slot); // it keeps running as it is
+          (handles.current[slot] ?? handles.current[0])?.notice(`Could not stop view ${SLOT_NAME[slot]}: ${e.message}`); // (B is gone in Single)
         });
       if (!(to === 'single' && slot === 1))
         items.push({ slot, key, pid: pidOf(key), args, start: !!r?.wasOpen && !!key, at, gappedOk, afterClose: stopAgain });
@@ -341,7 +341,7 @@ export default function App() {
       // gapped, e.g. replugged at USB 2 meanwhile, is not asked for); said explicitly either way, so no
       // draft of a gapped sweep step carries over
       if (args.rate_sel !== undefined && !x.gappedOk && !h.rateOk(args.rate_sel)) delete args.rate_sel;
-      if (args.rate_sel !== undefined) args.allow_gapped = x.gappedOk; // (an item without a span leaves it alone)
+      if (x.args?.rate_sel !== undefined) args.allow_gapped = args.rate_sel !== undefined && x.gappedOk; // (an item without a span leaves it alone)
       if (Object.keys(args).length) h.linkedSet(args); // running: retuned; stopped: its next start
       if (x.start && !h.running()) h.startWith(args);
       return false;

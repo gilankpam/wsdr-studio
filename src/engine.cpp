@@ -289,7 +289,10 @@ void Engine::stop_recording(const std::string &why) {
 void Engine::open_adapter(uint16_t pid, const json &c) {
   if (pid != wsdr::kPid8812bu && pid != wsdr::kPid8812cu)
     throw CmdError("bad_request", "pid must be 0xb812 or 0xc812");
-  close_adapter();
+  if (rx()) { // a second open (another window, a script): tell clients the old session is gone
+    close_adapter();
+    _cb.event(caps());
+  }
   wsdr::RxSettings s;
   s.freq = c.contains("freq") ? num(c, "freq", 2.3e9, 6.2e9) : 5180e6;
   s.rate_sel = c.contains("rate_sel") ? integer(c, "rate_sel", 1, 5) : (pid == wsdr::kPid8812cu ? 4 : 2);

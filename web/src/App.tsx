@@ -202,7 +202,10 @@ export default function App() {
             if (s) setScale(s);
           }
         };
-        c.onConnection = (up) => setConnected(up);
+        c.onConnection = (up) => {
+          setConnected(up);
+          if (!up) wasOpen = false; // the radio may be stopped and restarted elsewhere meanwhile: the next caps is a fresh Start
+        };
         c.onGiveUp = (why) => setFatal(why);
         c.onEvent = (e) => {
           switch (e.type) {
@@ -254,7 +257,7 @@ export default function App() {
               setStatus(e);
               if (e.record?.active && !live.current.recording) {
                 window.clearTimeout(gainTimer.current); // controls lock now
-                setSaved(null); // a new recording (from any window) replaces the old "Saved" note
+                setSaved((s) => (s && s.file === e.record.file ? s : null)); // a new recording (from any window) replaces the old note
               }
               live.current.recording = e.record?.active ?? false;
               const banks = e.rx?.banks ?? 0;
@@ -373,11 +376,9 @@ export default function App() {
   // A settings change: sent now when streaming, kept as a draft until Start otherwise.
   const set = (args: Partial<RxSettings>) => {
     if (!live.current.open) {
-      setDraft((dr) => {
-        const n = { ...dr, ...args };
-        updatePrefs({ tuning: { freq: n.freq, rate_sel: n.rate_sel, gain_db: n.gain_db, agc: n.agc } }); // remembered too
-        return n;
-      });
+      const n = { ...draft, ...args };
+      setDraft(n);
+      updatePrefs({ tuning: { freq: n.freq, rate_sel: n.rate_sel, gain_db: n.gain_db, agc: n.agc } }); // remembered too
       if (args.freq !== undefined) setFreqText(mhz(args.freq, 3));
       return;
     }
@@ -390,8 +391,10 @@ export default function App() {
     if (!sel) return;
     setStarting(true);
     setSaved(null);
+    window.clearTimeout(gainTimer.current); // a gain change still waiting goes with the open
+    const gain = gainUi ?? draft.gain_db;
     try {
-      await req('open', { pid: sel.pid, bus: sel.bus, port: sel.port, ...draft });
+      await req('open', { pid: sel.pid, bus: sel.bus, port: sel.port, ...draft, gain_db: gain });
     } catch {
       /* shown */
     } finally {
@@ -403,7 +406,10 @@ export default function App() {
     if (!c) return;
     updatePrefs({ retuned: true }); // the tip is no longer needed
     if (c.width === 40 && (caps.wide_capable ?? sel?.max_msps === 40)) set({ freq: c.centre, rate_sel: 1, wide: true });
-    else set({ freq: c.centre });
+    else {
+      if (c.width === 40) addBanner('40 MHz needs the 8812BU on USB 3; showing the centre at the widest span this adapter can do');
+      set({ freq: c.centre });
+    }
   };
   const commitFreq = () => {
     const f = Math.round(parseFloat(freqText) * 1e6);
@@ -737,6 +743,12 @@ export default function App() {
       <footer className="status">
         <span className={dotClass} />
         <span>{stateText}</span>
+        {!open && !opening && connected && sel && (
+          <span className="muted">
+            next Start: {chan ? `ch ${chan.label} · ` : ''}
+            {mhz(cur.freq)} MHz · {spanLabel(fsNow)} span
+          </span>
+        )}
         {open && st && (
           <span>
             {chan && !offGrid ? `ch ${chan.label} · ` : ''}

@@ -202,7 +202,8 @@ export class Display {
   }
 
   setOpts(o: Partial<DisplayOpts>) {
-    const rescale = o.dbMin !== undefined || o.dbMax !== undefined || o.wfFloor !== undefined;
+    const rescale =
+      o.dbMin !== undefined || o.dbMax !== undefined || o.wfFloor !== undefined || (o.dim !== undefined && o.dim !== this.opts.dim);
     this.opts = { ...this.opts, ...o };
     if (rescale) this.drawGutter();
     this.dirty = true;
@@ -336,7 +337,8 @@ export class Display {
     const step = pxPerS * 10 > 60 * d ? 10 : 30;
     c.textAlign = 'right';
     c.textBaseline = 'middle';
-    const end = this.stopRows >= 0 ? Math.min(H, this.stopRows) : H; // no ticks across a Stop gap
+    // no ticks across a Stop gap, nor while stopped (the picture's age keeps growing)
+    const end = this.opts.dim ? 0 : this.stopRows >= 0 ? Math.min(H, this.stopRows) : H;
     for (let s = step; s * pxPerS < end; s += step) {
       const y = s * pxPerS;
       if (y < y0 + barH + 12 * d) continue;

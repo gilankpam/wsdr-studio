@@ -100,9 +100,16 @@ button.icon { width: 34px; padding: 0; display: flex; align-items: center; justi
 .field.inline select { max-width: 170px; }
 .sidebar input[type='range'] { flex: 1; min-width: 0; padding: 0; accent-color: var(--on-line); }
 .links { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #0e131a; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; }
-button.chip { display: flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 9px; border-radius: 13px; font-size: 12px; border-style: dashed; color: var(--muted2); }
-button.chip.on { border-style: solid; color: #fff; }
+/* a link as an on/off switch: label and what it does on the left, the switch on the right */
+button.toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 38px; padding: 4px 10px; text-align: left; background: transparent; }
+button.toggle .tlabel { display: flex; flex-direction: column; color: var(--muted2); }
+button.toggle .tlabel small { font-size: 11px; color: var(--muted); }
+button.toggle.on .tlabel { color: #fff; }
+button.toggle.on .tlabel small { color: var(--muted2); }
+.switch { flex: none; position: relative; width: 32px; height: 18px; border-radius: 9px; background: #2c3a4b; transition: background 0.12s; }
+.switch i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #8e99a7; transition: transform 0.12s, background 0.12s; }
+button.toggle.on .switch { background: var(--on-line); }
+button.toggle.on .switch i { transform: translateX(14px); background: #0b0e13; }
 
 .workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .views { display: flex; flex: 1; min-height: 0; }

@@ -296,29 +296,27 @@ export default function App() {
   const dist = views[0] && views[1] ? Math.round((views[1].freq - views[0].freq) / 1e6) : null;
   const distLabel = dist === null ? '' : dist === 0 ? ' · B = A' : dist > 0 ? ` · B = A + ${dist}` : ` · B = A − ${-dist}`;
   const anyLock = locks.freq || locks.span || locks.gain;
+  // the links, as switches: what each keeps the same between A and B
+  const spans = views[0] && views[1] ? [views[0].fsNow, views[1].fsNow] : null;
+  const links: [keyof Locks, string, string, string][] = [
+    ['freq', 'Frequency', distLabel ? distLabel.slice(3) : 'keeps the distance', 'Retuning either view retunes the other by the same amount, keeping their distance'],
+    ['span', 'Span', spans && spans[0] === spans[1] ? `both ${spanLabel(spans[0])}` : 'the same span', 'Both views show the same span (where both adapters show it continuously)'],
+    ['gain', 'Gain', 'gain and AGC together', "Gain and AGC change together (two dongles' gains differ slightly)"],
+  ];
   const linksBox = dual && (
-    <div className="links">
+    <div className="links" role="group" aria-label="Links between A and B">
       <span className="note">{anyLock ? 'Moving either view moves both' : 'The views move independently'}</span>
-      <div className="chips">
-        <button
-          className={locks.freq ? 'chip on' : 'chip'}
-          aria-pressed={locks.freq}
-          onClick={() => setLock('freq')}
-          title="Linked: retuning either view retunes the other by the same amount, keeping their distance"
-        >
-          <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1" />
-            <path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1" />
-          </svg>
-          Frequency{distLabel}
+      {links.map(([k, label, what, title]) => (
+        <button key={k} className={locks[k] ? 'toggle on' : 'toggle'} role="switch" aria-checked={locks[k]} onClick={() => setLock(k)} title={title}>
+          <span className="tlabel">
+            {label}
+            <small>{locks[k] ? what : 'not linked'}</small>
+          </span>
+          <span className="switch" aria-hidden="true">
+            <i />
+          </span>
         </button>
-        <button className={locks.span ? 'chip on' : 'chip'} aria-pressed={locks.span} onClick={() => setLock('span')} title="Linked: both views show the same span (where both adapters show it continuously)">
-          Span
-        </button>
-        <button className={locks.gain ? 'chip on' : 'chip'} aria-pressed={locks.gain} onClick={() => setLock('gain')} title="Linked: gain and AGC change together (two dongles' gains differ slightly)">
-          Gain
-        </button>
-      </div>
+      ))}
     </div>
   );
   const auto = prefs.scale === null;

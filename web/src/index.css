@@ -189,12 +189,12 @@ canvas.waterfall { flex: 1; min-height: 100px; background: #000; cursor: crossha
   padding: 4px 12px 2px; background: #0e131a; border-bottom: 1px solid var(--line);
 }
 .ruler:focus-visible { outline: 2px solid var(--on-line); outline-offset: -2px; }
-.rbands { display: flex; margin-bottom: 4px; }
-.rbands button { min-height: 32px; padding: 0 9px; border-radius: 0; color: var(--muted2); font-size: 12px; }
-.rbands button + button { margin-left: -1px; }
-.rbands button:first-child { border-radius: 6px 0 0 6px; }
-.rbands button:last-child { border-radius: 0 6px 6px 0; }
-.rbands button.on { color: #fff; position: relative; z-index: 1; }
+/* what the ruler shows: 2.4 GHz | 5 GHz on top, the 5 GHz sections below */
+.rbands { display: grid; grid-template-columns: repeat(6, auto); gap: 3px; margin-bottom: 2px; }
+.rbands button { min-height: 0; height: 25px; padding: 0 8px; font-size: 11px; color: var(--muted2); font-variant-numeric: tabular-nums; }
+.rbands button:nth-child(-n + 2) { grid-column: span 3; }
+.rbands button:nth-child(n + 3) { grid-column: span 2; }
+.rbands button.on { color: #fff; }
 .rtrack { position: relative; height: 56px; cursor: crosshair; }
 .rothers { display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }
 .rothers button.rtab { position: static; border-radius: 3px; }
@@ -206,7 +206,8 @@ button.rcell {
   position: absolute; top: 20px; height: 32px; min-height: 0; padding: 0; border: 1px solid #2a3647; border-radius: 3px;
   background: #121921; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted2); overflow: visible; display: flex; align-items: center; justify-content: center;
 }
-button.rcell > span { white-space: nowrap; pointer-events: none; }
+button.rcell > span { display: flex; flex-direction: column; align-items: center; line-height: 1.1; white-space: nowrap; pointer-events: none; }
+button.rcell small { font-size: 10px; color: var(--muted); }
 .rbar { position: absolute; left: 50%; bottom: 2px; height: 4px; transform: translateX(-50%); border-radius: 2px; background: #eef2f6; pointer-events: none; }
 button.rcell:disabled { opacity: 0.6; cursor: not-allowed; }
 /* a view's bracket: drawn only; its tab (label row) selects it, the cells under it stay clickable */

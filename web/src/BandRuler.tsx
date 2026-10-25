@@ -1,35 +1,40 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// The band ruler: one band at a time at full width (2.4 | 5 GHz, following the selected view), a cell
-// per channel (click: tune the selected view there), a bracket per view at the span it shows (its tab
-// selects the view), and a survey bar: the strongest signal seen on each channel this session.
-// 5 GHz channels are equally wide, laid out by channel, not by MHz: the gaps between the UNII groups
-// (where nothing is allowed) shrink to short breaks, so every channel gets as much room as there is.
+// The band ruler: one range at a time at full width (2.4 GHz, a 5 GHz section, or all of 5 GHz; it
+// follows the selected view), a cell per channel (click: tune the selected view there), a bracket per
+// view at the span it shows (its tab selects the view), and a survey bar: the strongest signal seen on
+// each channel this session. 5 GHz channels are equally wide, laid out by channel, not by MHz: the gaps
+// between the UNII groups (where nothing is allowed) shrink to short breaks.
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type WheelEvent } from 'react';
 import { centre, level, type Survey } from './survey';
 import { SLOT_NAME, VIEW_COLOUR, bandOf, mhz } from './util';
 
-type Band = '2.4' | '5';
+type Range = '2.4' | '5' | 'u12' | 'u2e' | 'u3';
 type Group = { name: string; chans: number[]; half: number }; // half: a cell's half-width (Hz)
 // A piece of the axis: frequencies f0..f1 drawn over units u0..u1 (one unit = one cell).
 type Piece = { f0: number; f1: number; u0: number; u1: number };
-const GROUPS: Record<Band, Group[]> = {
-  '2.4': [{ name: '', chans: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], half: 2.5e6 }],
-  '5': [
-    { name: 'UNII-1', chans: [36, 40, 44, 48], half: 10e6 },
-    { name: 'UNII-2', chans: [52, 56, 60, 64], half: 10e6 },
-    { name: 'UNII-2e', chans: [100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144], half: 10e6 },
-    { name: 'UNII-3', chans: [149, 153, 157, 161, 165], half: 10e6 },
-    { name: '5.9', chans: [169, 173, 177], half: 10e6 },
-  ],
+const U1: Group = { name: 'UNII-1', chans: [36, 40, 44, 48], half: 10e6 };
+const U2: Group = { name: 'UNII-2', chans: [52, 56, 60, 64], half: 10e6 };
+const U2E: Group = { name: 'UNII-2e', chans: [100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144], half: 10e6 };
+const U3: Group = { name: 'UNII-3', chans: [149, 153, 157, 161, 165], half: 10e6 };
+const U59: Group = { name: '5.9 GHz', chans: [169, 173, 177], half: 10e6 };
+// edge: the frequencies the range covers (the radio tunes 2.4 GHz and 5080-6165 MHz)
+const RANGES: Record<Range, { label: string; title: string; groups: Group[]; edge: [number, number] }> = {
+  '2.4': { label: '2.4 GHz', title: 'Channels 1–13 (2400–2483.5 MHz)', groups: [{ name: '', chans: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], half: 2.5e6 }], edge: [2400e6, 2490e6] },
+  '5': { label: '5 GHz', title: 'All 5 GHz channels', groups: [U1, U2, U2E, U3, U59], edge: [5080e6, 6165e6] },
+  u12: { label: '36–64', title: 'Channels 36–64: UNII-1 and UNII-2 (5150–5350 MHz)', groups: [U1, U2], edge: [5080e6, 5410e6] },
+  u2e: { label: '100–144', title: 'Channels 100–144: UNII-2e (5470–5730 MHz)', groups: [U2E], edge: [5410e6, 5732.5e6] },
+  u3: { label: '149–177', title: 'Channels 149–177: UNII-3 and 5.9 GHz (5735–5895 MHz)', groups: [U3, U59], edge: [5732.5e6, 6165e6] },
 };
-const EDGE: Record<Band, [number, number]> = { '2.4': [2400e6, 2490e6], '5': [5080e6, 6165e6] }; // what the radio tunes
-const BREAK = 0.6; // units for a gap between groups (or a band edge), whatever its MHz
+// the section a frequency is in (5 GHz: the one around it, not the whole band)
+const rangeOf = (f: number): Range => (f < 3.7e9 ? '2.4' : f < 5410e6 ? 'u12' : f < 5732.5e6 ? 'u2e' : 'u3');
+const BREAK = 0.6; // units for a gap between groups (or a range edge), whatever its MHz
 
-// The axis of a band: groups at one unit per cell, gaps and edges as short breaks.
-function axis(band: Band): { pieces: Piece[]; units: number } {
+// The axis of a range: groups at one unit per cell, gaps and edges as short breaks.
+function axis(range: Range): { pieces: Piece[]; units: number } {
   const pieces: Piece[] = [];
-  let u = 0, f = EDGE[band][0];
-  for (const g of GROUPS[band]) {
+  const { groups, edge } = RANGES[range];
+  let u = 0, f = edge[0];
+  for (const g of groups) {
     const lo = centre(g.chans[0]) - g.half, hi = centre(g.chans[g.chans.length - 1]) + g.half;
     if (lo > f) {
       const w = Math.min(BREAK, (lo - f) / (2 * g.half));
@@ -40,21 +45,22 @@ function axis(band: Band): { pieces: Piece[]; units: number } {
     u += g.chans.length;
     f = hi;
   }
-  if (EDGE[band][1] > f) {
-    pieces.push({ f0: f, f1: EDGE[band][1], u0: u, u1: u + BREAK });
-    u += BREAK;
+  if (edge[1] > f) {
+    const w = Math.min(BREAK, (edge[1] - f) / (2 * groups[groups.length - 1].half));
+    pieces.push({ f0: f, f1: edge[1], u0: u, u1: u + w });
+    u += w;
   }
   return { pieces, units: u };
 }
-const AXES: Record<Band, { pieces: Piece[]; units: number }> = { '2.4': axis('2.4'), '5': axis('5') };
-// position of a frequency on a band's axis, 0..1 (clamped to the band's ends)
-function pos(band: Band, f: number) {
+const AXES = Object.fromEntries((Object.keys(RANGES) as Range[]).map((r) => [r, axis(r)])) as Record<Range, ReturnType<typeof axis>>;
+// position of a frequency on a range's axis, 0..1 (clamped to its ends)
+function pos(band: Range, f: number) {
   const { pieces, units } = AXES[band];
   const p = pieces.find((x) => f <= x.f1) ?? pieces[pieces.length - 1];
   const t = Math.min(1, Math.max(0, (f - p.f0) / (p.f1 - p.f0)));
   return Math.min(units, Math.max(0, p.u0 + t * (p.u1 - p.u0))) / units;
 }
-function freqAt(band: Band, x: number) {
+function freqAt(band: Range, x: number) {
   const { pieces, units } = AXES[band];
   const u = x * units;
   const p = pieces.find((q) => u <= q.u1) ?? pieces[pieces.length - 1];
@@ -65,6 +71,7 @@ const bar = (lv: number) => ({ opacity: (0.25 + 0.75 * lv).toFixed(2), width: `$
 const WHEEL_PX = 50; // wheel distance per 5 MHz step (a notch is ~50-120 px; trackpads send many small ones)
 const WHEEL_MAX = 4; // steps per burst at most
 const LABEL_PX = 26; // room a channel number needs
+const FREQ_PX = 60;  // room for the channel's MHz under it too
 
 export type RulerView = { slot: number; lo: number; hi: number; locked: boolean; gapped: boolean };
 
@@ -94,11 +101,16 @@ export function BandRuler(p: {
   }, []);
   const selView = p.views.find((v) => v.slot === p.sel);
   const selLocked = selView?.locked ?? true;
-  // the band shown: the selected view's, unless the user switched it (until that view changes band)
-  const selBand = selView ? bandOf((selView.lo + selView.hi) / 2) : '5';
-  const [picked, setPicked] = useState<{ band: Band; from: Band } | null>(null);
-  const band: Band = picked && picked.from === selBand ? picked.band : selBand;
-  const showBand = (b: Band) => setPicked(b === selBand ? null : { band: b, from: selBand });
+  // the range shown: the selected view's section, unless the user picked another (until that view
+  // moves to another section)
+  const selRange = selView ? rangeOf((selView.lo + selView.hi) / 2) : 'u12';
+  const [picked, setPicked] = useState<{ range: Range; from: Range } | null>(null);
+  const band: Range = picked && picked.from === selRange ? picked.range : selRange;
+  const showBand = (b: Range) => setPicked(b === selRange ? null : { range: b, from: selRange });
+  const shows = (v: RulerView) => {
+    const c = (v.lo + v.hi) / 2;
+    return band === '5' ? bandOf(c) === '5' : rangeOf(c) === band;
+  };
 
   const onWheel = (e: WheelEvent) => {
     if (selLocked || !e.deltaY) return;
@@ -125,7 +137,7 @@ export function BandRuler(p: {
   const cellPx = trackPx / units;
   // label every channel when they fit, else every 2nd or 4th (2.4 GHz: 1, 6, 11 when tight)
   const every = band === '2.4' ? (cellPx >= LABEL_PX * 0.8 ? 1 : 5) : cellPx >= LABEL_PX ? 1 : cellPx * 2 >= LABEL_PX ? 2 : 4;
-  const others = p.views.filter((v) => bandOf((v.lo + v.hi) / 2) !== band);
+  const others = p.views.filter((v) => !shows(v));
 
   return (
     <div
@@ -136,22 +148,22 @@ export function BandRuler(p: {
       role="group"
       aria-label="Band ruler. Left and right arrows tune the selected view by 5 MHz (Shift: 20 MHz)"
     >
-      <div className="rbands" role="group" aria-label="Band shown">
-        {(['2.4', '5'] as Band[]).map((b) => (
-          <button key={b} className={b === band ? 'on' : ''} aria-pressed={b === band} onClick={() => showBand(b)} title={`Show the ${b} GHz channels`}>
-            {b}
+      <div className="rbands" role="group" aria-label="Channels shown">
+        {(['2.4', '5', 'u12', 'u2e', 'u3'] as Range[]).map((b) => (
+          <button key={b} className={b === band ? 'on' : ''} aria-pressed={b === band} onClick={() => showBand(b)} title={RANGES[b].title}>
+            {RANGES[b].label}
           </button>
         ))}
       </div>
       <div className="rtrack" ref={track} onClick={(e) => !selLocked && p.onTune(at(e))} title={selLocked ? undefined : 'Click to tune the selected view here'}>
-        {GROUPS[band]
+        {RANGES[band].groups
             .filter((g) => g.name)
             .map((g) => (
               <span key={g.name} className="rgroup" style={{ left: pc(pos(band, centre(g.chans[0]) - g.half)) }}>
                 {g.name}
               </span>
             ))}
-        {GROUPS[band].flatMap((g) =>
+        {RANGES[band].groups.flatMap((g) =>
           g.chans.map((c) => {
             const db = p.survey.get(c);
             const a = pos(band, centre(c) - g.half), b = pos(band, centre(c) + g.half);
@@ -171,7 +183,10 @@ export function BandRuler(p: {
                   p.onTune(centre(c));
                 }}
               >
-                <span>{shown ? c : ''}</span>
+                <span>
+                  {shown ? c : ''}
+                  {cellPx >= FREQ_PX && <small>{mhz(centre(c), 0)}</small>}
+                </span>
                 {db !== undefined && <i className="rbar" style={bar(level(db))} />}
               </button>
             );
@@ -216,10 +231,10 @@ export function BandRuler(p: {
             <button
               key={v.slot}
               className={`rtab s${v.slot}${v.slot === p.sel ? ' sel' : ''}`}
-              title={`View ${SLOT_NAME[v.slot]} is at ${mhz((v.lo + v.hi) / 2, 0)} MHz: show that band`}
-              onClick={() => showBand(bandOf((v.lo + v.hi) / 2))}
+              title={`View ${SLOT_NAME[v.slot]} is at ${mhz((v.lo + v.hi) / 2, 0)} MHz: show those channels`}
+              onClick={() => showBand(rangeOf((v.lo + v.hi) / 2))}
             >
-              {SLOT_NAME[v.slot]} · {bandOf((v.lo + v.hi) / 2)} GHz ▸
+              {SLOT_NAME[v.slot]} · {RANGES[rangeOf((v.lo + v.hi) / 2)].label} ▸
             </button>
           ))}
         </div>

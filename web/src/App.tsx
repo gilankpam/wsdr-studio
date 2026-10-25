@@ -8,6 +8,7 @@ import { Hub } from './hub';
 import type { Device, RxSettings } from './protocol';
 import { Station, type Link, type StationHandle, type ViewInfo } from './Station';
 import { BandRuler } from './BandRuler';
+import { Panorama } from './Panorama';
 import { survey, type Survey } from './survey';
 import { NumField, Section } from './ui';
 import {
@@ -48,9 +49,7 @@ export default function App() {
   const [sbEl, setSbEl] = useState<HTMLDivElement | null>(null);
   const handles = useRef<(StationHandle | null)[]>([null, null]);
   const leaving = useRef(false); // "Stop B" sent: B's recording note goes to A
-  const surveyRef = useRef<Survey>(new Map());
-  const surveyAt = useRef(0);
-  const [surveyShown, setSurveyShown] = useState<Survey>(() => new Map()); // a copy, at most once a second
+  const [surveyMap] = useState<Survey>(() => new Map()); // grows in place; the ruler redraws it itself
   const { mode, locks } = prefs;
   const dual = mode !== 'single';
   const sel = dual ? selSlot : 0;
@@ -150,15 +149,13 @@ export default function App() {
   const [link] = useState<Link>(() => ({
     register: (slot, h) => {
       handles.current[slot] = h;
+      if (!h) setViews((old) => old.map((x, i) => (i === slot ? null : x))); // a view gone: its report too
     },
     report: (slot, v) => setViews((old) => old.map((x, i) => (i === slot ? v : x))),
     userSet: (slot, args) => fwd.current(slot, args, now.current.locks),
     autoFit: () => autoFit.current(),
     survey: (r) => {
-      survey(surveyRef.current, r);
-      if (performance.now() - surveyAt.current < 1000) return;
-      surveyAt.current = performance.now();
-      setSurveyShown(new Map(surveyRef.current));
+      survey(surveyMap, r);
     },
   }));
   // the latest state and functions for those callbacks, after every render
@@ -180,14 +177,18 @@ export default function App() {
     if (on && v && k !== 'freq')
       forward(sel, k === 'span' ? { rate_sel: v.rate_sel, wide: true } : { gain_db: v.gain_db, agc: v.agc }, { freq: false, span: k === 'span', gain: k === 'gain' });
   };
-  // Entering Panorama puts B one span above A; Compare puts it on A's frequency.
+  // Entering Panorama puts B one span above A; Compare puts it on A's frequency. Pending until both
+  // views have appeared and reported.
   const prevMode = useRef(mode);
+  const alignPending = useRef<Mode | null>(null);
   useEffect(() => {
-    const was = prevMode.current;
-    prevMode.current = mode;
-    if (was === mode || mode === 'single') return;
+    if (prevMode.current !== mode) {
+      prevMode.current = mode;
+      alignPending.current = mode === 'single' ? null : mode;
+    }
     const a = handles.current[0], b = handles.current[1], va = views[0];
-    if (!a || !b || !va) return;
+    if (!alignPending.current || !a || !b || !va || !views[1]) return;
+    alignPending.current = null;
     const why = b.busy();
     if (why) {
       a.notice(`View B did not move: ${why}`);
@@ -204,7 +205,7 @@ export default function App() {
     if (Math.abs(snap(want) - want) <= 2.5e6 && bandOf(want) === bandOf(va.freq)) args.freq = snap(want);
     else a.notice(`View B stays: ${(want / 1e6).toFixed(0)} MHz is outside the band`);
     if (Object.keys(args).length) b.linkedSet(args);
-  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mode, views]); // eslint-disable-line react-hooks/exhaustive-deps
   const setMode = (m: Mode) => {
     setConfirmSingle(false);
     if (m === 'single' && dual && (views[1]?.open || views[1]?.locked || openKey[1])) {
@@ -214,14 +215,16 @@ export default function App() {
     updatePrefs({ mode: m });
   };
   // the close waits for a Start still running (the engine's queue is serial); on failure B stays shown
+  // (B's recording note may come after the reply: it goes to A for a few seconds more)
   const stopBAndSingle = () => {
     setConfirmSingle(false);
     leaving.current = true;
+    const from = mode;
     hub
       .request('close', { slot: 1 })
-      .then(() => updatePrefs({ mode: 'single' }))
+      .then(() => now.current.mode === from && updatePrefs({ mode: 'single' })) // unless the user picked a mode meanwhile
       .catch((e: Error) => handles.current[1]?.notice(`Could not stop view B: ${e.message}`))
-      .finally(() => (leaving.current = false));
+      .finally(() => window.setTimeout(() => (leaving.current = false), 5000));
   };
   const setUserScale = (sc: Scale) => {
     const dbMin = Math.min(sc.dbMin, sc.dbMax - 10);
@@ -263,6 +266,14 @@ export default function App() {
     </div>
   );
   const auto = prefs.scale === null;
+  // Panorama stitches neighbouring spans; far apart, one axis would squeeze both into slivers
+  const [va, vb] = views;
+  const gap = va && vb ? Math.max(va.src.lo, vb.src.lo) - Math.min(va.src.hi, vb.src.hi) : 0;
+  const panoNote = !views.some((v) => v?.open)
+    ? 'Stopped. Press ▶ Start in a view’s header.'
+    : va && vb && gap > 2 * Math.max(va.fsNow, vb.fsNow)
+      ? `A and B are ${Math.round(gap / 1e6)} MHz apart: Panorama is for neighbouring spans (Compare shows each on its own axis)`
+      : null;
 
   return (
     <div className={`app mode-${mode}`}>
@@ -391,17 +402,25 @@ export default function App() {
         <main className="workspace">
           <BandRuler
             views={views.flatMap((v, i) =>
-              v && (i === 0 || dual) ? [{ slot: i, lo: v.centre - v.fsNow / 2, hi: v.centre + v.fsNow / 2, locked: v.locked, gapped: v.gapped, recording: v.recording }] : [],
+              v && (i === 0 || dual) ? [{ slot: i, lo: v.centre - v.fsNow / 2, hi: v.centre + v.fsNow / 2, locked: v.locked, gapped: v.gapped }] : [],
             )}
             sel={sel}
             compact={mode === 'compare'}
-            survey={surveyShown}
+            survey={surveyMap}
             linkLabel={dual && locks.freq && distLabel ? distLabel.slice(3) : null}
             otherBusy={dual && views[sel ^ 1]?.recording ? `${SLOT_NAME[sel ^ 1]} paused: recording` : null}
             onTune={(f) => handles.current[sel]?.tune(f)}
             onStep={(n) => {
               const h = handles.current[sel];
-              if (h) h.tune(h.freq() + n * 5e6);
+              if (!h) return;
+              // n steps along the tuning grid (5 MHz; at the 2.4 GHz edges and channel 14 the next centre)
+              let f = h.freq();
+              for (let i = 0; i < Math.abs(n); i++) {
+                let next = f;
+                for (let d = 5e6; next === f && d <= 15e6; d += 5e6) next = snap(f + Math.sign(n) * d);
+                f = next;
+              }
+              h.tune(f);
             }}
             onSelect={setSelSlot}
           />
@@ -424,6 +443,22 @@ export default function App() {
                   otherOpen={openKey[i ^ 1]}
                 />
               ))}
+            {mode === 'panorama' && (
+              <Panorama
+                hub={hub}
+                prefs={prefs}
+                scale={scale}
+                sources={views.map((v) => v?.src ?? null)}
+                overlay={panoNote}
+                onRetune={(f) => {
+                  // the view whose part this is (or the nearer one) moves its centre there
+                  const d = views.map((v) => (v ? (f >= v.src.lo && f <= v.src.hi ? 0 : Math.min(Math.abs(f - v.src.lo), Math.abs(f - v.src.hi))) : Infinity));
+                  const slot = d[1] < d[0] ? 1 : 0;
+                  if (views[slot]?.locked) handles.current[slot]?.notice('End the recording to change tuning');
+                  else handles.current[slot]?.tune(f);
+                }}
+              />
+            )}
           </div>
         </main>
       </div>

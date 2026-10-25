@@ -107,14 +107,16 @@ button.chip.on { border-style: solid; color: #fff; }
 .workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .views { display: flex; flex: 1; min-height: 0; }
 .views.compare { flex-direction: column; }
-.views.panorama { flex-direction: row; }
-.views.panorama .view { min-width: 0; }
+.views.panorama { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+.views.panorama .view { min-width: 0; flex: none; position: relative; }
+/* Panorama: the views keep their headers; one stitched plot spans both columns below them */
+.mode-panorama .view .plots { position: static; flex: none; }
+.mode-panorama .view .plots > canvas { display: none; }
+.mode-panorama .view .strips { top: 100%; }
+.mode-panorama .view .toasts { top: calc(100% + 56px); bottom: auto; }
+.plots.pano { grid-column: 1 / -1; border-top: 1px solid var(--line); }
 .views.compare .view + .view { border-top: 1px solid var(--line); }
 .views.panorama .view + .view { border-left: 1px solid var(--line); }
-@media (max-width: 1099px) {
-  .views.panorama { flex-direction: column; }
-  .views.panorama .view + .view { border-left: none; border-top: 1px solid var(--line); }
-}
 
 .view { display: flex; flex-direction: column; flex: 1; min-height: 0; container: view / inline-size; }
 /* one line: what does not fit goes in this order: channel label, long notes, legend words, state word */
@@ -125,8 +127,8 @@ button.chip.on { border-style: solid; color: #fff; }
 .vhead > * { flex-shrink: 0; }
 .vhead .spacer { flex-shrink: 1; min-width: 0; }
 .vhead .amber, .vhead .chlabel { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@container view (max-width: 760px) { .vhead .chlabel, .vhead .long { display: none; } }
-@container view (max-width: 620px) { .vhead .ltext, .vhead .stext { display: none; } }
+@container view (max-width: 540px) { .vhead .chlabel, .vhead .long { display: none; } }
+@container view (max-width: 700px) { .vhead .ltext, .vhead .stext { display: none; } }
 .view.sel .vhead { background: #13202c; }
 .view.sel.s0 .vhead { border-top-color: var(--view-a); }
 .view.sel.s1 .vhead { border-top-color: var(--view-b); }
@@ -156,8 +158,8 @@ button.rec.on { background: #5a1f22; border-color: var(--bad); color: #ffd6d6; f
 .strip button.x { margin-left: auto; background: transparent; border-color: transparent; font-size: 16px; line-height: 1; }
 
 .plots { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
-/* two views: notes float over the plot, so both views' plots stay aligned */
-.app:not(.mode-single) .strips { position: absolute; top: 0; left: 0; right: 0; z-index: 6; }
+/* Panorama: a view's notes float over the shared plot, under its header */
+.mode-panorama .strips { position: absolute; left: 0; right: 0; z-index: 6; }
 /* info notes float over the plot (bottom right) so the layout never jumps */
 .toasts { position: absolute; bottom: 12px; right: 12px; z-index: 5; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; pointer-events: none; }
 .toast {
@@ -182,29 +184,40 @@ canvas.waterfall { flex: 1; min-height: 100px; background: #000; cursor: crossha
 
 /* band ruler (BandRuler.tsx) */
 .ruler {
-  flex: none; display: grid; grid-template-columns: minmax(150px, 15%) 12px minmax(0, 1fr); column-gap: 0;
+  flex: none; display: grid; grid-template-columns: minmax(170px, 20%) 12px minmax(0, 1fr);
   padding: 4px 12px 2px; background: #0e131a; border-bottom: 1px solid var(--line);
 }
+.ruler:focus-visible { outline: 2px solid var(--on-line); outline-offset: -2px; }
 .rseg { position: relative; height: 44px; cursor: crosshair; }
 .rbreak { display: flex; align-items: center; justify-content: center; color: #4a5768; font-size: 16px; }
 .rband, .rgroup { position: absolute; top: 0; height: 14px; font-size: 10px; letter-spacing: 0.06em; color: var(--muted); white-space: nowrap; overflow: hidden; }
 .rgroup { border-left: 1px solid #2a3646; padding-left: 4px; }
 button.rcell {
   position: absolute; top: 17px; height: 22px; min-height: 0; padding: 0; border: 1px solid #263243; border-radius: 2px;
-  background: #0f141b; font-size: 10px; color: var(--muted2); overflow: hidden;
+  background: transparent; font-size: 10px; color: var(--muted2); overflow: visible; display: flex; align-items: center; justify-content: center;
 }
-button.rcell:disabled { opacity: 1; cursor: not-allowed; }
-button.rview {
-  position: absolute; top: 14px; height: 28px; min-height: 0; padding: 0 0 0 3px; border: 2px solid; border-radius: 4px;
-  font-size: 10px; font-weight: 700; text-align: left; color: #fff; cursor: pointer;
+button.rcell > span { white-space: nowrap; pointer-events: none; }
+button.rcell:disabled { opacity: 0.6; cursor: not-allowed; }
+/* a view's bracket: drawn only; its tab (label row) selects it, the cells under it stay clickable */
+.rview { position: absolute; top: 14px; height: 28px; border: 2px solid; border-radius: 4px; pointer-events: none; opacity: 0.7; }
+.rview.sel { opacity: 1; border-width: 3px; }
+.rview.s0 { background: rgba(79, 195, 247, 0.14); }
+.rview.s1 { background: rgba(199, 146, 234, 0.14); }
+.rview.gapped { border-style: dashed; }
+.rview.out { width: 6px !important; }
+button.rtab {
+  position: absolute; top: 0; height: 14px; min-height: 0; padding: 0 5px; border: none; border-radius: 3px 3px 0 0; z-index: 2;
+  font-size: 10px; font-weight: 700; line-height: 14px; color: #0b0e13; white-space: nowrap; opacity: 0.7;
 }
-button.rview.s0 { background: rgba(79, 195, 247, 0.16); }
-button.rview.s1 { background: rgba(199, 146, 234, 0.16); }
-button.rview.gapped { border-style: dashed; }
-button.rview:not(.sel) { opacity: 0.75; }
-.rfoot { grid-column: 1 / -1; display: flex; gap: 8px; font-size: 10px; color: var(--muted); min-height: 14px; }
+button.rtab.sel { opacity: 1; }
+button.rtab.s0 { background: var(--view-a); }
+button.rtab.s1 { background: var(--view-b); }
+.rfoot { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--muted); min-height: 14px; }
 .rlink { color: var(--text); }
 .rlink.paused { color: var(--amber); }
+.rkey { display: flex; align-items: center; gap: 3px; }
+.rkey i { width: 14px; height: 8px; border: 1px solid #263243; border-radius: 2px; }
 .ruler.compact .rseg { height: 24px; }
-.ruler.compact button.rcell { top: 2px; height: 20px; }
-.ruler.compact button.rview { top: 0; height: 24px; }
+.ruler.compact button.rcell { top: 2px; height: 20px; font-size: 9px; }
+.ruler.compact .rview { top: 0; height: 24px; }
+.ruler.compact .rview.inset { top: 3px; height: 18px; }

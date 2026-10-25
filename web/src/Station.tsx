@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { CHANNELS, channelAt, channelKey } from './channels';
-import { Display } from './display';
+import { Display, type Source } from './display';
 import type { Hub } from './hub';
 import type { Caps, Device, DspSettings, Rate, RxSettings, Row, Status } from './protocol';
 import { Section, Seg } from './ui';
@@ -33,6 +33,7 @@ export type StationHandle = {
 export type ViewInfo = {
   freq: number; fsNow: number; rate_sel: number; fft: number; gapped: boolean; gain_db: number; agc: boolean;
   centre: number; // where the shown span is centred (the radio's centre while running, else the request)
+  src: Source;    // its part of the stitched Panorama plot
   open: boolean; recording: boolean; locked: boolean; selKey: string | null;
 };
 export type Link = {
@@ -65,7 +66,7 @@ export function Station(p: {
   // so quick changes in a row keep the views' distance)
   // rates: the open adapter's (caps), set as events arrive, so a handle used in the same commit is current
   const live = useRef({
-    open: false, recording: false, opening: false, freq: 5180e6, want: null as number | null, wantId: 0, rates: null as Rate[] | null,
+    open: false, recording: false, opening: false, freq: 5180e6, rateSel: 4, want: null as number | null, wantId: 0, rates: null as Rate[] | null,
   });
   const autoOn = useRef(loadPrefs().scale === null); // Auto scale on (mirrors prefs.scale === null; storage may be blocked)
   const view = useRef({ ghost: false, other: p.otherSel }); // for the socket callbacks
@@ -203,6 +204,7 @@ export function Station(p: {
               rememberTuning({ freq: e.rx.freq, rate_sel: e.rx.rate_sel, gain_db: e.rx.gain_db, agc: e.rx.agc });
               lastRx = e.rx;
               live.current.freq = e.rx.freq;
+              live.current.rateSel = e.rx.rate_sel;
               setRx(e.rx);
               lastSentFreq.current = null;
               if (!freqFocused.current) setFreqText(mhz(e.rx.freq, 3));
@@ -301,7 +303,8 @@ export function Station(p: {
   useEffect(() => {
     live.current.opening = opening;
     live.current.freq = cur.freq;
-  }, [opening, cur.freq]);
+    live.current.rateSel = cur.rate_sel;
+  }, [opening, cur.freq, cur.rate_sel]);
   // stopped on an adapter the other view has just opened: take a free one
   useEffect(() => {
     if (open || opening || !p.otherOpen || selKey !== p.otherOpen) return;
@@ -334,20 +337,21 @@ export function Station(p: {
             : hadPicture
               ? 'Stopped. Double-click the spectrum to pick a frequency; ▶ Start to resume.'
               : 'Stopped. Press ▶ Start to begin.';
+  const marker = open || hadPicture ? cur.freq : null;
+  const markerLabel = open ? 'requested' : 'next Start';
+  const chipNotch = chip.includes('8822C');
+  // the 8822B dips at its centre at 40 MHz on 2.4 GHz (measured: ~8-10 dB over +-1 MHz)
+  const notchWide = open && (caps.chip ?? '').includes('8822B') && hwFs >= 40e6 && tuned > 0 && tuned < 3.7e9;
   useEffect(
     () =>
       display.current?.setOpts({
         ...scale, wfMode: prefs.wfMode, smooth: prefs.smooth, overlay, dim: !open,
-        wfPath: dsp.paths === 'b' ? 1 : 0, marker: open || hadPicture ? cur.freq : null,
-        markerLabel: open ? 'requested' : 'next Start',
-        chipNotch: chip.includes('8822C'),
-        // the 8822B dips at its centre at 40 MHz on 2.4 GHz (measured: ~8-10 dB over +-1 MHz)
-        notchWide: open && (caps.chip ?? '').includes('8822B') && hwFs >= 40e6 && tuned > 0 && tuned < 3.7e9,
+        wfPath: dsp.paths === 'b' ? 1 : 0, marker, markerLabel, chipNotch, notchWide,
         colour: VIEW_COLOUR[slot], pathColours: twoPaths ? ['#ffab70', '#8fd694'] : null, ghostColour: VIEW_COLOUR[slot ^ 1],
         showAvg: prefs.showAvg, showPeak: prefs.showPeak,
         staleText: rxState === 'starting' ? 'Applying settings…' : 'No data from the adapter',
       }),
-    [scale, prefs.wfMode, prefs.smooth, prefs.showAvg, prefs.showPeak, overlay, open, dsp.paths, cur.freq, hadPicture, rxState, chip, caps.chip, hwFs, tuned, slot, twoPaths],
+    [scale, prefs.wfMode, prefs.smooth, prefs.showAvg, prefs.showPeak, overlay, open, dsp.paths, marker, markerLabel, chipNotch, notchWide, rxState, slot, twoPaths],
   );
 
   // A settings change: sent now when streaming, kept as a draft until Start otherwise.
@@ -355,6 +359,7 @@ export function Station(p: {
     if (!live.current.open) {
       const n = { ...draft, ...args };
       live.current.freq = n.freq;
+      live.current.rateSel = n.rate_sel;
       setDraft(n);
       rememberTuning({ freq: n.freq, rate_sel: n.rate_sel, gain_db: n.gain_db, agc: n.agc }); // remembered too
       if (args.freq !== undefined) setFreqText(mhz(args.freq, 3));
@@ -392,7 +397,7 @@ export function Station(p: {
     link.register(slot, {
       linkedSet: set, tune: tuneTo, req, freq: () => live.current.want ?? live.current.freq,
       rateOk: (r) => (live.current.rates ?? rates).some((x) => x.rate_sel === r && !x.gapped),
-      fs: () => 80e6 / (1 << cur.rate_sel),
+      fs: () => 80e6 / (1 << live.current.rateSel),
       suggest: (wfMode) => {
         if (wfMode) display.current?.setOpts({ wfMode });
         return display.current?.suggestRange() ?? null;
@@ -403,11 +408,14 @@ export function Station(p: {
   });
   useEffect(() => () => link.register(slot, null), []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
+    const centre = open && tuned > 0 ? tuned : cur.freq;
+    const msg = fatal || !connected ? null : opening ? `${name}: starting…` : !open ? `${name} stopped` : rxState === 'starting' ? `${name}: applying settings…` : null;
     link.report(slot, {
       freq: cur.freq, fsNow, rate_sel: cur.rate_sel, fft: dsp.fft, gapped, gain_db: cur.gain_db, agc: cur.agc,
-      centre: open && tuned > 0 ? tuned : cur.freq, open, recording, locked, selKey,
+      centre, open, recording, locked, selKey,
+      src: { lo: centre - fsNow / 2, hi: centre + fsNow / 2, colour: VIEW_COLOUR[slot], marker, markerLabel, chipNotch, notchWide, dim: !open, msg },
     });
-  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cur.freq, fsNow, cur.rate_sel, dsp.fft, gapped, cur.gain_db, cur.agc, open, tuned, recording, locked, selKey, marker, markerLabel, chipNotch, notchWide, opening, rxState, fatal, connected]); // eslint-disable-line react-hooks/exhaustive-deps
   // the shared preferences reach this adapter: offset tuning when running, the FFT size at once
   useEffect(() => {
     if (caps.open) req('set', { offset_tuning: prefs.offsetTuning }).catch(() => {});

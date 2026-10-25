@@ -9,6 +9,7 @@ export type Sub = {
   slot: number | null;            // null: every event (the app shell); no rows
   row?: (r: Row) => void;         // this slot's rows
   other?: (r: Row) => void;       // the other slot's rows
+  all?: (r: Row) => void;         // every row (the stitched Panorama plot)
   event?: (e: any) => void;
   connection?: (up: boolean) => void;
   giveUp?: (why: string) => void;
@@ -33,6 +34,7 @@ export class Hub {
         c.onRow = (r) => {
           if (gen !== this.gen) return; // a stopped client's late callbacks
           for (const s of this.subs) {
+            s.all?.(r);
             if (s.slot === r.slot) s.row?.(r);
             else if (s.slot !== null) s.other?.(r);
           }

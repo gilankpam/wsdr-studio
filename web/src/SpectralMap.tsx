@@ -96,9 +96,10 @@ export function SpectralMap(p: {
           opts.current.onStep(c, plan.fs);
           const gen0 = s.gen;
           try {
-            await p.hub.request('set', { slot: p.slot, freq: c, rate_sel: plan.rate_sel, wide: true });
+            await p.hub.request('set', { slot: p.slot, freq: c, rate_sel: plan.rate_sel, wide: true, allow_gapped: plan.gapped }); // gapped: the user's switch
             failed = 0;
           } catch {
+            if (me.stop) break; // stopped or left meanwhile: nothing to report
             if (++failed >= 5) return opts.current.onFail('the adapter did not take the sweep’s steps'); // the shell stops the map
             await sleep(500);
             continue;

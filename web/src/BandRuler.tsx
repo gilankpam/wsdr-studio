@@ -154,7 +154,7 @@ export function BandRuler(p: {
           }),
         )}
         {p.views
-          .filter((v) => !others.includes(v))
+          .filter(shows)
           .map((v) => {
             const a = pos(band, v.lo), b = pos(band, v.hi);
             const inset = p.compact && v.slot === 1 && p.views.length > 1; // Compare: B inside A

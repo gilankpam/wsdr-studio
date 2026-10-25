@@ -4,6 +4,7 @@
 
 #include <set>
 
+#include <optional>
 #include <sys/statvfs.h>
 
 #include <chrono>
@@ -81,7 +82,7 @@ Engine::~Engine() {
   _qcv.notify_all();
   if (_cmd.joinable())
     _cmd.join();
-  close_adapter(); // stops the recorder and the stream; the DSP thread then idles
+  close_adapter("the app closed"); // stops the recorder and the stream; the DSP thread then idles
   _dsp_quit = true;
   _ring.wake();
   if (_dsp.joinable())
@@ -153,7 +154,7 @@ json Engine::run(const json &c) {
     return {};
   }
   if (cmd == "close") {
-    close_adapter();
+    close_adapter("the view was stopped");
     _cb.event(caps());
     return {};
   }
@@ -170,17 +171,21 @@ json Engine::run(const json &c) {
       s.freq = num(c, "freq", 2.3e9, 6.2e9);
     if (c.contains("rate_sel"))
       s.rate_sel = integer(c, "rate_sel", 1, 5);
-    s.allow_gapped = true; // a span picked in the app (gapped ones are labelled there)
-    bool caps_changed = false;
-    if (c.contains("offset_tuning")) {
-      caps_changed = _offset_tuning.exchange(flag(c, "offset_tuning")) != _offset_tuning.load();
-    }
+    // a gapped span only when asked for: a span change without it is a continuous one (the widest the
+    // adapter carries, if it asks for more); a change of anything else keeps what the view has
+    if (c.contains("allow_gapped"))
+      s.allow_gapped = flag(c, "allow_gapped");
+    else if (c.contains("rate_sel"))
+      s.allow_gapped = false;
+    // (applied once every field has passed: a rejected command changes nothing)
+    const std::optional<bool> offset = c.contains("offset_tuning") ? std::optional<bool>(flag(c, "offset_tuning")) : std::nullopt;
     if (c.contains("gain_db"))
       s.gain_db = num(c, "gain_db", 0, 100);
     if (c.contains("agc"))
       s.agc = flag(c, "agc");
     if (c.contains("wide"))
       s.wide = flag(c, "wide");
+    const bool caps_changed = offset && _offset_tuning.exchange(*offset) != *offset;
     const wsdr::RxSettings hw = hw_for(s);
     r->set(hw);
     set_view(s, r->settings());
@@ -276,7 +281,7 @@ json Engine::run(const json &c) {
     _lost_requested = true;
     const bool lost = st.state == wsdr::RxState::Lost;
     stop_recording(lost ? "adapter disconnected" : "stream failed");
-    close_adapter();
+    close_adapter("");
     {
       std::lock_guard<std::mutex> l(_sm);
       _error = lost ? "Adapter disconnected. Plug it back in, then press Start."
@@ -311,7 +316,7 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   if (pid != wsdr::kPid8812bu && pid != wsdr::kPid8812cu)
     throw CmdError("bad_request", "pid must be 0xb812 or 0xc812");
   if (rx()) { // a second open (another window, a script): tell clients the old session is gone
-    close_adapter();
+    close_adapter("the view was started again (another window?)");
     _cb.event(caps());
   }
   wsdr::RxSettings s;
@@ -357,7 +362,9 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
     }
   if (bus < 0 && skipped)
     throw CmdError("busy", "every adapter of this kind is open in the other view");
-  if (bus >= 0 && !_claims->take(key(bus, port), _slot))
+  if (bus < 0)
+    throw CmdError("not_found", "no such adapter is plugged in");
+  if (!_claims->take(key(bus, port), _slot))
     throw CmdError("busy", "this adapter is open in the other view");
   {
     std::lock_guard<std::mutex> l(_sm);
@@ -412,8 +419,8 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   s.gain_db = c.contains("gain_db") ? num(c, "gain_db", 0, 100) : 30.0;
   s.agc = c.contains("agc") ? flag(c, "agc") : false;
   s.wide = c.contains("wide") ? flag(c, "wide") : true;
-  // the 8812CU's wide spans (the UI marks them); the command line opens without them
-  s.allow_gapped = c.contains("allow_gapped") ? flag(c, "allow_gapped") : true;
+  // gapped spans only when asked for (the user picked one); the command line opens without them
+  s.allow_gapped = c.contains("allow_gapped") ? flag(c, "allow_gapped") : false;
   if (c.contains("offset_tuning"))
     _offset_tuning = flag(c, "offset_tuning");
   auto r = std::make_shared<wsdr::Receiver>(std::make_shared<Logger>());
@@ -427,17 +434,9 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   try {
     r->open(pid, hw_for(s), bus, port);
   } catch (const wsdr::OpenError &e) {
-    _claims->drop(_slot);
-    std::lock_guard<std::mutex> l(_sm);
-    _state = "closed";
-    _error = e.what();
-    throw CmdError(open_kind(e.kind), e.what());
+    fail(open_kind(e.kind), e.what());
   } catch (const std::exception &e) {
-    _claims->drop(_slot);
-    std::lock_guard<std::mutex> l(_sm);
-    _state = "closed";
-    _error = std::string("bring-up failed: ") + e.what();
-    throw CmdError("bringup", _error);
+    fail("bringup", std::string("bring-up failed: ") + e.what());
   }
   {
     std::lock_guard<std::mutex> l(_dm);
@@ -465,8 +464,9 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   _cb.event(settings());
 }
 
-void Engine::close_adapter() {
-  stop_recording("");
+// why: a recording still running ends with this reason (it is always saved)
+void Engine::close_adapter(const std::string &why) {
+  stop_recording(why);
   std::shared_ptr<wsdr::Receiver> old;
   {
     std::lock_guard<std::mutex> l(_rxm);
@@ -533,7 +533,8 @@ json Engine::settings() const {
   if (const auto r = rx(); r && r->is_open()) {
     std::lock_guard<std::mutex> l(_sm);
     const wsdr::RxSettings &s = _view;
-    j["rx"] = {{"freq", s.freq}, {"rate_sel", s.rate_sel}, {"wide", s.wide}, {"agc", s.agc}, {"gain_db", s.gain_db}};
+    j["rx"] = {{"freq", s.freq}, {"rate_sel", s.rate_sel}, {"wide", s.wide}, {"agc", s.agc}, {"gain_db", s.gain_db},
+               {"allow_gapped", s.allow_gapped}};
   }
   std::lock_guard<std::mutex> l(_dm);
   j["dsp"] = {{"fft", _dsp_cfg.fft}, {"rows_per_s", _dsp_cfg.rows_per_s}, {"paths", paths_name(_dsp_cfg.paths)},
@@ -600,16 +601,20 @@ json Engine::status() const {
   const RecordInfo ri = _rec.info();
   j["record"] = {{"active", ri.active}, {"file", ri.path}, {"samples", ri.samples},
                  {"seconds", ri.fs > 0 ? ri.samples / ri.fs : 0.0}, {"bytes", ri.samples * 4}, {"error", ri.error}};
-  // free space where recordings go (the nearest existing directory)
+  if (const double f = _disk_free; f >= 0) // (sampled by the DSP thread: a hung disk must not stall the I/O thread)
+    j["disk_free"] = f;
+  j["t"] = now_s();
+  return j;
+}
+
+// free space where recordings go (the nearest existing directory); -1 when unknown
+double Engine::disk_free() const {
   std::error_code ec;
   std::filesystem::path d = _rec.dir();
   while (!d.empty() && !std::filesystem::exists(d, ec) && d.has_parent_path() && d != d.parent_path())
     d = d.parent_path();
   struct statvfs v {};
-  if (statvfs(d.c_str(), &v) == 0)
-    j["disk_free"] = static_cast<double>(v.f_bavail) * v.f_frsize;
-  j["t"] = now_s();
-  return j;
+  return statvfs(d.c_str(), &v) == 0 ? static_cast<double>(v.f_bavail) * v.f_frsize : -1;
 }
 
 json Engine::devices_json(const std::vector<DeviceInfo> &d) {
@@ -637,9 +642,14 @@ void Engine::dsp_loop() {
   };
   uint64_t rec_next = 0; // next bank seq expected in the file (0 = not started)
   Crop applied;          // the crop window in use, and the hardware run it belongs to
+  auto disk_at = clk::time_point{};
   while (!_dsp_quit) {
     Bank *b = _ring.pop(std::chrono::milliseconds(100));
     const auto t0 = clk::now();
+    if (t0 - disk_at > std::chrono::seconds(2)) {
+      disk_at = t0;
+      _disk_free = disk_free();
+    }
     if (b) {
       {
         std::lock_guard<std::mutex> l(_dm);

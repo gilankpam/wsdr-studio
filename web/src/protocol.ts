@@ -13,7 +13,8 @@ export type Caps = {
   open: boolean; adapter?: string; pid?: number; bus?: number; port?: string; chip?: string; superspeed?: boolean; paths?: number;
   rates?: Rate[]; gain_max?: number; gain_step?: number; wide_capable?: boolean;
 };
-export type RxSettings = { freq: number; rate_sel: number; wide: boolean; agc: boolean; gain_db: number };
+// allow_gapped: a gapped span may be used (only ever because the user picked one)
+export type RxSettings = { freq: number; rate_sel: number; wide: boolean; agc: boolean; gain_db: number; allow_gapped?: boolean };
 export type DspSettings = { fft: number; rows_per_s: number; paths: 'a' | 'b' | 'ab'; dc_remove: boolean };
 export type Status = {
   state: string; adapter: string; error: string; t: number; rows: number; ring_dropped: number; dsp_load: number;
@@ -37,7 +38,7 @@ export function decodeRow(buf: ArrayBuffer): Row | null {
   const v = new DataView(buf);
   if (v.getUint32(0, true) !== MAGIC || v.getUint16(4, true) !== 1) return null;
   const bins = v.getUint32(12, true);
-  if (buf.byteLength !== HEADER + 2 * bins) return null;
+  if (bins < 2 || buf.byteLength !== HEADER + 2 * bins) return null;
   const dbMin = v.getFloat32(40, true), dbStep = v.getFloat32(44, true);
   const u = new Uint8Array(buf, HEADER);
   const avg = new Float32Array(bins), max = new Float32Array(bins);

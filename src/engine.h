@@ -94,7 +94,8 @@ private:
   void dsp_loop();
   json run(const json &c); // on the command thread; throws -> error reply
   void open_adapter(uint16_t pid, const json &c);
-  void close_adapter();
+  void close_adapter(const std::string &why);
+  double disk_free() const;
   void stop_recording(const std::string &why);
   // Offset tuning (8812CU 10/20 MHz views): the chip's centre notch (~+-0.6 MHz, deeper at higher
   // rates) is kept out of view by capturing 40 MHz with the radio 10 MHz to the side and showing only
@@ -151,6 +152,7 @@ private:
 
   std::atomic<uint64_t> _rows{0};
   std::atomic<double> _dsp_load{0};
+  std::atomic<double> _disk_free{-1}; // bytes free where recordings go (DSP thread, every 2 s)
 };
 
 } // namespace studio

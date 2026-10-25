@@ -22,7 +22,6 @@ struct RecordInfo {
   bool active = false;
   std::string path;     // data file
   uint64_t samples = 0;  // in the file
-  bool ended_early = false; // the disk could not keep up; the file stops before the first lost sample
   double fs = 0;
   std::string error;    // write failure, if any
 };

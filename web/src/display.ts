@@ -161,6 +161,12 @@ export class Display {
     return !!(this.last[0] ?? this.last[1]);
   }
 
+  // Forget the peak-hold (after a gain/frequency change it would describe the old setting).
+  resetPeaks() {
+    this.hold = [null, null];
+    this.dirty = true;
+  }
+
   // Drop one path's traces (e.g. after switching A+B -> A).
   dropPath(p: number) {
     this.last[p] = null;
@@ -187,9 +193,9 @@ export class Display {
     if (!r) return null;
     const pct = (a: Float32Array, q: number) => Float32Array.from(a).sort()[Math.floor(a.length * q)];
     const floor = pct(r.avg, 0.1);
-    // the newest rows' peaks (the peak-hold may still be decaying from an earlier setting)
+    // peak-hold (the app clears it when a setting changes, so it covers only the current setting)
     let peak = -200;
-    for (const l of this.last) if (l) for (let i = 0; i < l.max.length; i++) peak = Math.max(peak, l.max[i]);
+    for (const h of this.hold) if (h) for (let i = 0; i < h.length; i++) peak = Math.max(peak, h[i]);
     const dbMin = Math.floor((floor - 8) / 5) * 5;
     const dbMax = Math.max(dbMin + 30, Math.ceil((peak + 5) / 5) * 5);
     // Waterfall floor just above the average noise floor: rows with no frame at all (common: 40 ms

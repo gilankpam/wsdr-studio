@@ -149,6 +149,7 @@ export default function App() {
     // unless the user fixed the scale. autoAt = the row count to refit at (-1: nothing pending).
     let autoAt = autoOn.current ? 25 : -1;
     const autoAgain = () => {
+      d.resetPeaks(); // the peak-hold describes the old setting
       if (autoOn.current) autoAt = d.rowsSeen() + 25;
     };
     d.onHint = (t) => addBanner(t);

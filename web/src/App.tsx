@@ -272,7 +272,7 @@ export default function App() {
               const w: string[] = [];
               if (e.t - dr.at < 5 && dr.at) {
                 if (ring > dr.ring) w.push('banks dropped (DSP behind)');
-                if (cl > dr.client) w.push('display skipped rows (browser too slow)');
+                if (cl > dr.client) w.push('display skipped rows (window too slow)');
               }
               if (w.length || e.t - dr.at >= 5) setDropWarn(w);
               dr.ring = ring;
@@ -347,6 +347,13 @@ export default function App() {
   useEffect(() => {
     autoOn.current = prefs.scale === null;
   }, [prefs.scale]);
+  // Closing the window while recording: the shell asks first (Electron 'will-prevent-unload').
+  useEffect(() => {
+    if (!recording) return;
+    const h = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener('beforeunload', h);
+    return () => window.removeEventListener('beforeunload', h);
+  }, [recording]);
   const offGrid = open && tuned > 0 && Math.abs(tuned - cur.freq) > 1e3;
 
   const overlay = fatal

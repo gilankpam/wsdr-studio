@@ -45,7 +45,6 @@ export function decodeRow(buf: ArrayBuffer): Row | null {
   };
 }
 
-const TOKEN_KEY = 'wsdr-studio.token';
 let sessionPromise: Promise<string> | null = null;
 
 type Pending = { resolve: (r: any) => void; reject: (e: Error) => void };
@@ -67,39 +66,18 @@ export class Client {
     this.url = url;
   }
 
-  // The session token: the launch link carries a single-use key in the URL fragment (#k=, never sent to
-  // the server by the browser); it is exchanged once for the token, which this tab keeps in
-  // sessionStorage (per origin, so per port, and per tab: reloads keep working). ?t= also works.
+  // The session token comes from the desktop shell (preload bridge, over IPC): it is never in a URL.
   static fromLocation(): Promise<Client> {
-    sessionPromise ??= Client.exchange();
+    sessionPromise ??= Client.session();
     return sessionPromise.then((url) => new Client(url));
   }
 
-  private static async exchange(): Promise<string> {
+  private static async session(): Promise<string> {
+    const bridge = (window as { wsdr?: { session(): Promise<{ token: string }> } }).wsdr;
+    if (!bridge) throw new Error('This page runs inside the wsdr-studio app. Start wsdr-studio to use it.');
+    const { token } = await bridge.session();
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = (t: string) => `${proto}//${location.host}/ws?t=${encodeURIComponent(t)}`;
-    const key = new URLSearchParams(location.hash.slice(1)).get('k');
-    if (key) {
-      history.replaceState(null, '', location.pathname); // the key is spent either way
-      const r = await fetch(`/api/session?k=${encodeURIComponent(key)}`, { cache: 'no-store' });
-      if (r.ok) {
-        const { token } = await r.json();
-        try {
-          sessionStorage.setItem(TOKEN_KEY, token);
-        } catch {
-          /* storage blocked: this page still works until reload */
-        }
-        return url(token);
-      }
-    }
-    let t = new URLSearchParams(location.search).get('t');
-    try {
-      t = t ?? sessionStorage.getItem(TOKEN_KEY);
-    } catch {
-      /* storage blocked */
-    }
-    if (!t) throw new Error('This window has no session. Start wsdr-studio again to open a new one.');
-    return url(t);
+    return `${proto}//${location.host}/ws?t=${encodeURIComponent(token)}`;
   }
 
   connect() {

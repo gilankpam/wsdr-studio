@@ -6,7 +6,7 @@ receiver: plug it in, press Start, pick a Wi-Fi channel, watch the spectrum and 
 - **How it works:** it uses the receive path from [wifi-sdr](https://github.com/snokvist/wifi-sdr),
   which streams the chip's baseband sample ring (LA mode) over USB with custom on-chip code, brought
   up by [devourer](https://github.com/OpenIPC/devourer). A C++ backend owns the dongle and computes
-  the spectrum; the UI is a web page opened as a Chrome app window.
+  the spectrum; the UI (React) runs in a bundled Electron window. No browser needs to be installed.
 - **What you get:**
   - 8812BU on USB 3: spans of 2.5–40 MHz, and the full 40 MHz band at 40 MS/s.
   - 8812BU on USB 2, or the 8812CU: 2.5 and 5 MHz.
@@ -21,9 +21,15 @@ receiver: plug it in, press Start, pick a Wi-Fi channel, watch the spectrum and 
 ./wsdr-studio-x86_64.AppImage
 ```
 
-The backend starts, then opens the UI in Chrome/Chromium as an app window (otherwise your default
-browser). Closing the window ends the app after about 30 s. Starting it again while it runs opens
-another window on the same instance.
+The app window opens and starts the backend. Closing the window ends the app (it asks first while a
+recording is running; the file is always saved). Starting it again while it runs brings the window
+to the front. Options for the backend can be given on the command line, e.g.
+`./wsdr-studio-x86_64.AppImage --pid 0xb812 --freq 5190e6 --rate 40` starts streaming right away.
+
+**Sandbox:** Electron's Chromium sandbox needs unprivileged user namespaces, and an AppImage cannot
+ship the setuid helper that replaces them. Where they are blocked (Ubuntu 24.04+ by default) the app
+runs without that sandbox. The window only ever loads the app's own page from 127.0.0.1 (navigation,
+new windows and permissions are locked down), so no outside web content is ever shown in it.
 
 **One-time setup** (needs root):
 - **USB access:** install the udev rule from wifi-sdr, then replug the dongle:
@@ -50,28 +56,35 @@ git -C external/wifi-sdr submodule update --init external/devourer   # not --rec
 #                binutils-mipsel-linux-gnu xxd nodejs npm
 cmake -S . -B build && cmake --build build -j
 (cd web && npm ci && npm run build)
-build/wsdr-studiod                     # serves web/dist, opens the browser
+(cd desktop && npm ci && npm start)  # the app window (Electron) on build/wsdr-studiod
 build/test_core                        # unit tests (no hardware); build/test_core --bench: DSP at 40 MS/s
 ```
 
+**Desktop shell (dev):** `cd desktop && npm ci && npm start` runs Electron on `build/wsdr-studiod`
+and `web/dist` (if Electron's binary is missing, run `node node_modules/electron/install.js`).
+`WSDR_DEV_URL=http://localhost:5173 npm start` with `npm run dev` in `web/` uses the Vite dev server.
+
 **AppImage:** `scripts/build-appimage.sh` builds the web UI on the host and the backend inside an
-Ubuntu 22.04 container (Docker), then packages it with pinned, checksummed linuxdeploy, appimagetool
-and AppImage runtime. Output: `build-appimage/wsdr-studio-x86_64.AppImage`.
+Ubuntu 22.04 container (Docker), then packages it with pinned, checksummed linuxdeploy, appimagetool,
+AppImage runtime and Electron (about 115 MB). Output: `build-appimage/wsdr-studio-x86_64.AppImage`.
 
 **Headless check:** `build/wsdr-studiod --headless-seconds 20 --pid 0xb812 --freq 5190e6 --rate 40`
-runs the engine and DSP without a UI and prints status JSON. `node tests/e2e.mjs [--record]` checks a
-running instance: security gates, protocol, a retune, and a recording.
+runs the engine and DSP without a UI and prints status JSON. `build/wsdr-studiod --pid 0xb812` alone
+runs the server without a window (for scripts). `node tests/e2e.mjs [--record]` checks a running
+instance: security gates, protocol, a retune, and a recording.
 
 ## Security model
 
 The backend listens on 127.0.0.1 only and checks every request's `Host` header against DNS rebinding.
 - **The WebSocket** needs the per-launch session token (`?t=`), and a browser's `Origin` must be the
   app's own.
-- **No secret on a command line.** The browser is pointed at a private 0600 page (deleted after 30 s)
-  that redirects to `/#k=KEY`: a single-use launch key, valid 30 s, in the URL fragment (never sent to
-  a server). The page exchanges it once for the session token and keeps that in sessionStorage (per
-  origin and tab; no cookies, which other services on 127.0.0.1 would see). The token itself lives
-  only in a private per-user file (`$XDG_RUNTIME_DIR/wsdr-studio/instance`, mode 0600).
+- **The token is never in a URL or on a command line.** The backend prints it once on a private pipe to
+  the Electron shell, which hands it to its own page over IPC (the page cannot get it any other way;
+  no HTTP endpoint returns it, no cookies). Scripts read it from a private per-user file
+  (`$XDG_RUNTIME_DIR/wsdr-studio/instance`, mode 0600).
+- **The window is locked to the app:** context isolation, sandboxed renderer, no Node in the page,
+  navigation only within the app's origin, no new windows, no permissions except writing the
+  clipboard.
 - **No remote access.**
 
 ## Layout
@@ -80,6 +93,7 @@ The backend listens on 127.0.0.1 only and checks every request's `Host` header a
 |---|---|
 | `src/` | backend: `engine` (adapter, DSP thread, recorder), `dsp` (FFT), `server` (HTTP/WebSocket), `protocol`, `recorder` (SigMF), `device_scan` |
 | `web/` | React + TypeScript UI (Vite): `App.tsx` controls, `display.ts` spectrum + waterfall |
+| `desktop/` | Electron shell: `main.js` (starts the backend, window, lock-down), `preload.js` (token bridge) |
 | `external/wifi-sdr` | the receive core (submodule; brings devourer) |
 | `docs/` | design and build plan |
 | `tests/` | unit tests (C++) and the end-to-end check (Node) |

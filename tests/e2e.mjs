@@ -47,13 +47,10 @@ check((await upgrade('/ws?t=wrong' + token.slice(5), {})) === 403, 'WebSocket wi
 check((await upgrade(`/ws?t=${token}`, { Origin: 'https://evil.example' })) === 403, 'WebSocket from a foreign Origin -> 403');
 check((await upgrade(`/ws?t=${token}`, { Origin: `http://127.0.0.1:${port}` })) === 101, 'WebSocket with token + own Origin -> 101');
 check((await get('/', {}, 'HEAD')).status === 405, 'HEAD -> 405');
-check((await get('/api/launch-key')).status === 403, 'launch key without token -> 403');
-check((await get('/api/session?k=0123456789abcdef0123456789abcdef')).status === 403, 'unknown launch key -> 403');
-const key = JSON.parse((await get(`/api/launch-key?t=${token}`)).body).key;
-const sess = await get(`/api/session?k=${key}`);
-check(sess.status === 200 && JSON.parse(sess.body).token === token, 'launch key -> session token');
-check(!sess.headers['set-cookie'], 'no cookie is set (cookies would be shared across 127.0.0.1 ports)');
-check((await get(`/api/session?k=${key}`)).status === 403, 'launch key is single-use');
+for (const p of ['/api/session', '/api/launch-key', `/api/session?t=${token}`])
+  check((await get(p)).status === 404, `${p.split('?')[0]} does not exist (no way to obtain the token over HTTP)`);
+const idx = await get('/');
+check(!idx.body.includes(token) && !idx.headers['set-cookie'], 'the page carries no token and sets no cookie');
 
 // --- protocol
 const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?t=${token}`);

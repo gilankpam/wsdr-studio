@@ -244,16 +244,6 @@ private:
       return text(http::status::method_not_allowed, "GET only\n");
     if (path == "/api/hello")
       return text(http::status::ok, "{\"app\":\"wsdr-studio\",\"protocol\":1}\n", "application/json");
-    if (path == "/api/launch-key") {
-      if (!token_ok(o, _req.target()))
-        return text(http::status::forbidden, "forbidden\n");
-      return text(http::status::ok, "{\"key\":\"" + _srv.new_launch_key() + "\"}\n", "application/json");
-    }
-    if (path == "/api/session") { // single-use launch key -> session token
-      if (!_srv.consume_launch_key(param(query(_req.target()), "k", '&')))
-        return text(http::status::forbidden, "{\"error\":\"expired\"}\n", "application/json");
-      return text(http::status::ok, "{\"token\":\"" + o.token + "\"}\n", "application/json");
-    }
     if (path.find("..") != std::string::npos || path.find('%') != std::string::npos ||
         path.find('\\') != std::string::npos || path.empty() || path[0] != '/')
       return text(http::status::bad_request, "bad path\n");
@@ -323,30 +313,6 @@ void Server::accept_next() {
     if (_impl->acc.is_open())
       accept_next();
   });
-}
-
-std::string Server::new_launch_key() {
-  std::random_device rd;
-  char b[33];
-  for (int i = 0; i < 16; i++)
-    std::snprintf(b + 2 * i, 3, "%02x", rd() & 0xff);
-  std::lock_guard<std::mutex> l(_km);
-  const auto now = std::chrono::steady_clock::now();
-  std::erase_if(_keys, [&](const auto &k) { return now - k.second > std::chrono::seconds(30); });
-  _keys.emplace_back(b, now);
-  return b;
-}
-
-bool Server::consume_launch_key(const std::string &key) {
-  std::lock_guard<std::mutex> l(_km);
-  const auto now = std::chrono::steady_clock::now();
-  for (auto it = _keys.begin(); it != _keys.end(); ++it)
-    if (same(it->first, key)) {
-      const bool fresh = now - it->second <= std::chrono::seconds(30);
-      _keys.erase(it);
-      return fresh;
-    }
-  return false;
 }
 
 void Server::add(const ClientPtr &c) {

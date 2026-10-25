@@ -6,3 +6,4 @@ Exec=wsdr-studiod
 Icon=wsdr-studio
 Terminal=false
 Categories=HamRadio;Network;
+StartupWMClass=wsdr-studio

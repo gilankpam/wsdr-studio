@@ -1,0 +1,12 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# wsdr-studio AppImage entry point: the Electron shell, which starts the bundled backend.
+HERE="$(dirname "$(readlink -f "$0")")"
+export WSDR_STUDIOD="$HERE/usr/bin/wsdr-studiod"
+# Chromium's sandbox needs unprivileged user namespaces, and an AppImage cannot ship its setuid
+# fallback helper. Where they are blocked (e.g. Ubuntu 24.04+ AppArmor default) run without it: the
+# window only ever shows the app's own 127.0.0.1 page (navigation is locked to that origin).
+if ! unshare -Ur true 2>/dev/null; then
+  set -- --no-sandbox "$@"
+fi
+exec "$HERE/usr/lib/wsdr-studio/electron/wsdr-studio" "$@"

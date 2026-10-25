@@ -9,9 +9,10 @@ _Revision 3: web UI (React) + C++ backend, AppImage; independent review folded i
  ├─ wsdr-studiod   C++ backend: adapter + streamer (wifi-sdr/devourer) → DSP → HTTP + WebSocket
  │                 serves the built web UI; 127.0.0.1 only; per-launch token
  └─ web/           React + TypeScript (Vite): spectrum + waterfall (canvas 2D), controls, status
- launcher: starts the backend, opens `google-chrome --app=http://127.0.0.1:PORT/?t=TOKEN` (else xdg-open)
+ desktop/          Electron shell (bundled): starts wsdr-studiod --ui-pipe, reads {port, token} from its
+                   stdout, shows http://127.0.0.1:PORT/ locked to that origin; token to the page over IPC
 ```
-IQ never leaves the backend; the browser gets display rows (≤ 4096 bins, ≤ 30 rows/s) and status JSON.
+IQ never leaves the backend; the window gets display rows (≤ 4096 bins, ≤ 30 rows/s) and status JSON.
 
 ## Inputs
 - **RTL8812BU (0bda:b812):** USB 3 → 2.5–40 MS/s (40 MS/s = 40 MHz width + BW40 DFIR); USB 2 → 2.5/5.
@@ -78,9 +79,10 @@ IQ never leaves the backend; the browser gets display rows (≤ 4096 bins, ≤ 3
      {magic, version, seq u32, t_ms u64, channel u8, bins u16, f0 f64, df f64, db_min f32,
      db_step f32, u8[bins] avg, u8[bins] max}.
    - Per-client bounded send queue; a slow client loses rows, the DSP never blocks.
-7. **Process lifetime:** single instance per user (if the port is taken by our own server, open
-   the browser on it and exit); exit when no client has been connected for 30 s after the first
-   one, or on SIGINT/SIGTERM. CLI: `--pid`, `--freq`, `--rate`, `--port`, `--no-browser`,
+7. **Process lifetime:** the Electron shell owns it: one app instance (a second launch focuses the
+   window); the backend runs until the shell closes its stdin (or SIGINT/SIGTERM/SIGHUP, or the shell
+   dies: PR_SET_PDEATHSIG). One backend per user (instance file); the shell attaches to a running
+   one. CLI: `--ui-pipe`, `--pid`, `--freq`, `--rate`, `--port`, `--record-dir`,
    `--headless-seconds N` (engine + DSP only, prints stats JSON).
 
 ### C. Web UI (`web/`)
@@ -98,7 +100,8 @@ IQ never leaves the backend; the browser gets display rows (≤ 4096 bins, ≤ 3
    kept building.
 2. Build inside a Docker container (Ubuntu 22.04, glibc 2.35) for portability; appimagetool with
    the static type-2 runtime (no libfuse2 needed on the host); linuxdeploy bundles libusb, FFTW
-   (not libudev, not GL); the launcher clears `LD_LIBRARY_PATH` before starting Chrome.
+   (not libudev, not GL); the pinned Electron release (SHA-256) is added after linuxdeploy; a custom
+   AppRun starts it (with `--no-sandbox` only where unprivileged user namespaces are blocked).
 3. The firmware headers need mipsel binutils + xxd at build time: install them in the container.
 
 ### E. Tests

@@ -242,6 +242,11 @@ static void test_gapped() {
     sp.process(b.data(), b.size(), m, [&](const Row &r) { rows.push_back(r); });
   }
   CHECK(sp.fft_size() == kGappedMaxFft);
+  if (!rows.empty()) { // the gapped flag travels with the row
+    DecodedRow d;
+    const auto fr = encode_row(rows[0], 0);
+    CHECK(rows[0].gapped && decode_row(fr.data(), fr.size(), d) && d.gapped && d.path == 0);
+  }
   CHECK(rows.size() >= 9 && rows.size() <= 11); // 10 rows/s by the clock
   if (rows.empty())
     return;

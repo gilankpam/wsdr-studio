@@ -43,6 +43,7 @@ struct Row {
   int path = 0;           // 0 = A, 1 = B
   uint32_t seq = 0;
   uint8_t gen = 0;        // low byte of the stream run (BankMeta.gen): rows of a new run differ
+  bool gapped = false;    // from a gapped run (BankMeta::gapped)
   double f0 = 0, df = 0;  // Hz of bin 0 (lowest frequency) and bin spacing
   std::vector<float> avg, max; // dBFS, size bins
 };

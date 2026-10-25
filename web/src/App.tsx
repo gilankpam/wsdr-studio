@@ -317,7 +317,7 @@ export default function App() {
 
   // A remembered 40 MHz tuning on an adapter that cannot do it (USB 2, 8812CU): clamp the draft.
   const selDev = devices.find((d) => devKey(d) === selKey);
-  const selMax = selDev ? Math.max(selDev.max_msps, selDev.gapped_msps ?? 0) : 40;
+  const selMax = selDev?.max_msps ?? 40; // continuous: a remembered wide span never opens gapped by itself
   useEffect(() => {
     if (selMax < 40)
       setDraft((dr) => (dr.rate_sel < 4 ? { ...dr, rate_sel: 4 } : dr)); // every 40 MHz centre is also a 5 MHz step
@@ -348,7 +348,10 @@ export default function App() {
   const width = cur.rate_sel === 1 && (caps.wide_capable ?? true) ? 40 : 20;
   const chan = channelAt(cur.freq, width);
   const rates = caps.rates ?? ratesFor(sel);
-  const gapped = open ? (status?.rx?.gapped ?? false) : (rates.find((r) => r.rate_sel === cur.rate_sel)?.gapped ?? false);
+  // the selected span (follows a change at once; the footer shows the run's measured share)
+  const gapped = rates.find((r) => r.rate_sel === cur.rate_sel)?.gapped ?? false;
+  const run = status?.rx;
+  const gappedPct = run?.gapped && msps > 0 && run.fs ? Math.round(((msps * 1e6) / run.fs) * 100) : null;
   const tuned = status?.rx?.centre ?? 0;
   useEffect(() => {
     live.current.opening = opening;
@@ -386,9 +389,11 @@ export default function App() {
         ...scale, wfMode: prefs.wfMode, smooth: prefs.smooth, overlay, dim: !open,
         wfPath: dsp.paths === 'b' ? 1 : 0, marker: open || hadPicture ? cur.freq : null,
         markerLabel: open ? 'requested' : 'next Start',
+        chipNotch: (caps.chip ?? sel?.chip ?? '').includes('8822C'),
+        badge: open && run?.gapped ? `GAPPED · ${gappedPct !== null ? `~${gappedPct} %` : 'part of the time'} sampled` : null,
         staleText: rxState === 'starting' ? 'Applying settings…' : 'No data from the adapter',
       }),
-    [scale, prefs.wfMode, prefs.smooth, overlay, open, dsp.paths, cur.freq, hadPicture, rxState],
+    [scale, prefs.wfMode, prefs.smooth, overlay, open, dsp.paths, cur.freq, hadPicture, rxState, caps.chip, sel?.chip, run?.gapped, gappedPct],
   );
 
   // A settings change: sent now when streaming, kept as a draft until Start otherwise.
@@ -525,7 +530,7 @@ export default function App() {
                   : `Record raw IQ (SigMF), about ${bytes(recRate)}/s at this span${diskFree ? `; ${bytes(diskFree)} free (~${fmtDur(diskFree / recRate)})` : ''}`
               }
             >
-              {recording ? '■ End recording' : '● Record'}
+              {recording ? '■ End recording' : gapped ? '● Record (≤ 5 MHz)' : '● Record'}
             </button>
           ) : (
             <button className="scan" disabled={opening || !connected} onClick={() => req('scan').catch(() => {})} title="Look for adapters again">
@@ -597,7 +602,7 @@ export default function App() {
             {rates.map((r) => (
               <option key={r.rate_sel} value={r.rate_sel}>
                 {r.gapped
-                  ? `${spanLabel(r.fs)} · gapped (~${Math.round(gappedDuty(r.fs) * 100)} % of the time)`
+                  ? `${spanLabel(r.fs)} · gapped (~${Math.round(gappedDuty(r.fs) * 100)} % sampled)`
                   : `${spanLabel(r.fs)} · ${r.fs / 1e6} MS/s`}
               </option>
             ))}
@@ -667,6 +672,7 @@ export default function App() {
                     {FFTS.map((n) => (
                       <option key={n} value={n} disabled={gapped && n > 8192}>
                         {n <= 4096 ? `${n} (${(fsNow / n / 1e3).toFixed(1)} kHz/bin)` : `${n} (${(fsNow / 4096 / 1e3).toFixed(1)} kHz/bin, smoother noise)`}
+                        {gapped && n > 8192 ? ' – not in gapped mode (8192 used)' : ''}
                       </option>
                     ))}
                   </select>
@@ -791,7 +797,7 @@ export default function App() {
             {offGrid ? `${mhz(cur.freq)} MHz requested · tuned ${mhz(tuned)} MHz (5 MHz steps)` : `${mhz(cur.freq)} MHz`} · {spanLabel(st.fs)} span
             {st.gapped && (
               <span className="muted" title="Each slice is 8192 samples; the gaps between them are the time USB 2 needs to ship one">
-                {' '}· gapped: {msps > 0 ? `${Math.round(((msps * 1e6) / st.fs) * 100)} %` : '…'} of the time sampled
+                {' '}· gapped: {gappedPct !== null ? `~${gappedPct} %` : '…'} of the time sampled
               </span>
             )}
           </span>

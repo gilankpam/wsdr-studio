@@ -94,6 +94,7 @@ void Spectrum::reset(const wsdr::BankMeta &m) {
   _gen = m.gen;
   _fs = m.fs;
   _freq = m.centre_hz; // hardware band; see the header
+  // (the DC block keeps its state across a gapped run's gaps: the DC offset drifts far more slowly)
   for (auto &p : _paths) {
     p->dc = wsdr::DcBlock();
     p->fill = 0;
@@ -172,6 +173,7 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       r.path = p.index;
       r.seq = _seq++;
       r.gen = static_cast<uint8_t>(_gen & 0xff);
+      r.gapped = _gapped;
       r.df = _fs / n * dec;
       r.f0 = _freq - _fs / 2 + (_fs / n) * (dec - 1) / 2.0;
       r.avg.resize(bins);

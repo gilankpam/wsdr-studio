@@ -14,6 +14,8 @@ export type DisplayOpts = {
   smooth: number;               // 0 = off .. 0.9 = heavy averaging of the average trace across rows
   marker: number | null;        // requested frequency (Hz), drawn when it is not the band centre
   markerLabel: string;          // e.g. "requested" or "next Start"
+  chipNotch: boolean;           // 8822C: shade its DC-rejection notch at the hardware centre
+  badge: string | null;         // e.g. "GAPPED · ~12 % sampled", top right of the spectrum
   overlay: string | null;       // message over the plot (stopped, starting, ...)
   staleText: string;            // shown when rows stop arriving
   dim: boolean;                 // stopped: the last picture stays, faded
@@ -55,7 +57,7 @@ export class Display {
   private dpr = 1;
   private off: (() => void)[] = [];
   opts: DisplayOpts = {
-    dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, markerLabel: 'requested',
+    dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, markerLabel: 'requested', chipNotch: false, badge: null,
     overlay: null, staleText: 'No data from the adapter', dim: false,
   };
   onRetune: (freq: number) => void = () => {};
@@ -357,7 +359,7 @@ export class Display {
       this.stopRows++;
       if (this.stopRows <= H) this.drawGutter();
     }
-    const span = `${((r.f0 + r.df * (r.bins / 2 - 0.5)) / 1e6).toFixed(1)} MHz · ${+((r.df * r.bins) / 1e6).toFixed(1)} MHz span`;
+    const span = `${((r.f0 + r.df * (r.bins / 2 - 0.5)) / 1e6).toFixed(1)} MHz · ${+((r.df * r.bins) / 1e6).toFixed(1)} MHz span${r.gapped ? ' · gapped' : ''}`;
     if (this.wfSpan && (span !== this.wfSpan || this.stopPending)) {
       // A retune, span change or new run: a separator. The label describes the OLD rows below it (the
       // new rows above match the axis), so nothing below the line is misread.
@@ -365,8 +367,8 @@ export class Display {
       const label = this.stopPending
         ? span === this.wfSpan
           ? '▼ Stop (gap)' // same tuning: only the time gap needs marking
-          : `▼ before Stop: ${this.wfSpan}`
-        : `▼ before: ${this.wfSpan}`;
+          : `▼ before Stop: ${this.wfSpan} (not on this axis)`
+        : `▼ before: ${this.wfSpan} (not on this axis)`;
       if (this.stopPending) this.stopRows = 0;
       if (span !== this.wfSpan) this.sepRows = 0; // a Stop at the same span keeps the frequency axis
       this.stopPending = false;
@@ -457,6 +459,23 @@ export class Display {
         c.setLineDash([]);
         c.fillText(`ch ${ch.label}`, x, T + 2 * d);
       }
+      // 8822C: its RX DC rejection leaves a notch at the hardware centre (in the raw samples; ~-6 dB at
+      // +-1.5 % of fs). Shade it so it is not read as a missing signal.
+      const mid0 = (s.f0 + s.f1) / 2;
+      if (this.opts.chipNotch) {
+        const hw = (s.f1 - s.f0) * 0.015;
+        const x0 = xOf(mid0 - hw), x1 = xOf(mid0 + hw);
+        if (x1 - x0 >= 3 * d) {
+          c.fillStyle = 'rgba(160,170,190,0.10)';
+          c.fillRect(x0, T, x1 - x0, ph - T);
+          c.font = `${10 * d}px system-ui, sans-serif`;
+          c.fillStyle = '#8a95a5';
+          c.textAlign = 'center';
+          c.textBaseline = 'top';
+          c.fillText('chip notch (not a signal)', (x0 + x1) / 2, T + 30 * d);
+          c.textBaseline = 'middle';
+        }
+      }
       // requested frequency, when the hardware centre differs (5 MHz synthesizer grid)
       const m = this.opts.marker;
       const mid = (s.f0 + s.f1) / 2;
@@ -522,6 +541,16 @@ export class Display {
         c.fillRect(lx, T + 18 * d, 14 * d, 2 * d);
         c.fillStyle = '#aab4c0';
         c.fillText(label, lx + 18 * d, T + 19 * d);
+      }
+      // badge (gapped runs): on the plot itself, not only in the footer
+      if (this.opts.badge) {
+        c.font = `bold ${11 * d}px system-ui, sans-serif`;
+        const bw = c.measureText(this.opts.badge).width + 12 * d;
+        c.fillStyle = 'rgba(255,183,77,0.16)';
+        c.fillRect(W - bw - 8 * d, T + 30 * d, bw, 18 * d);
+        c.fillStyle = '#ffb74d';
+        c.textAlign = 'left';
+        c.fillText(this.opts.badge, W - bw - 2 * d, T + 39 * d);
       }
       // hover readout
       if (this.hover !== null && !stale) {

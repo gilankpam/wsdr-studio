@@ -86,11 +86,12 @@ export function sweepPlan(range: Range, dev: Device | undefined, gappedOk: boole
   const tunable = (c: number) => (fs < 40e6 ? c : c < 3.7e9 ? Math.min(2462e6, Math.max(2422e6, c)) : Math.min(6155e6, Math.max(5090e6, c)));
   const centres: number[] = [];
   for (const [lo, hi] of stretches) {
-    // the outer steps first, snapped towards the stretch's ends (its edge channels heard whole), then
-    // the others spread evenly between them
-    let first = snap(lo + fs / 2), last = snap(hi - fs / 2);
-    if (first > lo + fs / 2 && snap(first - 5e6) < first) first = snap(first - 5e6);
-    if (last < hi - fs / 2 && snap(last + 5e6) > last) last = snap(last + 5e6);
+    // the outer steps first, a MHz inside the span's flat part at the stretch's ends (its edge
+    // channels heard whole) and snapped towards them, then the others spread evenly between them
+    const m = fs >= 20e6 ? 1e6 : 0, a = lo + fs / 2 - m, b = hi - fs / 2 + m;
+    let first = snap(a), last = snap(b);
+    if (first > a && snap(first - 5e6) < first) first = snap(first - 5e6);
+    if (last < b && snap(last + 5e6) > last) last = snap(last + 5e6);
     first = tunable(first);
     last = tunable(last);
     const n = last > first ? Math.ceil((last - first) / step) + 1 : 1;

@@ -14,9 +14,10 @@ export const centre = (c: number) => (c <= 14 ? 2407e6 + 5e6 * c : 5000e6 + 5e6 
 
 export type Survey = Map<number, number>;
 // Each cell's own slice (2.4 GHz: its 5 MHz, so one AP does not light up nine overlapping channels;
-// 5 GHz: its 20 MHz channel). The slice's peak against the noise: the median of the peaks of windows
-// over the central 80 % of the span (the edges roll off, a notch dips), as wide as the slice but small
-// enough that there are at least 8 of them (else the median is the very signal being measured). Each
+// 5 GHz: its 20 MHz channel). The slice's peak against the noise: the lower quartile of the peaks of
+// windows over the central 80 % of the span (the edges roll off, a notch dips), as wide as the slice
+// but small enough that there are at least 8 of them; a quartile, not the median, so a signal filling
+// half the span is not taken for the noise (it holds while a quarter of the span is quiet). Each
 // bin is already a peak over many FFT frames, so a wider slice adds well under 1 dB on noise alone.
 // A cell counts once two of the view's surveyed rows in a row (within a second) show the same excess:
 // a lone noise spike does not, so the bars do not creep up over a session.
@@ -37,7 +38,7 @@ export function survey(s: Survey, r: Row) {
       peaks.push(p);
     }
     peaks.sort((x, y) => x - y);
-    v = peaks.length ? peaks[Math.floor(peaks.length / 2)] : -1e9;
+    v = peaks.length ? peaks[Math.floor(peaks.length / 4)] : -1e9;
     floors.set(width, v);
     return v;
   };

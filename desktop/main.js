@@ -123,8 +123,8 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1440,
     height: 900,
-    minWidth: 720,
-    minHeight: 520,
+    minWidth: 1280, // the layout is designed for 1280x720 and up
+    minHeight: 720,
     title: 'wsdr-studio',
     backgroundColor: '#0b0e13',
     icon: path.join(__dirname, 'icon.png'),

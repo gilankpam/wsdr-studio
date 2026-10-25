@@ -144,8 +144,7 @@ export function BandRuler(p: {
         ))}
       </div>
       <div className="rtrack" ref={track} onClick={(e) => !selLocked && p.onTune(at(e))} title={selLocked ? undefined : 'Click to tune the selected view here'}>
-        {!p.compact &&
-          GROUPS[band]
+        {GROUPS[band]
             .filter((g) => g.name)
             .map((g) => (
               <span key={g.name} className="rgroup" style={{ left: pc(pos(band, centre(g.chans[0]) - g.half)) }}>
@@ -192,22 +191,20 @@ export function BandRuler(p: {
                   style={{ left: pc(a), width: `max(6px, ${pc(b - a)})`, borderColor: VIEW_COLOUR[v.slot] }}
                   title={where}
                 />
-                {!p.compact && (
-                  <button
-                    className={`rtab s${v.slot}${v.slot === p.sel ? ' sel' : ''}`}
-                    // A's tab at its bracket's left end, B's at its right end: they never sit on each other
-                    style={v.slot === 1 ? { right: pc(1 - b) } : { left: pc(a) }}
-                    aria-label={`${where}. Edit view ${name}`}
-                    aria-pressed={v.slot === p.sel}
-                    title={`${where} · click to edit view ${name}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      p.onSelect(v.slot);
-                    }}
-                  >
-                    {name}
-                  </button>
-                )}
+                <button
+                  className={`rtab s${v.slot}${v.slot === p.sel ? ' sel' : ''}`}
+                  // A's tab at its bracket's left end, B's at its right end: they never sit on each other
+                  style={v.slot === 1 ? { right: pc(1 - b) } : { left: pc(a) }}
+                  aria-label={`${where}. Edit view ${name}`}
+                  aria-pressed={v.slot === p.sel}
+                  title={`${where} · click to edit view ${name}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    p.onSelect(v.slot);
+                  }}
+                >
+                  {name}
+                </button>
               </span>
             );
           })}

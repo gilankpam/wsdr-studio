@@ -227,13 +227,8 @@ button.rtab.s1 { background: var(--view-b); }
 .rlink.paused { color: var(--amber); }
 .rkey { display: flex; align-items: center; gap: 3px; }
 .rkey b { position: relative; width: 16px; height: 10px; border: 1px solid #263243; border-radius: 2px; }
-.ruler.compact .rtrack { height: 30px; }
-.ruler.compact .rbands { margin-bottom: 0; }
-.ruler.compact .rbands button { min-height: 26px; }
-.ruler.compact .rothers { margin-bottom: 0; }
-.ruler.compact button.rcell { top: 2px; height: 26px; font-size: 11px; }
-.ruler.compact .rview { top: 0; height: 30px; }
-.ruler.compact .rview.inset { top: 3px; height: 24px; }
+/* Compare: B's bracket inside A's (they share the span) */
+.rview.inset { top: 21px; height: 30px; }
 
 /* states in the plot area (Station.tsx): no adapter, no permission, unplugged */
 .vcard {

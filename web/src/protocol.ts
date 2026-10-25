@@ -6,7 +6,7 @@ export type Device = {
   controller: string; driver: string; can_open: boolean; max_msps: number;
 };
 export type Caps = {
-  open: boolean; adapter?: string; pid?: number; chip?: string; superspeed?: boolean; paths?: number;
+  open: boolean; adapter?: string; pid?: number; bus?: number; port?: string; chip?: string; superspeed?: boolean; paths?: number;
   rates?: { rate_sel: number; fs: number }[]; gain_max?: number; gain_step?: number; wide_capable?: boolean;
 };
 export type RxSettings = { freq: number; rate_sel: number; wide: boolean; agc: boolean; gain_db: number };

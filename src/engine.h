@@ -89,6 +89,8 @@ private:
 
   mutable std::mutex _sm; // status strings
   std::string _state = "closed", _error, _adapter;
+  int _open_bus = -1;     // the open device (caps: which adapter is open)
+  std::string _open_port;
   wsdr::RxCaps _caps;
 
   std::atomic<uint64_t> _rows{0};

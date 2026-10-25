@@ -87,8 +87,10 @@ const badf = await req('set', { freq: 1e9 });
 check(badf.type === 'error' && badf.kind === 'bad_request', 'out-of-range frequency -> error');
 const badt = await req('set', { freq: '5180' });
 check(badt.type === 'error' && badt.kind === 'bad_request', 'frequency as a string -> error');
-const badp = await req('dsp', { fft: 1024, paths: 'b' });
-check(badp.type === 'error', 'path B on a one-path adapter -> error');
+// a dsp request that must be rejected as a whole: path B on a one-path adapter (8812BU), else an
+// unknown path name (8812CU has A and B)
+const badp = await req('dsp', { fft: 1024, paths: caps.paths >= 2 ? 'c' : 'b' });
+check(badp.type === 'error', caps.paths >= 2 ? 'unknown path -> error' : 'path B on a one-path adapter -> error');
 const internal = await req('_lost');
 check(internal.type === 'error', 'clients cannot send internal commands');
 const s1 = await new Promise((r) => setTimeout(r, 300)).then(() => events.filter((e) => e.type === 'settings').at(-1));

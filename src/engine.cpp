@@ -296,13 +296,22 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   wsdr::RxSettings s;
   s.freq = c.contains("freq") ? num(c, "freq", 2.3e9, 6.2e9) : 5180e6;
   s.rate_sel = c.contains("rate_sel") ? integer(c, "rate_sel", 1, 5) : (pid == wsdr::kPid8812cu ? 4 : 2);
-  const int bus = c.contains("bus") ? integer(c, "bus", 0, 255) : -1;
+  int bus = c.contains("bus") ? integer(c, "bus", 0, 255) : -1;
   std::string port;
   if (c.contains("port")) {
     if (!c["port"].is_string() || c["port"].get<std::string>().size() > 32)
       throw CmdError("bad_request", "port must be a string like \"1\" or \"1.2\"");
     port = c["port"].get<std::string>();
   }
+  // Always open one specific device (the first match when bus/port are not given), so caps can say
+  // which one is open (a client that did not start it shows the right adapter).
+  if (bus < 0 || port.empty())
+    for (const auto &d : scan_devices())
+      if (d.pid == pid && (bus < 0 || d.bus == bus) && (port.empty() || d.port == port)) {
+        bus = d.bus;
+        port = d.port;
+        break;
+      }
   s.gain_db = c.contains("gain_db") ? num(c, "gain_db", 0, 100) : 30.0;
   s.agc = c.contains("agc") ? flag(c, "agc") : false;
   s.wide = c.contains("wide") ? flag(c, "wide") : true;
@@ -339,6 +348,8 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
     std::lock_guard<std::mutex> l(_sm);
     _caps = r->caps();
     _adapter = (_caps.cu ? std::string("RTL8812CU (") : std::string("RTL8812BU (")) + _caps.chip + ")";
+    _open_bus = bus;
+    _open_port = port;
     _state = "open";
   }
   {
@@ -386,6 +397,8 @@ json Engine::caps() const {
       rates.push_back({{"rate_sel", r}, {"fs", wsdr::Receiver::rate_of(r)}});
     j["adapter"] = _adapter;
     j["pid"] = _caps.pid;
+    j["bus"] = _open_bus;
+    j["port"] = _open_port;
     j["chip"] = _caps.chip;
     j["superspeed"] = _caps.superspeed;
     j["paths"] = _caps.paths;

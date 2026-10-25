@@ -214,6 +214,8 @@ export default function App() {
               setSelKey((k) => (k !== null && e.devices.some((x: Device) => devKey(x) === k) ? k : e.devices[0] ? devKey(e.devices[0]) : null));
               break;
             case 'caps':
+              // the picker shows the adapter that is open, whoever opened it
+              if (e.open && e.bus !== undefined && e.bus >= 0) setSelKey(`${e.bus}-${e.port}`);
               if (e.open && !wasOpen) {
                 lastRx = null; // the new session's first settings are not a change (Auto refits on Start)
                 setSaved(null); // also when another window or script pressed Start
@@ -555,7 +557,7 @@ export default function App() {
         </div>
 
         <div className="group" title={locked ? LOCKED : undefined}>
-          <label htmlFor="span">Span</label>
+          <label htmlFor="span">Span / rate</label>
           <select
             id="span"
             disabled={locked}
@@ -565,11 +567,13 @@ export default function App() {
               const w = rs === 1 && (caps.wide_capable ?? true) ? 40 : 20;
               set({ rate_sel: rs, wide: true, freq: snap(cur.freq, w) }); // 40 MHz centres are a subset
             }}
-            title="Bandwidth shown (= sample rate)"
+            title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
+              sel && sel.max_msps < 40 && sel.model === 'RTL8812BU' ? ' (10-40 MHz need USB 3)' : ''
+            }`}
           >
             {rates.map((r) => (
               <option key={r.rate_sel} value={r.rate_sel}>
-                {spanLabel(r.fs)}
+                {spanLabel(r.fs)} · {r.fs / 1e6} MS/s
               </option>
             ))}
           </select>

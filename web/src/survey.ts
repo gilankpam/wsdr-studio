@@ -14,19 +14,22 @@ export const centre = (c: number) => (c <= 14 ? 2407e6 + 5e6 * c : 5000e6 + 5e6 
 
 export type Survey = Map<number, number>;
 // Each cell's own slice (2.4 GHz: its 5 MHz, so one AP does not light up nine overlapping channels;
-// 5 GHz: its 20 MHz channel). The slice's peak against the noise of a slice as wide: the median of the
-// peaks of equal-width windows over the central 80 % of the span (the edges roll off, a notch dips),
-// so noise alone reads ~0 dB whatever the width. A cell counts once two surveyed rows in a row show
-// the same excess (a lone noise spike does not), so the tint does not creep up over a session.
-const pending = new WeakMap<Survey, Map<number, number>>();
+// 5 GHz: its 20 MHz channel). The slice's peak against the noise: the median of the peaks of windows
+// over the central 80 % of the span (the edges roll off, a notch dips), as wide as the slice but small
+// enough that there are at least 8 of them (else the median is the very signal being measured). Each
+// bin is already a peak over many FFT frames, so a wider slice adds well under 1 dB on noise alone.
+// A cell counts once two of the view's surveyed rows in a row (within a second) show the same excess:
+// a lone noise spike does not, so the bars do not creep up over a session.
+const pending = new WeakMap<Survey, Map<string, { db: number; t: number }>>();
 export function survey(s: Survey, r: Row) {
   if (r.bins < 16) return;
   const f0 = r.f0, f1 = r.f0 + r.df * (r.bins - 1);
   const floors = new Map<number, number>(); // window width (bins) -> noise
-  const floorFor = (n: number) => {
-    let v = floors.get(n);
+  const floorFor = (width: number) => {
+    let v = floors.get(width);
     if (v !== undefined) return v;
     const a = Math.floor(r.bins * 0.1), end = Math.floor(r.bins * 0.9), peaks: number[] = [];
+    const n = Math.max(1, Math.min(width, Math.floor((end - a) / 8)));
     const step = Math.max(n, Math.floor((end - a) / 256)); // at most ~256 windows
     for (let i = a; i + n <= end; i += step) {
       let p = -1e9;
@@ -35,7 +38,7 @@ export function survey(s: Survey, r: Row) {
     }
     peaks.sort((x, y) => x - y);
     v = peaks.length ? peaks[Math.floor(peaks.length / 2)] : -1e9;
-    floors.set(n, v);
+    floors.set(width, v);
     return v;
   };
   let prev = pending.get(s);
@@ -48,11 +51,11 @@ export function survey(s: Survey, r: Row) {
       if (b1 < b0) continue;
       let peak = -1e9;
       for (let b = b0; b <= b1; b++) peak = Math.max(peak, r.max[b]);
-      const floor = floorFor(Math.min(b1 - b0 + 1, Math.floor(r.bins * 0.8)));
+      const floor = floorFor(b1 - b0 + 1);
       if (floor <= -1e9) continue;
-      const now = peak - floor, before = prev.get(c);
-      prev.set(c, now);
-      if (before !== undefined) s.set(c, Math.max(s.get(c) ?? 0, Math.min(now, before)));
+      const now = peak - floor, key = `${r.slot}:${c}`, before = prev.get(key);
+      prev.set(key, { db: now, t: r.t });
+      if (before && r.t - before.t < 1) s.set(c, Math.max(s.get(c) ?? 0, Math.min(now, before.db)));
     }
 }
 

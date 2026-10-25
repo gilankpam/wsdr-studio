@@ -70,7 +70,7 @@ button.icon { width: 34px; padding: 0; display: flex; align-items: center; justi
 
 .body { flex: 1; min-height: 0; display: flex; position: relative; }
 .sidebar {
-  width: 272px; flex: none; display: flex; flex-direction: column; gap: 14px; padding: 12px; overflow-y: auto;
+  width: 272px; flex: none; display: flex; flex-direction: column; gap: 12px; padding: 12px; overflow-y: auto; scrollbar-width: thin;
   background: var(--panel); border-right: 1px solid var(--line);
 }
 .sidebar.drawer { position: absolute; top: 0; bottom: 0; left: 0; z-index: 20; box-shadow: 6px 0 24px #000a; }
@@ -86,22 +86,33 @@ button.icon { width: 34px; padding: 0; display: flex; align-items: center; justi
 .editing button.s1 { color: var(--view-b); }
 .editing button.s0.on { background: var(--view-a); border-color: var(--view-a); color: #0b0e13; }
 .editing button.s1.on { background: var(--view-b); border-color: var(--view-b); color: #0b0e13; }
-.sbsec { display: flex; flex-direction: column; gap: 8px; }
-.sbsec + .sbsec { padding-top: 10px; border-top: 1px solid #1d2733; }
-.sbhead {
-  all: unset; cursor: pointer; display: flex; align-items: center; gap: 6px; min-height: 24px;
+/* sidebar groups: a heading, then the controls (nothing folds) */
+.sbgroup { display: flex; flex-direction: column; gap: 8px; }
+.sbgroup + .sbgroup { padding-top: 12px; border-top: 1px solid #1d2733; }
+.sbgroup h3 {
+  margin: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
   font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
 }
-.sbhead:focus-visible { outline: 2px solid var(--on-line); }
-.chev { display: inline-block; width: 10px; transition: transform 0.12s; }
-.chev.open { transform: rotate(90deg); }
+.sbgroup h3 small { font-size: 11px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--muted); }
+.sbgroup > .row > select { flex: 1; min-width: 0; }
+/* label / control pairs */
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px 10px; color: var(--muted); }
+.kv > .row { justify-content: flex-end; }
+.kv .seg button { min-height: 26px; padding: 0 4px; font-size: 12px; }
+.kv select { min-width: 0; }
 .field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
 .field.inline { flex-direction: row; justify-content: space-between; align-items: center; gap: 8px; }
 .field.inline select { max-width: 170px; }
 .sidebar input[type='range'] { flex: 1; min-width: 0; padding: 0; accent-color: var(--on-line); }
-.links { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #0e131a; }
 /* a link as an on/off switch: label and what it does on the left, the switch on the right */
-button.toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 38px; padding: 4px 10px; text-align: left; background: transparent; }
+button.toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 34px; padding: 2px 10px; text-align: left; background: transparent; line-height: 1.25; }
+/* a small switch beside other controls (AGC) */
+button.mini { display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 6px; font-size: 12px; color: var(--muted2); background: transparent; }
+button.mini.on { color: #fff; }
+button.mini .switch { width: 26px; height: 14px; }
+button.mini .switch i { width: 10px; height: 10px; }
+button.mini.on .switch { background: var(--on-line); }
+button.mini.on .switch i { transform: translateX(12px); background: #0b0e13; }
 button.toggle .tlabel { display: flex; flex-direction: column; color: var(--muted2); }
 button.toggle .tlabel small { font-size: 11px; color: var(--muted); }
 button.toggle.on .tlabel { color: #fff; }

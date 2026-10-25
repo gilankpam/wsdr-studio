@@ -105,6 +105,12 @@ export function BandRuler(p: {
   // moves to another section)
   const selRange = selView ? rangeOf((selView.lo + selView.hi) / 2) : 'u12';
   const [picked, setPicked] = useState<{ range: Range; from: Range } | null>(null);
+  // another view selected, or it moved to another section: follow it again (state adjusted in render)
+  const [seen, setSeen] = useState(`${p.sel}:${selRange}`);
+  if (seen !== `${p.sel}:${selRange}`) {
+    setSeen(`${p.sel}:${selRange}`);
+    setPicked(null);
+  }
   const band: Range = picked && picked.from === selRange ? picked.range : selRange;
   const showBand = (b: Range) => setPicked(b === selRange ? null : { range: b, from: selRange });
   const shows = (v: RulerView) => {

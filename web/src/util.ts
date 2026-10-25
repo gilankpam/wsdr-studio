@@ -55,14 +55,14 @@ export type Prefs = {
   tuning: Tuning | null; tuningB: Tuning | null;  // the last tuning of view A / B
   mode: Mode; locks: Locks; ghost: boolean;       // two adapters: Panorama (adjacent) or Compare (same channel)
   offsetTuning: boolean;                          // off: show what the adapter sees (notch included)
-  sidebar: boolean; collapsed: string[];          // sidebar shown; its collapsed sections
+  sidebar: boolean;                               // sidebar shown
   showAvg: boolean; showPeak: boolean;            // traces drawn
 };
 export function loadPrefs(): Prefs {
   const d: Prefs = {
     smooth: 0.7, wfMode: 'max', scale: null, retuned: false, fft: 8192, tuning: null, tuningB: null,
     mode: 'single', locks: { freq: true, span: true, gain: false }, ghost: true, offsetTuning: false,
-    sidebar: true, collapsed: ['display'], showAvg: true, showPeak: true,
+    sidebar: true, showAvg: true, showPeak: true,
   };
   try {
     const p = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}');
@@ -70,6 +70,7 @@ export function loadPrefs(): Prefs {
     if (p.mode === undefined && p.dual !== undefined) p.mode = p.dual ? (p.layout === 'column' ? 'compare' : 'panorama') : 'single';
     delete p.dual;
     delete p.layout;
+    delete p.collapsed; // before: folding sidebar sections
     return { ...d, ...p };
   } catch {
     return d;

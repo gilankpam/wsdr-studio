@@ -344,7 +344,7 @@ export class Display {
       this.keyAt[k] = now;
       // a path this view no longer delivers (Both -> one antenna): its trace goes
       const other = r.slot * 2 + (r.path ^ 1);
-      if (this.last[other] && now - this.keyAt[other] > STALE_MS) this.last[other] = this.hold[other] = this.smoothed[other] = null;
+      if (this.last[other] && now - this.keyAt[other] > 2 * fresh) this.last[other] = this.hold[other] = this.smoothed[other] = null;
       const own = r.path === this.opts.wfPath || !this.last[r.slot * 2 + this.opts.wfPath];
       if (own) this.wfRow[r.slot] = r;
       // the first view still delivering sets the pace (one line per row of it)
@@ -615,14 +615,21 @@ export class Display {
             slot: 0, keys: [0, 1], lo: s.f0, hi: s.f1,
             src: { lo: s.f0, hi: s.f1, colour: this.opts.colour, pathColours: this.opts.pathColours, marker: this.opts.marker, markerLabel: this.opts.markerLabel, chipNotch: this.opts.chipNotch, notchWide: this.opts.notchWide, dim: this.opts.dim, msg: null },
           }];
-      // overlapping views: each owns the side of the seam nearer its centre (as in the waterfall)
+      // stitched: each pixel belongs to the view whose centre is nearer (as in the waterfall), so
+      // overlapping or nested spans split the same way in traces, waterfall and hover
       const ordered = [...views].sort((x, y) => x.lo + x.hi - (y.lo + y.hi));
-      const overlap = ordered.length > 1 ? ordered[0].hi - ordered[1].lo : 0;
-      const seam = ordered.length > 1 ? (overlap > 0 ? (ordered[0].lo + ordered[0].hi + ordered[1].lo + ordered[1].hi) / 4 : (ordered[0].hi + ordered[1].lo) / 2) : 0;
+      const overlap = ordered.length > 1 ? Math.min(ordered[0].hi, ordered[1].hi) - Math.max(ordered[0].lo, ordered[1].lo) : 0;
+      const fxs = (s.f1 - s.f0) / w;
+      const owner = new Int8Array(w).fill(-1);
+      if (st)
+        for (let x = 0; x < w; x++) {
+          const fm = s.f0 + (x + 0.5) * fxs;
+          let bd = Infinity;
+          for (const v of views)
+            if (fm >= v.lo && fm <= v.hi && Math.abs(fm - (v.lo + v.hi) / 2) < bd) [owner[x], bd] = [v.slot, Math.abs(fm - (v.lo + v.hi) / 2)];
+        }
       const nowMs = performance.now();
       for (const v of views) {
-        const clipLo = ordered.length > 1 && v === ordered[1] && overlap > 0 ? seam : -Infinity;
-        const clipHi = ordered.length > 1 && v === ordered[0] && overlap > 0 ? seam : Infinity;
         // a running view whose rows stopped coming (stitched): dimmed, and said over its part
         const stalled = !!st && !v.src.dim && this.slotAt[v.slot] > 0 && nowMs - this.slotAt[v.slot] > STALE_MS;
         if (stalled && !v.src.msg) v.src = { ...v.src, msg: `${SLOT[v.slot]}: no data from the adapter` };
@@ -681,19 +688,25 @@ export class Display {
           // drawn where its frequencies are on the axis (all of it, for one view)
           const { lo } = Display.range(r);
           const fx = (s.f1 - s.f0) / w;
-          const xa = Math.max(0, Math.floor((Math.max(lo, clipLo) - s.f0) / fx)), xb = Math.min(w, Math.ceil((Math.min(lo + r.bins * r.df, clipHi) - s.f0) / fx));
+          const xa = Math.max(0, Math.floor((lo - s.f0) / fx)), xb = Math.min(w, Math.ceil((lo + r.bins * r.df - s.f0) / fx));
           const draw = (arr: Float32Array, colour: string, lw: number) => {
             c.strokeStyle = colour;
             c.lineWidth = lw * d;
             c.beginPath();
+            let pen = false; // stitched: the line breaks where another view owns the pixels
             for (let x = xa; x < xb; x++) {
+              if (st && owner[x] !== v.slot) {
+                pen = false;
+                continue;
+              }
               const fa = s.f0 + x * fx;
               const b0 = Math.max(0, Math.floor((fa - lo) / r.df)), b1 = Math.min(r.bins, Math.max(b0 + 1, Math.floor((fa + fx - lo) / r.df)));
               let val = -1e9;
               for (let b = b0; b < b1; b++) val = Math.max(val, arr[b]);
               const y = Math.max(T, Math.min(ph, yOf(val)));
-              if (x === xa) c.moveTo(L + x, y);
-              else c.lineTo(L + x, y);
+              if (pen) c.lineTo(L + x, y);
+              else c.moveTo(L + x, y);
+              pen = true;
             }
             c.stroke();
           };
@@ -717,21 +730,26 @@ export class Display {
           c.fillStyle = '#8e99a7';
           if (x1 - x0 > 60 * d) c.fillText('not covered', (x0 + x1) / 2, T + 40 * d);
         } else {
-          // the seam: where one view's part ends and the other's begins
-          const x = Math.round(xOf(seam)) + 0.5;
-          c.strokeStyle = '#6b7889';
-          c.setLineDash([4 * d, 4 * d]);
-          c.beginPath();
-          c.moveTo(x, T);
-          c.lineTo(x, ph);
-          c.stroke();
-          c.setLineDash([]);
-          const label = `${SLOT[a.slot]} │ ${SLOT[b.slot]}${overlap > 1e6 ? ` · overlap ${Math.round(overlap / 1e6)} MHz` : ''}`;
-          const lw = c.measureText(label).width;
-          c.fillStyle = 'rgba(11,14,19,0.85)';
-          c.fillRect(x - lw / 2 - 4 * d, T + 2 * d, lw + 8 * d, 15 * d);
-          c.fillStyle = '#d8dee6';
-          c.fillText(label, x, T + 4 * d);
+          // the seams: wherever one view's part ends and the other's begins (two for nested spans)
+          let labelled = false;
+          for (let x = 1; x < w; x++) {
+            if (owner[x] < 0 || owner[x - 1] < 0 || owner[x] === owner[x - 1]) continue;
+            const sx = L + x + 0.5;
+            c.strokeStyle = '#6b7889';
+            c.setLineDash([4 * d, 4 * d]);
+            c.beginPath();
+            c.moveTo(sx, T);
+            c.lineTo(sx, ph);
+            c.stroke();
+            c.setLineDash([]);
+            const label = `${SLOT[owner[x - 1]]} │ ${SLOT[owner[x]]}${!labelled && overlap > 1e6 ? ` · overlap ${Math.round(overlap / 1e6)} MHz` : ''}`;
+            labelled = true;
+            const lw = c.measureText(label).width;
+            c.fillStyle = 'rgba(11,14,19,0.85)';
+            c.fillRect(sx - lw / 2 - 4 * d, T + 2 * d, lw + 8 * d, 15 * d);
+            c.fillStyle = '#d8dee6';
+            c.fillText(label, sx, T + 4 * d);
+          }
         }
         // a view's own message (stopped, starting) over its part
         c.font = `${13 * d}px system-ui, sans-serif`;

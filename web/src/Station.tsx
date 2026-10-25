@@ -3,11 +3,11 @@
 // waterfall, and, while it is the selected view, its sidebar sections (adapter, tuning, gain).
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { CHANNELS, channelAt, channelKey } from './channels';
+import { channelAt } from './channels';
 import { Display, type Source } from './display';
 import type { Hub } from './hub';
 import type { Caps, Device, DspSettings, Rate, RxSettings, Row, Status } from './protocol';
-import { Section, Seg } from './ui';
+import { Seg } from './ui';
 import {
   ANT_COLOUR, LOCKED, SLOT_NAME, UDEV_CMD, VIEW_COLOUR, bandOf, baseName, bytes, chanShort, devKey, devLabel, devTitle, fmtClock,
   fmtDur, gappedDuty, loadPrefs, mhz, ratesFor, snap, spanLabel, type Mode, type Prefs, type Scale, type Tuning,
@@ -66,7 +66,6 @@ export function Station(p: {
   const rate = useRef({ banks: 0, t: 0 });
   const drops = useRef({ ring: 0, client: 0, at: 0 });
   const bannerId = useRef(1);
-  const narrowNoted = useRef(false);
   // for callbacks that outlive a render; want: a frequency sent and not yet acknowledged (a link reads it,
   // so quick changes in a row keep the views' distance)
   // rates: the open adapter's (caps), set as events arrive, so a handle used in the same commit is current
@@ -100,7 +99,9 @@ export function Station(p: {
   const [dropWarn, setDropWarn] = useState<string[]>([]);
   const [hadPicture, setHadPicture] = useState(false);
   // unplugged while running: the adapter (pid, picker key) to start again when it is back
-  const [lost, setLost] = useState<{ pid: number; key: string } | null>(null);
+  // gone: a scan has shown it missing; before: the adapters there were when it was lost; tries: restarts
+  const [lost, setLost] = useState<{ pid: number; key: string; gone: boolean; before: string[]; tries: number } | null>(null);
+  const known = useRef<string[]>([]); // the adapter list's keys, for the callbacks
   const freqInput = useRef<HTMLInputElement>(null);
 
   const rememberTuning = (t: Tuning) => updatePrefs(slot ? { tuningB: t } : { tuning: t });
@@ -178,6 +179,7 @@ export function Station(p: {
         switch (e.type) {
           case 'devices': {
             setDevices(e.devices);
+            known.current = e.devices.map(devKey);
             // keep the pick; else the first adapter the other view has not picked (nothing picked yet,
             // at a start in a two-view mode: B takes the second)
             const other = view.current.other;
@@ -271,7 +273,7 @@ export function Station(p: {
             setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error });
             break;
           case 'alert':
-            if (e.kind === 'lost' && opened) setLost(opened); // the header says it; no banner
+            if (e.kind === 'lost' && opened) setLost({ ...opened, gone: false, before: known.current, tries: 0 }); // the header says it; no banner
             else addBanner(e.msg, 'error');
             break;
           case 'error':
@@ -428,10 +430,11 @@ export function Station(p: {
       },
       spanStep: (dir) => {
         if (locked) return addBanner(LOCKED);
-        // continuous spans only: a gapped one is picked in the Span list, on purpose
+        // continuous spans only: a gapped one is picked in the Span list, on purpose (from a gapped
+        // span, narrower is the widest continuous one)
         const ok = rates.filter((r) => !r.gapped).sort((a, b) => a.fs - b.fs);
         const i = ok.findIndex((r) => r.rate_sel === cur.rate_sel);
-        const next = ok[i < 0 ? 0 : Math.max(0, Math.min(ok.length - 1, i + dir))];
+        const next = i < 0 ? (dir < 0 ? ok[ok.length - 1] : undefined) : ok[Math.max(0, Math.min(ok.length - 1, i + dir))];
         if (next && next.rate_sel !== cur.rate_sel) userSet({ rate_sel: next.rate_sel, wide: true });
       },
       typeFreq: (digit) => {
@@ -460,57 +463,48 @@ export function Station(p: {
     if (connected && dsp.fft !== prefs.fft) req('dsp', { fft: prefs.fft }).catch(() => {});
   }, [prefs.fft, connected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const doStart = async (dev = sel) => {
+  // auto: starting again after an unplug; it waits on if this fails, and never opens a gapped span
+  // (a replugged 8812BU comes back at USB 2 and may stay there)
+  const doStart = async (dev = sel, auto = false) => {
     if (!dev) return;
-    setLost(null);
+    if (!auto) setLost(null);
     setStarting(true);
     setSaved(null);
     window.clearTimeout(gainTimer.current); // a gain change still waiting goes with the open
     const gain = gainUi ?? draft.gain_db;
     try {
-      await req('open', { pid: dev.pid, bus: dev.bus, port: dev.port, ...draft, gain_db: gain, offset_tuning: prefs.offsetTuning });
+      const rate_sel = auto ? Math.max(draft.rate_sel, Math.ceil(Math.log2(80 / dev.max_msps))) : draft.rate_sel;
+      await req('open', { pid: dev.pid, bus: dev.bus, port: dev.port, ...draft, rate_sel, gain_db: gain, offset_tuning: prefs.offsetTuning });
     } catch {
       /* shown */
     } finally {
       setStarting(false);
     }
   };
-  // Waiting for an adapter (none found, or this one unplugged): look again every 3 s (no hotplug
-  // events). An unplugged adapter that is back (the same model; another port is fine) starts again.
-  const waiting = connected && !open && !opening && (!devices.length || !!lost);
+  // Waiting for an adapter (none found: view A looks; or this one unplugged): look again every 3 s
+  // (no hotplug events). The unplugged adapter starts again when it is back: on its port once a scan
+  // showed it gone, or as an adapter of that model that was not there before (a replug can change the
+  // bus); never one the other view has.
+  const waiting = connected && !open && !opening && ((!devices.length && slot === 0) || !!lost);
   useEffect(() => {
     if (!waiting) return;
     const t = window.setInterval(() => hub.request('scan', { slot }).catch(() => {}), 3000);
     return () => window.clearInterval(t);
   }, [waiting, hub, slot]);
   useEffect(() => {
-    if (!lost || open || opening || !connected) return;
-    const back = devices.filter((d) => d.pid === lost.pid && d.can_open && devKey(d) !== p.otherOpen);
-    const d = back.find((x) => devKey(x) === lost.key) ?? back[0];
+    if (!lost || open || opening || starting || !connected) return;
+    const keys = devices.map(devKey);
+    if (!lost.gone && !keys.includes(lost.key)) return setLost({ ...lost, gone: true });
+    if (lost.tries >= 3) return; // the card says to press Start
+    const d = devices.find((x) => {
+      const k = devKey(x);
+      return x.pid === lost.pid && x.can_open && k !== p.otherOpen && k !== p.otherSel && (k === lost.key ? lost.gone : !lost.before.includes(k));
+    });
     if (!d) return;
     setSelKey(devKey(d));
-    void doStart(d);
-  }, [devices, lost]); // eslint-disable-line react-hooks/exhaustive-deps
-  const pickChannel = (key: string) => {
-    const c = CHANNELS.find((x) => channelKey(x) === key);
-    if (!c) return;
-    updatePrefs({ retuned: true }); // the tip is no longer needed
-    // A channel only moves the centre; the width shown is Span alone. Said once per session, and only
-    // what this adapter can actually do.
-    if (fsNow < c.width * 1e6 - 1 && !narrowNoted.current) {
-      narrowNoted.current = true;
-      const wider = rates.filter((r) => r.fs >= c.width * 1e6);
-      addBanner(
-        wider.some((r) => !r.gapped)
-          ? `Showing ${spanLabel(fsNow)} of this ${c.width} MHz channel; widen it with Span`
-          : wider.length
-            ? `Showing ${spanLabel(fsNow)} of this ${c.width} MHz channel; on this adapter wider spans are gapped (Span)`
-            : `Showing ${spanLabel(fsNow)} of this ${c.width} MHz channel (the most this adapter shows)`,
-      );
-    }
-    tuneTo(c.centre);
-  };
-  const pickBand = (b: '2.4' | '5') => b !== bandOf(cur.freq) && tuneTo(b === '2.4' ? 2437e6 : 5180e6);
+    setLost({ ...lost, tries: lost.tries + 1 });
+    void doStart(d, true);
+  }, [devices, lost, starting]); // eslint-disable-line react-hooks/exhaustive-deps
   const commitFreq = () => {
     const f = Math.round(parseFloat(freqText) * 1e6);
     if (!Number.isFinite(f) || f < 2.3e9 || f > 6.2e9) {
@@ -563,7 +557,6 @@ export function Station(p: {
   const diskFree = status?.disk_free ?? 0;
   const secsLeft = diskFree / recRate;
   const lockTitle = locked ? LOCKED : undefined;
-  const band = bandOf(cur.freq);
   const runGapped = !!run?.gapped;
   const recTitle = !recording && gapped
     ? 'Recording needs a continuous span (5 MHz or less on this adapter); gapped spans sample only part of the time'
@@ -573,46 +566,53 @@ export function Station(p: {
         ? `Recording to ${status.record.file} (${bytes(recRate)}/s${diskFree ? `; ${bytes(diskFree)} free, ~${fmtDur(secsLeft)}` : ''}). Tuning and gain are locked meanwhile.`
         : `Record raw IQ (SigMF), about ${bytes(recRate)}/s at this span${diskFree ? `; ${bytes(diskFree)} free (~${fmtDur(secsLeft)})` : ''}`;
 
+  // a setting that is on or off: a switch, with what it does under its name
+  const toggle = (label: string, what: string, on: boolean, onChange: (v: boolean) => void, title: string, disabled = false) => (
+    <button className={on ? 'toggle on' : 'toggle'} role="switch" aria-checked={on} disabled={disabled} onClick={() => onChange(!on)} title={title}>
+      <span className="tlabel">
+        {label}
+        <small>{what}</small>
+      </span>
+      <span className="switch" aria-hidden="true">
+        <i />
+      </span>
+    </button>
+  );
+  // The selected view's settings in the sidebar (frequency, channel, Start/Stop and Record are in its
+  // header and the band ruler).
   const sidebar = (
     <>
-      <Section id="adapter" title="Adapter" prefs={prefs} updatePrefs={updatePrefs}>
-        <select
-          aria-label={`Adapter of view ${name}`}
-          value={selKey ?? ''}
-          disabled={open || opening || !devices.length}
-          onChange={(e) => {
-            setSelKey(e.target.value);
-            setLost(null); // another adapter: no longer waiting for the old one
-          }}
-          title={sel ? devTitle(sel) : 'Adapter'}
-        >
-          {!devices.length && <option value="">no adapter found</option>}
-          {devices.map((d) => {
-            const inOther = devKey(d) === p.otherOpen; // also in Single: view B may still be running
-            return (
-              <option key={devKey(d)} value={devKey(d)} title={devTitle(d)} disabled={inOther}>
-                {devLabel(d)}
-                {inOther ? ` (in view ${SLOT_NAME[slot ^ 1]})` : ''}
-              </option>
-            );
-          })}
-        </select>
-        {!open && (
-          <button disabled={opening || !connected} onClick={() => req('scan').catch(() => {})} title="Look for adapters again">
-            ⟳ Rescan
-          </button>
-        )}
-        {twoPaths && (
-          <div className="field">
-            <span>Antennas</span>
-            <Seg
-              value={dsp.paths}
-              disabled={locked}
-              options={[['a', 'Ant 1'], ['b', 'Ant 2'], ['ab', 'Both']]}
-              onChange={setPaths}
-            />
-          </div>
-        )}
+      <section className="sbgroup" aria-label={`Adapter of view ${name}`}>
+        <h3>Adapter</h3>
+        <div className="row">
+          <select
+            aria-label={`Adapter of view ${name}`}
+            value={selKey ?? ''}
+            disabled={open || opening || !devices.length}
+            onChange={(e) => {
+              setSelKey(e.target.value);
+              setLost(null); // another adapter: no longer waiting for the old one
+            }}
+            title={sel ? devTitle(sel) : 'Adapter'}
+          >
+            {!devices.length && <option value="">no adapter found</option>}
+            {devices.map((d) => {
+              const inOther = devKey(d) === p.otherOpen; // also in Single: view B may still be running
+              return (
+                <option key={devKey(d)} value={devKey(d)} title={devTitle(d)} disabled={inOther}>
+                  {devLabel(d)}
+                  {inOther ? ` (in view ${SLOT_NAME[slot ^ 1]})` : ''}
+                </option>
+              );
+            })}
+          </select>
+          {!open && (
+            <button className="icon" aria-label="Look for adapters again" disabled={opening || !connected} onClick={() => req('scan').catch(() => {})} title="Look for adapters again">
+              ⟳
+            </button>
+          )}
+        </div>
+        {twoPaths && <Seg wide value={dsp.paths} disabled={locked} options={[['a', 'Ant 1'], ['b', 'Ant 2'], ['ab', 'Both']]} onChange={setPaths} title="Antennas" />}
         {sel && sel.driver && sel.driver !== 'usbfs' && !open && (
           <span className="note">The kernel driver <code>{sel.driver}</code> is using this adapter; ▶ Start takes it over.</span>
         )}
@@ -620,89 +620,55 @@ export function Station(p: {
           <span className="note">Connected at USB 2: ▶ Start switches it to USB 3 when the port allows (continuous 10–40 MHz need USB 3).</span>
         )}
         {(open || sel) && (
-          <span className="note">
+          <span className="note" title={diskFree ? `${bytes(diskFree)} free where recordings go` : undefined}>
             {gapped
-              ? 'Recording: needs a continuous span (5 MHz or less here)'
-              : `Recording at this span: ${bytes(recRate)}/s${diskFree ? ` · ${bytes(diskFree)} free (~${fmtDur(secsLeft)})` : ''}`}
+              ? 'Recording needs a continuous span (5 MHz or less here)'
+              : `Recording: ${bytes(recRate)}/s${diskFree ? ` · room for ~${fmtDur(secsLeft)}` : ''}`}
           </span>
         )}
-      </Section>
-      <Section id="tuning" title="Tuning" prefs={prefs} updatePrefs={updatePrefs}>
-        <Seg wide value={band} disabled={locked} title={lockTitle} options={[['2.4', '2.4 GHz'], ['5', '5 GHz']]} onChange={(b) => pickBand(b as '2.4' | '5')} />
-        <label className="field" title={lockTitle}>
-          Channel
-          <select
-            disabled={locked}
-            value={chan ? channelKey(chan) : ''}
-            onChange={(e) => pickChannel(e.target.value)}
-            title="Sets the centre frequency only; how wide a slice you see is Span"
-          >
-            <option value="" disabled>
-              custom ({mhz(cur.freq, 0)} MHz)
+      </section>
+      <section className="sbgroup" title={lockTitle}>
+        <h3>Span</h3>
+        <select
+          aria-label={`Span of view ${name}`}
+          disabled={locked}
+          value={cur.rate_sel}
+          // the centre stays as asked; a 40 MHz span centres within 2422-2462 / 5090-6155 MHz, so the
+          // radio may sit beside it (the plot marks the requested frequency)
+          onChange={(e) => userSet({ rate_sel: Number(e.target.value), wide: true })}
+          title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
+            rates.some((r) => r.gapped)
+              ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording)'
+              : ''
+          }`}
+        >
+          {rates.map((r) => (
+            <option key={r.rate_sel} value={r.rate_sel}>
+              {r.gapped ? `${spanLabel(r.fs)} · gapped ~${Math.round(gappedDuty(r.hw_fs ?? r.fs) * 100)} %` : `${spanLabel(r.fs)} · ${r.fs / 1e6} MS/s`}
             </option>
-            {band === '2.4' ? (
-              CHANNELS.filter((c) => c.band === '2.4').map((c) => (
-                <option key={channelKey(c)} value={channelKey(c)}>{`${c.label} · ${mhz(c.centre, 0)} MHz`}</option>
-              ))
-            ) : (
-              <>
-                <optgroup label="20 MHz channels">
-                  {CHANNELS.filter((c) => c.band === '5' && c.width === 20).map((c) => (
-                    <option key={channelKey(c)} value={channelKey(c)}>{`${c.label} · ${mhz(c.centre, 0)} MHz`}</option>
-                  ))}
-                </optgroup>
-                <optgroup label="Centre of a 40 MHz pair">
-                  {CHANNELS.filter((c) => c.width === 40).map((c) => (
-                    <option key={channelKey(c)} value={channelKey(c)}>{`${c.ch + 2} · ${mhz(c.centre, 0)} MHz (centre of ${c.label})`}</option>
-                  ))}
-                </optgroup>
-              </>
-            )}
-          </select>
-        </label>
-        <label className="field" title={lockTitle}>
-          Span
-          <select
-            disabled={locked}
-            value={cur.rate_sel}
-            // the centre stays as asked; a 40 MHz span centres within 2422-2462 / 5090-6155 MHz, so the
-            // radio may sit beside it (the plot marks the requested frequency)
-            onChange={(e) => userSet({ rate_sel: Number(e.target.value), wide: true })}
-            title={`Bandwidth shown = sample rate (complex IQ). This adapter: up to ${spanLabel(Math.max(...rates.map((r) => r.fs)))}${
-              rates.some((r) => r.gapped)
-                ? '. "gapped": wider than USB 2 can carry continuously; the adapter captures short slices (spectrum and waterfall, no recording)'
-                : ''
-            }`}
-          >
-            {rates.map((r) => (
-              <option key={r.rate_sel} value={r.rate_sel}>
-                {r.gapped ? `${spanLabel(r.fs)} · gapped ~${Math.round(gappedDuty(r.hw_fs ?? r.fs) * 100)} %` : `${spanLabel(r.fs)} · ${r.fs / 1e6} MS/s`}
-              </option>
-            ))}
-          </select>
-        </label>
+          ))}
+        </select>
         {gapped && (
           <span className="note">
             Gapped: the adapter captures short slices of this span and ships each over USB 2, so only part of the time is
             seen. Spectrum and waterfall, no recording.
           </span>
         )}
-        {fsNow >= 40e6 && band === '2.4' && (
+        {fsNow >= 40e6 && bandOf(cur.freq) === '2.4' && (
           <span className="note">A 40 MHz span centres between 2422 and 2462 MHz: the requested frequency is marked on the plot.</span>
         )}
-        {p.linksBox}
-        {chip.includes('8822C') && (
-          <label
-            className="check"
-            title="Off: the view is what the adapter's own receiver sees, its centre notch included. On: the 10 and 20 MHz views are cut from a 40 MHz capture tuned beside the channel, so the notch stays out of view (less of the time is sampled)."
-          >
-            <input type="checkbox" checked={prefs.offsetTuning} onChange={(e) => updatePrefs({ offsetTuning: e.target.checked })} />
-            Avoid the chip&apos;s centre notch
-          </label>
-        )}
-      </Section>
-      <Section id="gain" title="Gain" prefs={prefs} updatePrefs={updatePrefs}>
-        <div className="row" title={lockTitle}>
+        {chip.includes('8822C') &&
+          toggle(
+            'Avoid the chip’s centre notch',
+            prefs.offsetTuning ? 'tunes beside the channel' : 'shows what the chip sees',
+            prefs.offsetTuning,
+            (v) => updatePrefs({ offsetTuning: v }),
+            "Off: the view is what the adapter's own receiver sees, its centre notch included. On: the 10 and 20 MHz views are cut from a 40 MHz capture tuned beside the channel, so the notch stays out of view (less of the time is sampled).",
+          )}
+      </section>
+      <section className="sbgroup" title={lockTitle}>
+        <h3>Gain</h3>
+        <div className="row">
           <input
             type="range"
             aria-label={`Gain of view ${name}`}
@@ -714,12 +680,22 @@ export function Station(p: {
             onChange={(e) => onGain(Number(e.target.value))}
           />
           <span className="val">{cur.agc ? 'auto' : `${(gainUi ?? cur.gain_db).toFixed(0)} dB`}</span>
+          <button
+            className={cur.agc ? 'mini on' : 'mini'}
+            role="switch"
+            aria-checked={cur.agc}
+            disabled={locked}
+            onClick={() => userSet({ agc: !cur.agc })}
+            title="AGC: the chip sets the gain (it steps down during frames)"
+          >
+            AGC
+            <span className="switch" aria-hidden="true">
+              <i />
+            </span>
+          </button>
         </div>
-        <label className="check" title="Let the chip's AGC set the gain (it steps down during frames)">
-          <input type="checkbox" disabled={locked} checked={cur.agc} onChange={(e) => userSet({ agc: e.target.checked })} />
-          AGC
-        </label>
-      </Section>
+      </section>
+      {p.linksBox}
     </>
   );
 
@@ -856,10 +832,11 @@ export function Station(p: {
         </div>
         {connected && !fatal && !open && !opening && (lost ? (
           <div className="vcard lost" role="status">
-            <h2>Unplugged · waiting for it to come back</h2>
+            <h2>{lost.tries >= 3 ? 'Back, but it did not start' : 'Unplugged · waiting for it to come back'}</h2>
             <p>
-              View {name} starts again by itself when the adapter is back
-              {saved ? ' (the recording was saved)' : ''}. The last picture stays, dimmed.
+              {lost.tries >= 3
+                ? `Three tries to start view ${name} again failed. Press ▶ Start to try once more.`
+                : `View ${name} starts again by itself when the adapter is back${saved ? ' (the recording was saved)' : ''}. The last picture stays, dimmed.`}
             </p>
             <button onClick={() => setLost(null)}>Stop waiting</button>
           </div>

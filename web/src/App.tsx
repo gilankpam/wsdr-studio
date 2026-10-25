@@ -10,12 +10,11 @@ import { Station, type Link, type StationHandle, type ViewInfo } from './Station
 import { BandRuler } from './BandRuler';
 import { Panorama } from './Panorama';
 import { survey, type Survey } from './survey';
-import { NumField, Section } from './ui';
+import { NumField, Seg } from './ui';
 import {
   FFTS, LOCKED, SLOT_NAME, bandOf, baseName, bytes, loadPrefs, savePrefs, snap, spanLabel, type Locks, type Mode, type Prefs, type Scale,
 } from './util';
 
-const minus = (v: number) => String(v).replace('-', '−');
 // [keys, what, two-view modes only]
 const KEYS: [string, string, boolean][] = [
   ['← →', 'tune 5 MHz (Shift: 20 MHz)', false],
@@ -264,15 +263,25 @@ export default function App() {
       const t = e.target as HTMLElement;
       const h = handles.current[sel];
       const k = e.key;
+      const typing = !!t.closest('input, select, textarea, [contenteditable="true"]');
+      // held keys repeat only tuning and span steps (not Start/Stop, Record, the toggles)
+      if (e.repeat && !['ArrowLeft', 'ArrowRight', '[', ']'].includes(k)) return;
+      if (help) {
+        // the sheet is modal: it takes only its own keys
+        if (k === 'Escape' || k === '?') {
+          e.preventDefault();
+          setHelp(false);
+        }
+        return;
+      }
       if (e.ctrlKey) {
-        if (k.toLowerCase() === 'b') toggleSidebar();
-        else if (k.toLowerCase() === 'r') h?.toggleRec();
+        if (k.toLowerCase() === 'b' && !e.shiftKey) toggleSidebar();
+        else if (k.toLowerCase() === 'r' && !e.shiftKey && !typing) h?.toggleRec();
         else return;
         e.preventDefault();
         return;
       }
-      if (k === 'Escape' && help) return setHelp(false);
-      if (t.closest('input, select, textarea, [contenteditable="true"]')) return; // typing there
+      if (typing) return; // typing there
       const onButton = !!t.closest('button');
       if (k === 'ArrowLeft' || k === 'ArrowRight') stepSel((k === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 4 : 1));
       else if (k === '[' || k === ']') h?.spanStep(k === ']' ? 1 : -1);
@@ -304,8 +313,10 @@ export default function App() {
     ['gain', 'Gain', 'gain and AGC together', "Gain and AGC change together (two dongles' gains differ slightly)"],
   ];
   const linksBox = dual && (
-    <div className="links" role="group" aria-label="Links between A and B">
-      <span className="note">{anyLock ? 'Moving either view moves both' : 'The views move independently'}</span>
+    <section className="sbgroup links" aria-label="Links between A and B">
+      <h3>
+        Links<small>{anyLock ? 'moving either view moves both' : 'the views move independently'}</small>
+      </h3>
       {links.map(([k, label, what, title]) => (
         <button key={k} className={locks[k] ? 'toggle on' : 'toggle'} role="switch" aria-checked={locks[k]} onClick={() => setLock(k)} title={title}>
           <span className="tlabel">
@@ -317,7 +328,7 @@ export default function App() {
           </span>
         </button>
       ))}
-    </div>
+    </section>
   );
   const auto = prefs.scale === null;
   // Panorama stitches neighbouring spans; far apart, one axis would squeeze both into slivers
@@ -403,76 +414,80 @@ export default function App() {
                 </div>
               )}
               <div className="sbviews" ref={setSbEl} />
-              <Section
-                id="display"
-                title="Display"
-                prefs={prefs}
-                updatePrefs={updatePrefs}
-                summary={`${minus(scale.dbMin)} … ${minus(scale.dbMax)} dBFS · ${auto ? 'Auto' : 'fixed'} · FFT ${fft}`}
-              >
-                <div className="row" title={dual ? 'Shared by both views' : undefined}>
-                  <NumField label="Scale bottom, dBFS" value={scale.dbMin} title="Bottom of the scale (dBFS); Enter to apply" onCommit={(v) => setUserScale({ ...scale, dbMin: v })} />
-                  <span className="muted">to</span>
-                  <NumField label="Scale top, dBFS" value={scale.dbMax} title="Top of the scale (dBFS); Enter to apply" onCommit={(v) => setUserScale({ ...scale, dbMax: v })} />
-                  <span className="muted">dBFS</span>
-                  <button
-                    className={auto ? 'on' : ''}
-                    aria-pressed={auto}
-                    title={
-                      auto
-                        ? 'Auto scale is on: refits after Start, retune, span, gain or FFT change. Type a value to fix the scale.'
-                        : 'Fit the scale to the signal now, and keep refitting after Start, retune, span, gain or FFT changes'
-                    }
-                    onClick={() => {
+              <section className="sbgroup" aria-label="Display">
+                <h3>
+                  Display{dual && <small>both views</small>}
+                </h3>
+                <button
+                  className={auto ? 'toggle on' : 'toggle'}
+                  role="switch"
+                  aria-checked={auto}
+                  onClick={() => {
+                    if (auto) updatePrefs({ scale }); // keep the scale it has now
+                    else {
                       fit();
                       updatePrefs({ scale: null });
-                    }}
-                  >
-                    Auto
-                  </button>
+                    }
+                  }}
+                  title="On: the scale refits after Start, retune, span, gain or FFT changes. Typing a value turns it off."
+                >
+                  <span className="tlabel">
+                    Auto scale
+                    <small>{auto ? 'fits the signal' : 'fixed (type values below)'}</small>
+                  </span>
+                  <span className="switch" aria-hidden="true">
+                    <i />
+                  </span>
+                </button>
+                <div className="kv">
+                  <span>Scale</span>
+                  <span className="row">
+                    <NumField label="Scale bottom, dBFS" value={scale.dbMin} title="Bottom of the scale (dBFS); Enter to apply" onCommit={(v) => setUserScale({ ...scale, dbMin: v })} />
+                    <span className="muted">to</span>
+                    <NumField label="Scale top, dBFS" value={scale.dbMax} title="Top of the scale (dBFS); Enter to apply" onCommit={(v) => setUserScale({ ...scale, dbMax: v })} />
+                    <span className="muted">dBFS</span>
+                  </span>
+                  <span>Waterfall from</span>
+                  <span className="row">
+                    <NumField label="Waterfall floor, dBFS" value={scale.wfFloor} title="The waterfall's colours start here (dBFS)" onCommit={(v) => setUserScale({ ...scale, wfFloor: v })} />
+                    <span className="muted">dBFS</span>
+                  </span>
                 </div>
-                <label className="field inline">
-                  FFT size
-                  <select value={fft} onChange={(e) => updatePrefs({ fft: Number(e.target.value) })}>
-                    {FFTS.map((n) => (
-                      <option key={n} value={n} disabled={gapped && n > 8192}>
-                        {n <= 4096 ? `${n} · ${(fsNow / n / 1e3).toFixed(1)} kHz/bin` : `${n} · ${(fsNow / 4096 / 1e3).toFixed(1)} kHz/bin, smoother noise`}
-                        {gapped && n > 8192 ? ' (not in gapped mode)' : ''}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field inline">
-                  Averaging
-                  <select value={prefs.smooth} onChange={(e) => updatePrefs({ smooth: Number(e.target.value) })}>
-                    <option value={0}>off</option>
-                    <option value={0.5}>low</option>
-                    <option value={0.7}>medium</option>
-                    <option value={0.9}>high</option>
-                  </select>
-                </label>
-                <label className="field inline">
-                  Waterfall
-                  <select
+                <div className="kv">
+                  <span>Waterfall</span>
+                  <Seg
+                    wide
                     value={prefs.wfMode}
-                    onChange={(e) => {
-                      const m = e.target.value as 'max' | 'avg';
+                    options={[['max', 'Peak'], ['avg', 'Average']]}
+                    title="Peak shows short frames; average shows what stays"
+                    onChange={(m) => {
                       updatePrefs({ wfMode: m });
                       if (auto) fit(m); // the floor depends on the mode
                     }}
-                  >
-                    <option value="max">peak (shows short frames)</option>
-                    <option value="avg">average</option>
+                  />
+                  <span>Smoothing</span>
+                  <Seg
+                    wide
+                    value={String(prefs.smooth)}
+                    options={[['0', 'Off'], ['0.5', 'Low'], ['0.7', 'Mid'], ['0.9', 'High']]}
+                    title="Averaging of the average trace across rows"
+                    onChange={(v) => updatePrefs({ smooth: Number(v) })}
+                  />
+                  <span>FFT size</span>
+                  <select
+                    aria-label="FFT size"
+                    title="Bins per row; the kHz is the width of a bin (above 4096 the noise gets smoother, the bins no narrower)"
+                    value={fft}
+                    onChange={(e) => updatePrefs({ fft: Number(e.target.value) })}>
+                    {FFTS.map((n) => (
+                      <option key={n} value={n} disabled={gapped && n > 8192}>
+                        {`${n} · ${(fsNow / Math.min(n, 4096) / 1e3).toFixed(1)} kHz`}
+                        {gapped && n > 8192 ? ' (not gapped)' : ''}
+                      </option>
+                    ))}
                   </select>
-                </label>
-                <label className="field inline">
-                  Waterfall floor
-                  <span className="row">
-                    <NumField label="Waterfall floor, dBFS" value={scale.wfFloor} title="Colour of the waterfall starts here (dBFS)" onCommit={(v) => setUserScale({ ...scale, wfFloor: v })} />
-                    <span className="muted">dBFS</span>
-                  </span>
-                </label>
-              </Section>
+                </div>
+              </section>
             </aside>
           </>
         )}

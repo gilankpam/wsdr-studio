@@ -19,6 +19,8 @@
 #include "receiver.h"
 #include "wifi.h"
 
+#include <nlohmann/json.hpp>
+
 using namespace studio;
 
 static int g_fail = 0;
@@ -441,6 +443,32 @@ static void test_wifi_frames() {
   }
 }
 
+// Network names: whatever bytes a beacon carries, the text is valid UTF-8 the JSON writer accepts.
+static void test_ssid_text() {
+  auto t = [](const std::string &b) { return wifi::ssid_text(reinterpret_cast<const uint8_t *>(b.data()), b.size()); };
+  CHECK(t("homelab") == "homelab");
+  CHECK(t("Kaffe\xc3\xa5") == "Kaffe\xc3\xa5");          // valid UTF-8 kept
+  CHECK(t(std::string("\0\0\0", 3)).empty());             // hidden network
+  CHECK(t("\xc0\x80") == "??");                            // overlong
+  CHECK(t("\xed\xa0\x80") == "???");                      // surrogate
+  CHECK(t("\xf4\x90\x80\x80") == "????");                // past U+10FFFF
+  CHECK(t("a\xe2\x80\xae" "b") == "a???b");                  // right-to-left override
+  CHECK(t("a\x01" "b") == "a?b");                              // control character
+  CHECK(t(std::string("abc\0\0", 5)) == "abc");             // zero padding
+  for (int i = 0; i < 2000; i++) { // random bytes: dump() must not throw
+    std::string b;
+    for (int k = 0; k < 32; k++)
+      b += static_cast<char>((i * 131 + k * 197 + (i >> 3) * k) & 0xff);
+    bool ok = true;
+    try {
+      (void)nlohmann::json(t(b)).dump();
+    } catch (...) {
+      ok = false;
+    }
+    CHECK(ok);
+  }
+}
+
 // --wifi <file.sigmf-data>: the frame finder over a recording (ci16, rate and centre from its meta).
 static int wifi_scan(const char *path) {
   std::string p(path), mp = p.substr(0, p.rfind(".sigmf-data")) + ".sigmf-meta";
@@ -476,6 +504,31 @@ static int wifi_scan(const char *path) {
               fs / 1e6, fc / 1e6, got.size(), secs, static_cast<double>(done) / fs / secs);
   for (const auto &[k, n] : by)
     std::printf("  %-28s %d\n", k.c_str(), n);
+  int six = 0, mac = 0;
+  std::map<std::string, int> nets, senders;
+  auto hex = [](const std::array<uint8_t, 6> &a) {
+    char b[18];
+    std::snprintf(b, sizeof b, "%02x:%02x:%02x:%02x:%02x:%02x", a[0], a[1], a[2], a[3], a[4], a[5]);
+    return std::string(b);
+  };
+  for (const auto &fr : got) {
+    if (fr.rate_mbps != 6 || fr.fmt != 'L')
+      continue;
+    six++;
+    if (!fr.mac)
+      continue;
+    mac++;
+    if (fr.beacon)
+      nets["\"" + fr.ssid + "\" " + hex(fr.bssid) + " ch " + std::to_string(fr.channel)]++;
+    if (fr.has_ta)
+      senders[hex(fr.ta)]++;
+  }
+  std::printf("6 Mb/s legacy frames: %d, decoded whole (CRC good): %d\n", six, mac);
+  for (const auto &[k, n] : nets)
+    std::printf("  network %s  x%d\n", k.c_str(), n);
+  for (const auto &[k, n] : senders)
+    if (n >= 3)
+      std::printf("  sender %s  x%d\n", k.c_str(), n);
   return 0;
 }
 
@@ -492,6 +545,7 @@ int main(int argc, char **argv) {
   test_gapped();
   test_crop();
   test_wifi_frames();
+  test_ssid_text();
   std::printf(g_fail ? "%d FAILED\n" : "all tests passed\n", g_fail);
   return g_fail ? 1 : 0;
 }

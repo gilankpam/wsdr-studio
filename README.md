@@ -112,6 +112,10 @@ The window needs at least 1280 × 720.
   11n, lavender 11ac); hover the waterfall for what was there. Nothing is transmitted; it costs about a
   third of a CPU core at 40 MS/s. It finds OFDM frames (802.11a/g/n/ac) with a clear preamble;
   802.11b frames (many 2.4 GHz beacons) and very weak frames get no mark.
+  Frames sent at 6 Mb/s (beacons, ACKs, RTS/CTS) are decoded whole when the signal allows: the band
+  ruler then names the networks heard on each channel (from their beacons), and the hover names who
+  sent the frames under the pointer (other devices' addresses too, often randomised ones). Only
+  addresses and network names are read; no payload is kept, nothing is saved.
 - **Keyboard** (? shows the list): ←/→ tune 5 MHz (Shift 20), [ ] span, digits or Enter type a
   frequency, A / B select the view, Space Start/Stop, Ctrl+R record.
 - **Unplugged** while streaming: the view says so, keeps its picture and starts again by itself when

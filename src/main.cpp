@@ -298,7 +298,7 @@ int main(int argc, char **argv) {
   std::array<std::unique_ptr<Engine>, kSlots> engs;
   const auto tagged = [](json e, int slot) {
     e["slot"] = slot;
-    return e.dump();
+    return e.dump(-1, ' ', false, json::error_handler_t::replace); // (never throw on bad UTF-8)
   };
   Server::Handlers h;
   h.on_open = [&](const Server::ClientPtr &c) {
@@ -338,7 +338,8 @@ int main(int argc, char **argv) {
       }
       slot = cmd["slot"].get<int>();
     }
-    engs[slot]->submit(std::move(cmd), [&srv, w](const json &r) { srv->send_text(w, r.dump()); });
+    // (a reply may carry a path with bytes that are not UTF-8: replaced, never thrown on)
+    engs[slot]->submit(std::move(cmd), [&srv, w](const json &r) { srv->send_text(w, r.dump(-1, ' ', false, json::error_handler_t::replace)); });
   };
   std::string err;
   bool ok = false;

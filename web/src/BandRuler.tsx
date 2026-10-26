@@ -20,6 +20,7 @@ export type RulerView = { slot: number; lo: number; hi: number; locked: boolean;
 
 export function BandRuler(p: {
   views: RulerView[]; sel: number; compact: boolean; survey: Survey; linkLabel: string | null; otherBusy: string | null;
+  nets: Map<number, string[]>; // network names heard on each channel (from beacons)
   onTune: (f: number) => void; onStep: (steps: number) => void; onSelect: (slot: number) => void;
   range?: Range; // Map: the range swept (its buttons are in the sidebar; the cells line up with the map)
 }) {
@@ -127,6 +128,7 @@ export function BandRuler(p: {
         {RANGES[band].groups.flatMap((g) =>
           g.chans.map((c) => {
             const db = p.survey.get(c);
+            const names = p.nets.get(c);
             const a = pos(band, centre(c) - g.half), b = pos(band, centre(c) + g.half);
             // which channels are numbered when there is no room for all: 1, 6, 11 / every 2nd or 4th from 36
             const shown = band === '2.4' ? every === 1 || [1, 6, 11].includes(c) : ((c - (c > 144 ? 149 : 36)) / 4) % every === 0;
@@ -138,7 +140,9 @@ export function BandRuler(p: {
                 disabled={selLocked}
                 style={{ left: pc(a), width: pc(b - a) }}
                 aria-label={`Tune to channel ${c}`}
-                title={`Channel ${c} · ${mhz(centre(c), 0)} MHz${db !== undefined ? ` · strongest seen: ${db.toFixed(0)} dB over the noise` : ''}`}
+                title={`Channel ${c} · ${mhz(centre(c), 0)} MHz${db !== undefined ? ` · strongest seen: ${db.toFixed(0)} dB over the noise` : ''}${
+                  names ? ` · networks: ${names.join(', ')}` : ''
+                }`}
                 onClick={(e) => {
                   e.stopPropagation();
                   p.onTune(centre(c));
@@ -146,7 +150,12 @@ export function BandRuler(p: {
               >
                 <span>
                   {shown ? c : ''}
-                  {cellPx >= FREQ_PX && <small>{mhz(centre(c), 0)}</small>}
+                  {cellPx >= FREQ_PX &&
+                    (names ? (
+                      <small className="rnet">{names.length > 1 ? `${names[0]} +${names.length - 1}` : names[0]}</small>
+                    ) : (
+                      <small>{mhz(centre(c), 0)}</small>
+                    ))}
                 </span>
                 {db !== undefined && <i className="rbar" style={bar(level(db))} />}
               </button>

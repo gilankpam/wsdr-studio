@@ -163,6 +163,93 @@ int rate_of(int code) {
   }
 }
 
+// x[k] *= exp(j 2 pi cycles k): a phasor stepped per sample (renormalised every 1024, in double)
+void rotate(cf *x, size_t n, double cycles) {
+  const std::complex<double> step = std::polar(1.0, 2 * kPi * cycles);
+  std::complex<double> ph = 1;
+  for (size_t k = 0; k < n; k++) {
+    x[k] *= std::complex<float>(ph);
+    ph *= step;
+    if ((k & 1023) == 1023)
+      ph /= std::abs(ph);
+  }
+}
+
+uint32_t crc32(const uint8_t *p, size_t n) {
+  static const auto table = [] {
+    std::array<uint32_t, 256> t{};
+    for (uint32_t i = 0; i < 256; i++) {
+      uint32_t c = i;
+      for (int k = 0; k < 8; k++)
+        c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+      t[i] = c;
+    }
+    return t;
+  }();
+  uint32_t c = 0xFFFFFFFFu;
+  for (size_t i = 0; i < n; i++)
+    c = table[(c ^ p[i]) & 0xff] ^ (c >> 8);
+  return c ^ 0xFFFFFFFFu;
+}
+
+// A network name as text: strict UTF-8 (no overlongs, surrogates or code points past U+10FFFF: the
+// JSON writer refuses them) without control characters or bidirectional overrides (a name must not
+// disguise itself); anything else shows as '?'. All zero bytes (a hidden network) gives "".
+std::string utf8(const uint8_t *p, size_t n);
+} // namespace
+std::string ssid_text(const uint8_t *p, size_t n) { return utf8(p, n); }
+namespace {
+std::string utf8(const uint8_t *p, size_t n) {
+  bool zero = true;
+  for (size_t i = 0; i < n; i++)
+    zero = zero && p[i] == 0;
+  std::string s;
+  if (zero)
+    return s;
+  while (n > 0 && p[n - 1] == 0) // padding
+    n--;
+  for (size_t i = 0; i < n;) {
+    const uint8_t c = p[i];
+    size_t k = 0;
+    uint32_t cp = 0;
+    uint8_t lo = 0x80, hi = 0xBF; // the second byte's range
+    if (c < 0x80) {
+      k = 1;
+      cp = c;
+    } else if (c >= 0xC2 && c <= 0xDF) {
+      k = 2;
+      cp = c & 0x1F;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+      k = 3;
+      cp = c & 0x0F;
+      if (c == 0xE0) lo = 0xA0;
+      if (c == 0xED) hi = 0x9F; // no surrogates
+    } else if (c >= 0xF0 && c <= 0xF4) {
+      k = 4;
+      cp = c & 0x07;
+      if (c == 0xF0) lo = 0x90;
+      if (c == 0xF4) hi = 0x8F; // up to U+10FFFF
+    }
+    bool ok = k > 0 && i + k <= n;
+    for (size_t j = 1; ok && j < k; j++) {
+      const uint8_t b = p[i + j];
+      ok = j == 1 ? b >= lo && b <= hi : (b & 0xC0) == 0x80;
+      cp = (cp << 6) | (b & 0x3F);
+    }
+    if (ok && (cp < 0x20 || (cp >= 0x7F && cp <= 0x9F) || cp == 0xAD || cp == 0x61C || (cp >= 0x200B && cp <= 0x200F) ||
+               (cp >= 0x2028 && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069) || cp == 0xFEFF || (cp >= 0xE0000 && cp <= 0xE007F)))
+      ok = false; // control characters, invisible and bidirectional marks, tag characters
+    if (ok) {
+      s.append(reinterpret_cast<const char *>(p + i), k);
+      i += k;
+    } else {
+      s += '?';
+      i++;
+    }
+  }
+  return s;
+}
+
 // Valid 20 MHz channel centres (Hz).
 std::vector<double> channels() {
   std::vector<double> c;
@@ -190,7 +277,7 @@ double partner(double c) {
 
 } // namespace
 
-bool Decoder::decode20(const cf *in, size_t n, Frame &f) {
+bool Decoder::decode20(const cf *in, size_t n, Frame &f, bool payload) {
   const Tables &t = T();
   if (n < 720)
     return false;
@@ -200,8 +287,7 @@ bool Decoder::decode20(const cf *in, size_t n, Frame &f) {
   for (size_t k = 40; k < 136; k++)
     c += std::complex<double>(x[k]) * std::conj(std::complex<double>(x[k + 16]));
   double cfo = -std::arg(c) / (2 * kPi * 16); // cycles per sample
-  for (size_t k = 0; k < n; k++)
-    x[k] *= std::polar(1.f, static_cast<float>(-2 * kPi * cfo * static_cast<double>(k)));
+  rotate(x.data(), n, -cfo);
   // the long training field: two copies 64 apart
   size_t l1 = 0;
   float best = -1;
@@ -227,8 +313,7 @@ bool Decoder::decode20(const cf *in, size_t n, Frame &f) {
   for (int k = 0; k < 64; k++)
     d += std::complex<double>(x[l1 + 64 + k]) * std::conj(std::complex<double>(x[l1 + k]));
   const double fine = std::arg(d) / (2 * kPi * 64);
-  for (size_t k = 0; k < n; k++)
-    x[k] *= std::polar(1.f, static_cast<float>(-2 * kPi * fine * static_cast<double>(k)));
+  rotate(x.data(), n, -fine);
   cfo += fine;
   std::array<cf, 64> f1, f2, h;
   std::copy(x.begin() + static_cast<long>(l1), x.begin() + static_cast<long>(l1 + 64), f1.begin());
@@ -311,6 +396,71 @@ bool Decoder::decode20(const cf *in, size_t n, Frame &f) {
     f.fmt = q1 ? 'H' : q2 ? 'V' : 'L';
   }
   (void)cfo;
+  const int nsym = static_cast<int>(std::ceil((16 + 8.0 * len + 6) / 24));
+  if (!payload || rate != 6 || f.fmt != 'L' || len < 14 || sig0 + 80 * static_cast<size_t>(nsym + 1) > n)
+    return true;
+  // the data symbols, BPSK; each subcarrier's noise from the quadrature part over the whole frame (it
+  // should be 0): one that is hit (a fade, the sender's own artefacts) counts less
+  std::vector<std::array<cf, 48>> ds(nsym);
+  std::array<double, 48> var{};
+  for (int i = 0; i < nsym; i++) {
+    const auto z = symbol(&x[sig0 + 80 * static_cast<size_t>(i + 1)], h, kPol[(i + 1) % 127]);
+    for (int k = 0; k < 48; k++) {
+      ds[i][k] = z[bin(t.data_sc[k])];
+      var[k] += ds[i][k].imag() * ds[i][k].imag();
+    }
+  }
+  std::vector<float> pl(48 * static_cast<size_t>(nsym));
+  for (int i = 0; i < nsym; i++)
+    for (int k = 0; k < 48; k++)
+      pl[48 * static_cast<size_t>(i) + k] = ds[i][t.perm[k]].real() / static_cast<float>(var[t.perm[k]] / nsym + 0.02);
+  auto bits = viterbi(pl);
+  // descramble: the first 7 bits of SERVICE are zero before scrambling, so they are the scrambler's
+  // state (x^7 + x^4 + 1)
+  unsigned reg = 0;
+  for (int i = 0; i < 7; i++)
+    reg = ((reg << 1) | bits[i]) & 0x7f;
+  for (size_t i = 7; i < bits.size(); i++) {
+    const unsigned fb = ((reg >> 6) ^ (reg >> 3)) & 1;
+    bits[i] ^= static_cast<uint8_t>(fb);
+    reg = ((reg << 1) | fb) & 0x7f;
+  }
+  std::vector<uint8_t> by(static_cast<size_t>(len));
+  for (int b = 0; b < len; b++) {
+    uint8_t v = 0;
+    for (int j = 0; j < 8; j++)
+      v |= static_cast<uint8_t>(bits[16 + 8 * static_cast<size_t>(b) + j] << j);
+    by[b] = v;
+  }
+  if (crc32(by.data(), by.size() - 4) != (by[len - 4] | by[len - 3] << 8 | by[len - 2] << 16 | static_cast<uint32_t>(by[len - 1]) << 24))
+    return true; // the header stands; the rest was not received cleanly
+  if ((by[0] & 3) != 0 || ((by[0] >> 2) & 3) == 3)
+    return true; // not protocol version 0, or a reserved type: no header to read
+  f.mac = true;
+  f.type = (by[0] >> 2) & 3;
+  f.subtype = by[0] >> 4;
+  // CTS and ACK carry no sender; a control wrapper (7) another layout
+  const bool no_ta = f.type == 1 && (f.subtype == 12 || f.subtype == 13 || f.subtype == 7);
+  if (!no_ta && len >= 20) {
+    f.has_ta = true;
+    std::copy(by.begin() + 10, by.begin() + 16, f.ta.begin());
+  }
+  if (f.type == 0 && (f.subtype == 8 || f.subtype == 5) && len >= 40) { // beacon, probe response
+    f.beacon = true;
+    std::copy(by.begin() + 16, by.begin() + 22, f.bssid.begin());
+    for (size_t p = 36; p + 2 <= by.size() - 4;) { // the information elements
+      const uint8_t id = by[p], l = by[p + 1];
+      if (p + 2 + l > by.size() - 4)
+        break;
+      if (id == 0)
+        f.ssid = utf8(&by[p + 2], l);
+      else if (id == 3 && l == 1) // DS parameter set (2.4 GHz)
+        f.channel = by[p + 2];
+      else if (id == 61 && l >= 1 && !f.channel) // HT operation: its primary channel (5 GHz beacons)
+        f.channel = by[p + 2];
+      p += 2 + l;
+    }
+  }
   return true;
 }
 
@@ -321,6 +471,7 @@ void Decoder::reset(double fs, double centre_hz) {
   _lag = 16 * _dec;
   _win = 48 * _dec;
   _buf.clear();
+  _pend.clear();
   _abs0 = _scan = _abs_end = 0;
   _in = false;
   _pstart = _quiet_until = 0;
@@ -403,6 +554,7 @@ void Decoder::scan(std::vector<Frame> &out) {
     p2 += std::norm(bL) - std::norm(aL);
   }
   _scan = limit;
+  finish(out);
   // the noise floor: a low quantile of the window power over the last ~100 ms (a long frame, an
   // A-MPDU of a few ms, must not become the floor), every 16 scans (~3 ms)
   if (_lvl_n >= 16 && ++_lvl_scans % 16 == 1) {
@@ -411,7 +563,9 @@ void Decoder::scan(std::vector<Frame> &out) {
     _noise = _lvl_tmp[_lvl_n / 10];
   }
   // keep what a frame found later still needs
-  const uint64_t from = _in ? std::min(_pstart, _scan) : _scan;
+  uint64_t from = _in ? std::min(_pstart, _scan) : _scan;
+  for (const auto &p : _pend) // a frame still arriving keeps its samples
+    from = std::min(from, p.pos + pre);
   const uint64_t keep = from > pre ? from - pre : 0;
   if (keep > _abs0) {
     _buf.erase(_buf.begin(), _buf.begin() + static_cast<long>(keep - _abs0));
@@ -475,23 +629,8 @@ void Decoder::frame_at(uint64_t pos_abs, std::vector<Frame> &out) {
         c = cand;
       }
   }
-  // to 20 MS/s on that channel
   const double off = c - _centre;
-  std::vector<cf> y(len);
-  for (uint64_t k = 0; k < len; k++)
-    y[k] = s[k] * std::polar(1.f, static_cast<float>(-2 * kPi * off / _fs * static_cast<double>(k)));
-  std::vector<cf> z20;
-  if (_dec == 2) {
-    const size_t nt = _lp.size();
-    for (size_t m = 0; 2 * m + nt <= len; m++) {
-      cf acc = 0;
-      for (size_t k = 0; k < nt; k++)
-        acc += y[2 * m + k] * _lp[k];
-      z20.push_back(acc);
-    }
-  } else {
-    z20 = std::move(y);
-  }
+  const auto z20 = snippet(pos - pre, len, off);
   Frame f;
   if (!decode20(z20.data(), z20.size(), f))
     return;
@@ -500,8 +639,59 @@ void Decoder::frame_at(uint64_t pos_abs, std::vector<Frame> &out) {
   f.t += _t_end - static_cast<double>(_abs_end - pos) / _fs + (_dec == 2 ? 10 / 20e6 : 0);
   f.bw_mhz = forty ? 40 : 20;
   f.centre_hz = forty ? (c + partner(c)) / 2 : c;
+  // a 6 Mb/s legacy frame (beacons, ACKs, RTS/CTS ...): decoded whole once all of it has arrived
+  if (f.rate_mbps == 6 && f.fmt == 'L' && f.length >= 14 && f.length <= 800) {
+    const uint64_t nsym = static_cast<uint64_t>(std::ceil((16 + 8.0 * f.length + 6) / 24));
+    const uint64_t n20 = 330 + 144 + 80 * (nsym + 1) + 16; // (the LTF may sit up to sample 330)
+    _pend.push_back({pos - pre, pos - pre + n20 * static_cast<uint64_t>(_dec) + _lp.size(), off, f});
+    return;
+  }
   out.push_back(f);
   (void)t;
+}
+
+std::vector<cf> Decoder::snippet(uint64_t from, uint64_t len, double off) const {
+  const cf *s = &_buf[from - _abs0];
+  std::vector<cf> y(s, s + len);
+  rotate(y.data(), len, -off / _fs);
+  if (_dec != 2)
+    return y;
+  std::vector<cf> z20;
+  const size_t nt = _lp.size();
+  z20.reserve(len / 2);
+  for (size_t m = 0; 2 * m + nt <= len; m++) {
+    cf acc = 0;
+    for (size_t k = 0; k < nt; k++)
+      acc += y[2 * m + k] * _lp[k];
+    z20.push_back(acc);
+  }
+  return z20;
+}
+
+void Decoder::finish(std::vector<Frame> &out) {
+  for (size_t i = 0; i < _pend.size();) {
+    auto &p = _pend[i];
+    if (p.end > _abs_end) {
+      i++;
+      continue;
+    }
+    const auto z20 = snippet(p.pos, p.end - p.pos, p.off);
+    Frame g;
+    if (decode20(z20.data(), z20.size(), g, true) && g.mac) {
+      Frame &f = p.f; // its timing and channel stay; the MAC fields come from the whole decode
+      f.mac = true;
+      f.type = g.type;
+      f.subtype = g.subtype;
+      f.has_ta = g.has_ta;
+      f.ta = g.ta;
+      f.beacon = g.beacon;
+      f.bssid = g.bssid;
+      f.ssid = g.ssid;
+      f.channel = g.channel;
+    }
+    out.push_back(p.f);
+    _pend.erase(_pend.begin() + static_cast<long>(i));
+  }
 }
 
 } // namespace wifi

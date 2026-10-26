@@ -306,3 +306,7 @@ button.rtab.s1 { background: var(--view-b); }
 /* Mark Wi-Fi frames: the marks' colours in the switch's caption */
 .toggle .wkey { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin: 0 2px 0 4px; vertical-align: baseline; }
 .toggle .wkey:first-child { margin-left: 0; }
+
+/* the band ruler: a network heard on a channel takes the place of its MHz */
+button.rcell > span { max-width: 100%; }
+.rcell small.rnet { display: block; color: #eef2f6; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 3px; box-sizing: border-box; }

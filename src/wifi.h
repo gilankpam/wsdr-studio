@@ -72,6 +72,7 @@ private:
     uint64_t start, need, stop; // probe from start (absolute) up to stop; first wait for samples up to need
     uint32_t det;               // the detection it belongs to
     bool hit = false;           // a frame was found in it
+    double chan = 0;            // waiting for a frame's samples: its channel (it starts at `start`)
   };
   // probes the job's part for frames with the samples up to `end`, decoding the first one found;
   // false: it needs more samples (j.need; j.start moved to where it found one), call again then
@@ -86,7 +87,6 @@ private:
   std::vector<std::complex<float>> _z4; // the window's terms (a ring), to slide it
   cf _dc = 0;                   // the samples' DC offset (taken out as they arrive)
   std::vector<Job> _bjobs;      // to probe, in order
-  double _bchan = 0;            // the channel an 802.11b frame was last found on (probed first)
   uint32_t _ndet = 0;           // detections so far
   int _bempty = 0, _bpart = 0;  // parts of the current detection probed in vain; parts since
 

@@ -481,7 +481,6 @@ void Decoder::reset(double fs, double centre_hz) {
   _bjobs.clear();
   _din = false;
   _dloud = _dseg = _bdone = 0;
-  _bchan = 0;
   _bempty = _bpart = 0;
   _dc = 0;
   _dsss = centre_hz < 3e9;
@@ -846,6 +845,17 @@ bool Decoder::dsss_at(Job &j, uint64_t end, std::vector<Frame> &out) {
   // the part, a 100 us block at a time: the first whose matched filter shows the rhythm (on the best
   // channel) is where a frame may start; a block whose SFD does not
   // follow (the tail of an earlier frame) moves the probe on
+  if (j.chan > 0) { // a frame found before, its samples now in: from where it was found
+    const double c = j.chan;
+    j.chan = 0;
+    const int r = dsss_frame(j.start, end, c, j, out);
+    if (r < 0)
+      return false;
+    if (r > 0) {
+      j.hit = true;
+      return true;
+    }
+  }
   for (uint64_t b = std::max(j.start, _bdone); b < j.stop + 10 * us && b + 200 * us <= end; b += 100 * us) {
     double best = 0, c = 0;
     const auto try_chan = [&](double cand) {
@@ -856,13 +866,9 @@ bool Decoder::dsss_at(Job &j, uint64_t end, std::vector<Frame> &out) {
         c = cand;
       }
     };
-    // (a channel 5 MHz off shows the rhythm too, weaker: the best one is taken; when the channel last
-    // found shows it, only its neighbours are compared)
-    if (_bchan > 0)
-      try_chan(_bchan);
-    const bool near = best >= 2.5;
+    // (channels 5-20 MHz off show the rhythm too, weaker: the best one is taken)
     for (double cand : _cands)
-      if (cand < 3e9 && cand != _bchan && (!near || std::abs(cand - _bchan) < 6e6))
+      if (cand < 3e9)
         try_chan(cand);
     if (best < 2.5)
       continue;
@@ -871,7 +877,6 @@ bool Decoder::dsss_at(Job &j, uint64_t end, std::vector<Frame> &out) {
     if (r < 0)
       return false; // the rest of the frame is still arriving
     if (r > 0) {
-      _bchan = c;
       j.hit = true;
       return true;
     }
@@ -985,7 +990,7 @@ int Decoder::dsss_frame(uint64_t from, uint64_t end, double c, Job &j, std::vect
   Frame f;
   f.fmt = 'B';
   f.rate_mbps = sig == 0x0A ? 1 : sig == 0x14 ? 2 : sig == 0x37 ? 5 : sig == 0x6E ? 11 : 0;
-  if (!f.rate_mbps || length_us == 0)
+  if (!f.rate_mbps || length_us == 0 || length_us > 19000) // (no 802.11b frame is longer: a bad header)
     return 0;
   // the samples the whole frame needs (1 and 2 Mb/s payloads are decoded; CCK: the header is enough)
   const uint64_t psym = sig == 0x0A ? 8 * static_cast<uint64_t>(length_us / 8) : sig == 0x14 ? 4 * static_cast<uint64_t>(length_us / 4) : 0;
@@ -993,6 +998,7 @@ int Decoder::dsss_frame(uint64_t from, uint64_t end, double c, Job &j, std::vect
   if (want > end && want - from < 20000 * us) { // (the longest 1 Mb/s frame: ~19 ms)
     j.need = want;
     j.start = from;
+    j.chan = c;
     return -1;
   }
   if (psym && want - from > 360 * us + _lp.size()) // the whole frame (the same start, so the same timing)

@@ -25,9 +25,9 @@ find_package(Threads REQUIRED)
 # FFT backend: FFTW here; pocketfft (header-only, external/pocketfft) is what the web build uses, and
 # test_core_pocketfft runs the same tests against it.
 set(WSDR_FFT "fftw" CACHE STRING "FFT backend: fftw | pocketfft")
+include(src/sources.cmake)
 function(studio_core_lib name fft)
-  add_library(${name} STATIC src/dsp.cpp src/protocol.cpp src/device_scan.cpp src/recorder.cpp src/engine.cpp
-              src/wifi.cpp src/studio.cpp src/fft_${fft}.cpp)
+  add_library(${name} STATIC ${STUDIO_CORE_SOURCES} src/fft_${fft}.cpp)
   target_include_directories(${name} PUBLIC src)
   target_link_libraries(${name} PUBLIC wsdrcore iqdsp nlohmann_json::nlohmann_json Threads::Threads)
   if(fft STREQUAL "fftw")

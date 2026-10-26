@@ -2,3 +2,5 @@ build-*/
 .deps/
 web/jspi/
 web/asyncify/
+web/core/wsdr-core.js
+web/core/wsdr-core.wasm

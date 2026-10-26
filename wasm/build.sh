@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Build the WebUSB spike: libusb (Emscripten backend) -> wsdr-probe.{js,wasm} into wasm/web/.
+# Build the web targets: libusb (Emscripten backend), then wsdr-core.{js,wasm} (the app's engine, jspi
+# only) into wasm/web/core/ and the spike's wsdr-probe.{js,wasm} into wasm/web/<mode>/.
 #   wasm/build.sh [jspi|asyncify]
 # Needs: emcc/emcmake, cmake, pkg-config, mipsel binutils (mipsel-*-as/ld/objcopy), xxd. On Nix:
 #   nix shell nixpkgs#emscripten nixpkgs#cmake nixpkgs#pkg-config nixpkgs#xxd \
 #     nixpkgs#pkgsCross.mipsel-linux-gnu.buildPackages.binutils -c wasm/build.sh
 # LIBUSB_SRC: a libusb >= 1.0.27 source tree (default: fetched, pinned by sha256, into wasm/.deps).
+# nlohmann/json.hpp (single header) is fetched the same way.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 mode=${1:-jspi}
@@ -25,6 +27,15 @@ if [[ -z "${LIBUSB_SRC:-}" ]]; then
 fi
 
 # -pthread: libusb's Emscripten event loop uses wasm atomics (shared memory). No threads are started.
+JSON_VER=3.11.3
+JSON_SHA256=9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6
+json_inc=$deps/json-$JSON_VER
+if [[ ! -f $json_inc/nlohmann/json.hpp ]]; then
+  mkdir -p "$json_inc/nlohmann"
+  curl -fsSL -o "$json_inc/nlohmann/json.hpp" "https://github.com/nlohmann/json/releases/download/v$JSON_VER/json.hpp"
+  echo "$JSON_SHA256  $json_inc/nlohmann/json.hpp" | sha256sum -c -
+fi
+
 if [[ $mode == jspi ]]; then exc="-fwasm-exceptions;-pthread"; else exc="-fexceptions;-pthread"; fi
 
 tool() { command -v "mipsel-linux-gnu-$1" || command -v "mipsel-unknown-linux-gnu-$1"; }
@@ -35,9 +46,13 @@ cmake --build "$out/libusb" -j
 cmake --install "$out/libusb" >/dev/null
 
 PKG_CONFIG_PATH=$out/prefix/lib/pkgconfig PKG_CONFIG_LIBDIR=$out/prefix/lib/pkgconfig \
-emcmake cmake -S "$here" -B "$out/probe" -DCMAKE_BUILD_TYPE=Release -DWSDR_ASYNC="$mode" -DLIBUSB_PREFIX="$out/prefix" \
+emcmake cmake -S "$here" -B "$out/probe" -DCMAKE_BUILD_TYPE=Release -DWSDR_ASYNC="$mode" -DLIBUSB_PREFIX="$out/prefix" -DNLOHMANN_INCLUDE="$json_inc" \
   -DMIPS_AS="$(tool as)" -DMIPS_LD="$(tool ld)" -DMIPS_OBJCOPY="$(tool objcopy)" >/dev/null
 cmake --build "$out/probe" -j --target wsdr-probe
 mkdir -p "$here/web/$mode"
 cp "$out/probe/wsdr-probe.js" "$out/probe/wsdr-probe.wasm" "$here/web/$mode/"
-ls -la "$here/web/$mode"
+if [[ $mode == jspi ]]; then
+  cmake --build "$out/probe" -j --target wsdr-core
+  cp "$out/probe/wsdr-core.js" "$out/probe/wsdr-core.wasm" "$here/web/core/"
+  ls -la "$here/web/core"
+fi

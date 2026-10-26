@@ -1,13 +1,13 @@
-// Static server for wasm/web on http://localhost:8080 with the cross-origin isolation headers the
-// probe needs (shared memory). localhost counts as a secure context, which WebUSB requires.
-//   node wasm/serve.mjs [port]
+// Static server (default: wasm/web) on http://localhost:8080 with the cross-origin isolation headers
+// the WASM builds need (shared memory). localhost counts as a secure context, which WebUSB requires.
+//   node wasm/serve.mjs [port] [directory]
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = join(fileURLToPath(new URL('.', import.meta.url)), 'web');
 const port = Number(process.argv[2] ?? 8080);
+const root = process.argv[3] ? resolve(process.argv[3]) : join(fileURLToPath(new URL('.', import.meta.url)), 'web');
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.css': 'text/css' };
 
 createServer(async (req, res) => {

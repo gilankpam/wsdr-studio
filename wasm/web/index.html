@@ -46,6 +46,7 @@ Close wsdr-studio first (one owner per dongle); on Linux the rtw88 driver must n
   <button id="stream" disabled>Stream</button>
   <button id="sweep" disabled>Every rate (2.5 → 40)</button>
   <button id="usb3" disabled>Switch 8812BU to USB 3</button>
+  <button id="rx" disabled title="wsdr::Receiver with its own threads (USB calls forwarded to the module's thread)">Stream via Receiver threads</button>
 </fieldset>
 <table id="results"><thead><tr>
   <th>build</th><th>where</th><th>fs MS/s</th><th>depth</th><th>got MS/s</th><th>USB MB/s</th><th>banks</th>
@@ -118,7 +119,7 @@ $('load').onclick = async () => {
     });
   }
   log('loaded', 'ok');
-  for (const b of ['list', 'stream', 'sweep', 'usb3']) $(b).disabled = false;
+  for (const b of ['list', 'stream', 'sweep', 'usb3', 'rx']) $(b).disabled = false;
 };
 
 $('pair').onclick = async () => {
@@ -143,6 +144,7 @@ $('list').onclick = () => run('probe_list');
 $('stream').onclick = () => run('probe_stream', streamArgs(+$('rate').value));
 $('sweep').onclick = async () => { for (const r of [5, 4, 3, 2, 1]) await run('probe_stream', streamArgs(r)); };
 $('usb3').onclick = () => run('probe_usb3', [+$('pid').value]);
+$('rx').onclick = () => run('probe_rx', [+$('pid').value, +$('rate').value, +$('secs').value]);
 </script>
 </body>
 </html>

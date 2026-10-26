@@ -17,7 +17,7 @@ set(WSDR_ASYNC "jspi" CACHE STRING "jspi | asyncify")
 # so memory is shared (the page must be cross-origin isolated); no thread is ever started.
 if(WSDR_ASYNC STREQUAL "jspi")
   set(WSDR_EXC_FLAGS -fwasm-exceptions -pthread)
-  set(WSDR_ASYNC_LINK -sJSPI -sJSPI_EXPORTS=probe_list,probe_stream,probe_usb3)
+  set(WSDR_ASYNC_LINK -sJSPI -sJSPI_EXPORTS=probe_list,probe_stream,probe_usb3,probe_rx)
 else()
   set(WSDR_EXC_FLAGS -fexceptions -pthread)
   set(WSDR_ASYNC_LINK -sASYNCIFY -sASYNCIFY_STACK_SIZE=262144)
@@ -37,7 +37,7 @@ target_link_options(wsdr-probe PRIVATE
   -lembind
   -sENVIRONMENT=web,worker
   -sMODULARIZE -sEXPORT_ES6 -sEXPORT_NAME=createProbe
-  -sINITIAL_MEMORY=256MB -sSTACK_SIZE=1MB -sPTHREAD_POOL_SIZE=0 # fixed heap: growth + pthreads slows every JS heap access (the USB copies)
-  -sEXPORTED_FUNCTIONS=_probe_list,_probe_stream,_probe_usb3,_main
+  -sINITIAL_MEMORY=256MB -sSTACK_SIZE=1MB -sPTHREAD_POOL_SIZE=4 # fixed heap: growth + pthreads slows every JS heap access (the USB copies)
+  -sEXPORTED_FUNCTIONS=_probe_list,_probe_stream,_probe_usb3,_probe_rx,_main
   -sEXPORTED_RUNTIME_METHODS=ccall)
 set_target_properties(wsdr-probe PROPERTIES SUFFIX ".js")

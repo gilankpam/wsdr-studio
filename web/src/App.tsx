@@ -211,7 +211,7 @@ export default function App() {
         const old = netsRef.current.get(f[9]);
         const ssid = f[10] || old?.ssid || ''; // a hidden network's beacon must not hide a name a probe response gave
         if (old && old.ssid === ssid && old.ch === ch) continue;
-        if (!old && netsRef.current.size >= 300) continue; // (a flood of made-up networks)
+        if (!old && netsRef.current.size >= 300) netsRef.current.delete(netsRef.current.keys().next().value!); // (a flood: the oldest goes)
         netsRef.current.set(f[9], { ssid, ch });
         netsDirty.current = true;
       }

@@ -627,7 +627,10 @@ export class Display {
   addWifi(frames: WifiFrame[]) {
     if (!this.opts.wifi || this.opts.stitch || this.opts.dim) return; // (stopped: the picture is kept as it was)
     for (const f of frames) {
-      if (f[9] && f[10] != null && (f[10] || !this.wifiNames.has(f[9]))) this.wifiNames.set(f[9], f[10] || '(hidden)');
+      if (f[9] && f[10] != null && (f[10] || !this.wifiNames.has(f[9]))) {
+        if (!this.wifiNames.has(f[9]) && this.wifiNames.size >= 300) this.wifiNames.delete(this.wifiNames.keys().next().value!);
+        this.wifiNames.set(f[9], f[10] || '(hidden)');
+      }
       if (!this.rowT.length || f[0] > this.rowT[0].t) {
         this.wifiPending.push(f);
         continue;

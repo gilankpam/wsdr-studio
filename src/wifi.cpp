@@ -206,6 +206,8 @@ std::string utf8(const uint8_t *p, size_t n) {
   std::string s;
   if (zero)
     return s;
+  while (n > 0 && p[n - 1] == 0) // padding
+    n--;
   for (size_t i = 0; i < n;) {
     const uint8_t c = p[i];
     size_t k = 0;
@@ -234,9 +236,9 @@ std::string utf8(const uint8_t *p, size_t n) {
       ok = j == 1 ? b >= lo && b <= hi : (b & 0xC0) == 0x80;
       cp = (cp << 6) | (b & 0x3F);
     }
-    if (ok && (cp < 0x20 || (cp >= 0x7F && cp <= 0x9F) || (cp >= 0x202A && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069) ||
-               cp == 0x200E || cp == 0x200F))
-      ok = false; // control characters, bidirectional marks and overrides
+    if (ok && (cp < 0x20 || (cp >= 0x7F && cp <= 0x9F) || cp == 0xAD || cp == 0x61C || (cp >= 0x200B && cp <= 0x200F) ||
+               (cp >= 0x2028 && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069) || cp == 0xFEFF || (cp >= 0xE0000 && cp <= 0xE007F)))
+      ok = false; // control characters, invisible and bidirectional marks, tag characters
     if (ok) {
       s.append(reinterpret_cast<const char *>(p + i), k);
       i += k;

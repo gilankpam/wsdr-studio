@@ -454,6 +454,7 @@ static void test_ssid_text() {
   CHECK(t("\xf4\x90\x80\x80") == "????");                // past U+10FFFF
   CHECK(t("a\xe2\x80\xae" "b") == "a???b");                  // right-to-left override
   CHECK(t("a\x01" "b") == "a?b");                              // control character
+  CHECK(t(std::string("abc\0\0", 5)) == "abc");             // zero padding
   for (int i = 0; i < 2000; i++) { // random bytes: dump() must not throw
     std::string b;
     for (int k = 0; k < 32; k++)

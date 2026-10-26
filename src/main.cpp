@@ -338,7 +338,8 @@ int main(int argc, char **argv) {
       }
       slot = cmd["slot"].get<int>();
     }
-    engs[slot]->submit(std::move(cmd), [&srv, w](const json &r) { srv->send_text(w, r.dump()); });
+    // (a reply may carry a path with bytes that are not UTF-8: replaced, never thrown on)
+    engs[slot]->submit(std::move(cmd), [&srv, w](const json &r) { srv->send_text(w, r.dump(-1, ' ', false, json::error_handler_t::replace)); });
   };
   std::string err;
   bool ok = false;

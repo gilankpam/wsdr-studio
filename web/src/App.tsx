@@ -63,7 +63,12 @@ export default function App() {
       return n;
     });
   const [scale, setScale] = useState<Scale>(() => loadPrefs().scale ?? { dbMin: -110, dbMax: -20, wfFloor: -100 });
-  const [hub] = useState(() => new Hub());
+  const [hub] = useState(() => {
+    const h = new Hub();
+    // ?e2e: the end-to-end tests (tests/web-e2e.mjs) drive the app through its own hub
+    if (new URLSearchParams(location.search).has('e2e')) (window as { __hub?: Hub }).__hub = h;
+    return h;
+  });
   const [devices, setDevices] = useState<Device[]>([]);
   const [openKey, setOpenKey] = useState<(string | null)[]>([null, null]); // the adapter open in each slot
   const [views, setViews] = useState<(ViewInfo | null)[]>([null, null]);

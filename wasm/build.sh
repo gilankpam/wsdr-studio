@@ -2,7 +2,7 @@
 # Build the web targets: libusb (Emscripten backend), then wsdr-core.{js,wasm} (the app's engine, jspi
 # only) into wasm/web/core/ and the spike's wsdr-probe.{js,wasm} into wasm/web/<mode>/.
 #   wasm/build.sh [jspi|asyncify]
-# Needs: emcc/emcmake, cmake, pkg-config, mipsel binutils (mipsel-*-as/ld/objcopy), xxd. On Nix:
+# Needs: emcc/emcmake, cmake, pkg-config, mipsel binutils (mipsel-*-as/ld/objcopy), xxd, node >= 24. On Nix:
 #   nix shell nixpkgs#emscripten nixpkgs#cmake nixpkgs#pkg-config nixpkgs#xxd \
 #     nixpkgs#pkgsCross.mipsel-linux-gnu.buildPackages.binutils -c wasm/build.sh
 # LIBUSB_SRC: a libusb >= 1.0.27 source tree (default: fetched, pinned by sha256, into wasm/.deps).
@@ -52,7 +52,9 @@ cmake --build "$out/probe" -j --target wsdr-probe
 mkdir -p "$here/web/$mode"
 cp "$out/probe/wsdr-probe.js" "$out/probe/wsdr-probe.wasm" "$here/web/$mode/"
 if [[ $mode == jspi ]]; then
-  cmake --build "$out/probe" -j --target wsdr-core
+  cmake --build "$out/probe" -j --target wsdr-core wsdr-test-core
+  # the engine's DSP and Wi-Fi decoder as WebAssembly, on tests/test_core.cpp's synthetic data
+  (cd "$out/probe" && node --experimental-wasm-jspi wsdr-test-core.js)
   cp "$out/probe/wsdr-core.js" "$out/probe/wsdr-core.wasm" "$here/web/core/"
   ls -la "$here/web/core"
 fi

@@ -88,7 +88,9 @@ void Finder::reset(double fs, double centre_hz) {
     a.mhz = mhz;
     a.step = -2 * kPi * (mhz * 1e6 - _centre) / _fs;
     for (int i = 0; i < nt; i++)
-      a.taps.push_back(std::polar(static_cast<float>(lp[i] / sum), static_cast<float>(a.step * i)));
+      // (the gain times a unit phasor: std::polar wants a magnitude >= 0, and a windowed sinc has
+      // negative taps; libc++, which the web build uses, returns NaN for them)
+      a.taps.push_back(static_cast<float>(lp[i] / sum) * std::polar(1.f, static_cast<float>(a.step * i)));
     a.white.resize(8 * 260);
     for (unsigned i = 0, reg = (static_cast<unsigned>(chan) & 0x3F) | 0x40; i < a.white.size(); i++) {
       a.white[i] = reg & 1;

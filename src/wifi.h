@@ -18,8 +18,8 @@ struct Frame {
   double t = 0;          // start (s), on the clock of the samples fed in
   double centre_hz = 0;  // the 20 MHz channel it was decoded on (40 MHz: the pair's centre)
   int bw_mhz = 20;       // 20, or 40 when its preamble is duplicated on the paired channel (5 GHz)
-  char fmt = 'L';        // 'L' legacy, 'H' HT (802.11n), 'V' VHT (802.11ac)
-  int rate_mbps = 0;     // L-SIG rate (HT/VHT frames carry 6 here)
+  char fmt = 'L';        // 'L' legacy OFDM, 'H' HT (802.11n), 'V' VHT (802.11ac), 'B' 802.11b DSSS/CCK
+  int rate_mbps = 0;     // L-SIG rate (HT/VHT frames carry 6 here); 802.11b: 1, 2, 5 (5.5) or 11
   int length = 0;        // L-SIG length (bytes)
   double dur_us = 0;     // airtime from L-SIG (covers the whole PPDU, also HT/VHT)
   float snr_db = 0;      // from the two LTF copies
@@ -64,6 +64,31 @@ private:
     Frame f;
   };
   std::vector<Pending> _pend;
+  // 802.11b (2.4 GHz): x[k] * conj(x[k + 1 us]) of a DSSS signal is the same Barker waveform times
+  // a phase step of 0/90/180/270 degrees, so (summed over a few samples, as a unit phasor) its 4th
+  // power adds up coherently over a 10 us window, which noise and OFDM do not: that marks each
+  // 802.11b frame from its start while the span is loud; it is decoded once its samples are in
+  struct Job {
+    uint64_t start, need, stop; // probe from start (absolute) up to stop; first wait for samples up to need
+    uint32_t det;               // the detection it belongs to
+    bool hit = false;           // a frame was found in it
+    double chan = 0;            // waiting for a frame's samples: its channel (it starts at `start`)
+  };
+  // probes the job's part for frames with the samples up to `end`, decoding the first one found;
+  // false: it needs more samples (j.need; j.start moved to where it found one), call again then
+  bool dsss_at(Job &j, uint64_t end, std::vector<Frame> &out);
+  int dsss_frame(uint64_t from, uint64_t end, double c, Job &j, std::vector<Frame> &out);
+  bool _dsss = false;           // the span is at 2.4 GHz
+  bool _din = false;            // inside an 802.11b frame
+  uint64_t _dstart = 0;         // where it started
+  uint64_t _dseg = 0;           // where its current segment started (a long one is probed in parts)
+  uint64_t _bdone = 0;          // the end of the last frame decoded (absolute): later jobs start there
+  uint64_t _dloud = 0;          // the last time (absolute sample) the span was loud
+  std::vector<std::complex<float>> _z4; // the window's terms (a ring), to slide it
+  cf _dc = 0;                   // the samples' DC offset (taken out as they arrive)
+  std::vector<Job> _bjobs;      // to probe, in order
+  uint32_t _ndet = 0;           // detections so far
+  int _bempty = 0, _bpart = 0;  // parts of the current detection probed in vain; parts since
 
   double _fs = 0, _centre = 0;
   int _lag = 0, _win = 0, _dec = 1;

@@ -108,11 +108,13 @@ The window needs at least 1280 × 720.
   often. A click on a channel leaves the map onto it; leaving puts both views back as they were.
 - **Mark Wi-Fi frames** (Display, Single and Compare, 20 and 40 MHz spans): the app finds Wi-Fi frames in
   the samples themselves (their preamble, then the legacy header: rate, length, airtime, and whether
-  it is 802.11n or ac) and marks each on the waterfall at its channel's centre (white legacy, magenta
-  11n, lavender 11ac); hover the waterfall for what was there. Nothing is transmitted; it costs about a
-  third of a CPU core at 40 MS/s. It finds OFDM frames (802.11a/g/n/ac) with a clear preamble;
-  802.11b frames (many 2.4 GHz beacons) and very weak frames get no mark.
-  Frames sent at 6 Mb/s (beacons, ACKs, RTS/CTS) are decoded whole when the signal allows: the band
+  it is 802.11n or ac; at 2.4 GHz also 802.11b) and marks each on the waterfall at its channel's
+  centre (white legacy, magenta 11n, lavender 11ac, pale yellow 11b); hover the waterfall for what was
+  there. Nothing is transmitted; it costs about a
+  third to half of a CPU core at 40 MS/s. Very weak frames get no mark; 802.11b frames need the long
+  preamble (most beacons have it) and are read whole at 1 and 2 Mb/s.
+  Frames sent at 6 Mb/s (beacons, ACKs, RTS/CTS), and 802.11b frames at 1 or 2 Mb/s, are decoded
+  whole when the signal allows: the band
   ruler then names the networks heard on each channel (from their beacons), and the hover names who
   sent the frames under the pointer (other devices' addresses too, often randomised ones). Only
   addresses and network names are read; no payload is kept, nothing is saved.

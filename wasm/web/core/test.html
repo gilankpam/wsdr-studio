@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>wsdr-core test</title>
+<p>wsdr-core in a worker, for tests/web-core.mjs. <code>core.request({cmd, ...})</code> resolves with the
+ack or error; <code>core.events</code> holds every event; <code>core.rows[slot]</code> counts row frames.</p>
+<script type="module">
+const w = new Worker('./worker.js', { type: 'module' });
+let id = 0;
+const pending = new Map();
+const core = (window.core = { ready: false, fatal: null, events: [], logs: [], rows: [0, 0], request(c) {
+  const i = ++id;
+  return new Promise((resolve) => { pending.set(i, resolve); w.postMessage({ t: 'text', text: JSON.stringify({ ...c, id: i }) }); });
+} });
+w.onmessage = ({ data: m }) => {
+  if (m.t === 'ready') { core.ready = true; w.postMessage({ t: 'open' }); }
+  else if (m.t === 'fatal') core.fatal = m.msg;
+  else if (m.t === 'log') core.logs.push(m.text);
+  else if (m.t === 'bin') core.rows[(new Uint8Array(m.buf)[6] >> 4) & 1]++;
+  else if (m.t === 'text') {
+    const e = JSON.parse(m.text);
+    if ((e.type === 'ack' || e.type === 'error') && pending.has(e.id)) { pending.get(e.id)(e); pending.delete(e.id); }
+    else core.events.push(e);
+  }
+};
+</script>

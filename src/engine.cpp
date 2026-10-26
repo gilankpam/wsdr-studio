@@ -33,6 +33,17 @@ const char *open_kind(wsdr::OpenError::Kind k) {
   }
 }
 
+// What a failed open tells the user. In the browser, a busy adapter is one Chrome could not claim:
+// WebUSB cannot detach a kernel driver.
+std::string open_msg(const wsdr::OpenError &e) {
+#ifdef __EMSCRIPTEN__
+  if (e.kind == wsdr::OpenError::Busy)
+    return "Chrome could not claim the adapter: another program or the kernel driver holds it. On Linux: "
+           "sudo modprobe -r rtw88_8822bu rtw88_8822cu (or blacklist them, see the README).";
+#endif
+  return e.what();
+}
+
 struct CmdError : std::runtime_error {
   std::string kind;
   CmdError(std::string k, const std::string &m) : std::runtime_error(m), kind(std::move(k)) {}
@@ -461,7 +472,7 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   try {
     r->open(pid, hw_for(s), bus, port);
   } catch (const wsdr::OpenError &e) {
-    fail(open_kind(e.kind), e.what());
+    fail(open_kind(e.kind), open_msg(e));
   } catch (const std::exception &e) {
     fail("bringup", std::string("bring-up failed: ") + e.what());
   }
@@ -636,6 +647,9 @@ json Engine::status() const {
 
 // free space where recordings go (the nearest existing directory); -1 when unknown
 double Engine::disk_free() const {
+#ifdef __EMSCRIPTEN__
+  return -1; // the browser has no free-space figure for the folder recordings end up in
+#endif
   std::error_code ec;
   std::filesystem::path d = _rec.dir();
   while (!d.empty() && !std::filesystem::exists(d, ec) && d.has_parent_path() && d != d.parent_path())

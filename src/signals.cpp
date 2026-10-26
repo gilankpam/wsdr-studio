@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "signals.h"
 
-#include <fftw3.h>
-
 #include "dsp.h"
+#include "fft.h"
 #include "wifi.h" // (ssid_text: names made safe to show)
 
 #include <algorithm>
@@ -25,17 +24,10 @@ constexpr int kWinMs = 200;     // the oven is judged over 200 ms
 Finder::~Finder() { release(); }
 
 void Finder::release() {
-  std::lock_guard<std::mutex> l(studio::fftw_plan_mutex());
-  if (_plan)
-    fftwf_destroy_plan(_plan);
-  if (_fplan)
-    fftwf_destroy_plan(_fplan);
-  fftwf_free(_in);
-  fftwf_free(_out);
-  fftwf_free(_fin);
-  fftwf_free(_fout);
-  _plan = _fplan = nullptr;
-  _in = _out = _fin = _fout = nullptr;
+  _fft.reset();
+  _ffine.reset();
+  _in = _fin = nullptr;
+  _out = _fout = nullptr;
 }
 
 void Finder::reset(double fs, double centre_hz) {
@@ -63,17 +55,12 @@ void Finder::reset(double fs, double centre_hz) {
   _win.resize(_nf);
   for (int k = 0; k < _nf; k++)
     _win[k] = static_cast<float>(0.5 - 0.5 * std::cos(2 * kPi * k / _nf));
-  {
-    std::lock_guard<std::mutex> l(studio::fftw_plan_mutex());
-    _in = reinterpret_cast<cf *>(fftwf_alloc_complex(static_cast<size_t>(_nf)));
-    _out = reinterpret_cast<cf *>(fftwf_alloc_complex(static_cast<size_t>(_nf)));
-    _plan = fftwf_plan_dft_1d(_nf, reinterpret_cast<fftwf_complex *>(_in), reinterpret_cast<fftwf_complex *>(_out), FFTW_FORWARD,
-                              FFTW_ESTIMATE);
-    _fin = reinterpret_cast<cf *>(fftwf_alloc_complex(kFine));
-    _fout = reinterpret_cast<cf *>(fftwf_alloc_complex(kFine));
-    _fplan = fftwf_plan_dft_1d(kFine, reinterpret_cast<fftwf_complex *>(_fin), reinterpret_cast<fftwf_complex *>(_fout), FFTW_FORWARD,
-                               FFTW_ESTIMATE);
-  }
+  _fft = std::make_unique<studio::Fft>(_nf);
+  _ffine = std::make_unique<studio::Fft>(kFine);
+  _in = _fft->in();
+  _out = _fft->out();
+  _fin = _ffine->in();
+  _fout = _ffine->out();
   _fwin.resize(kFine);
   for (int k = 0; k < kFine; k++)
     _fwin[k] = static_cast<float>(0.5 - 0.5 * std::cos(2 * kPi * k / kFine));
@@ -101,7 +88,9 @@ void Finder::reset(double fs, double centre_hz) {
     a.mhz = mhz;
     a.step = -2 * kPi * (mhz * 1e6 - _centre) / _fs;
     for (int i = 0; i < nt; i++)
-      a.taps.push_back(std::polar(static_cast<float>(lp[i] / sum), static_cast<float>(a.step * i)));
+      // (the gain times a unit phasor: std::polar wants a magnitude >= 0, and a windowed sinc has
+      // negative taps; libc++, which the web build uses, returns NaN for them)
+      a.taps.push_back(static_cast<float>(lp[i] / sum) * std::polar(1.f, static_cast<float>(a.step * i)));
     a.white.resize(8 * 260);
     for (unsigned i = 0, reg = (static_cast<unsigned>(chan) & 0x3F) | 0x40; i < a.white.size(); i++) {
       a.white[i] = reg & 1;
@@ -162,7 +151,7 @@ void Finder::column(const cf *x, std::vector<Burst> &out) {
   // the spectrum, its power fftshifted
   for (int k = 0; k < _nf; k++)
     _in[k] = x[k] * _win[k];
-  fftwf_execute(_plan);
+  _fft->run();
   float total = 0;
   for (int k = 0; k < _nf; k++) {
     const float p = std::norm(_out[(k + _nf / 2) % _nf]);
@@ -461,7 +450,7 @@ void Finder::carriers(std::vector<Burst> &out) {
   for (int r = 0; r < K; r++) {
     for (int k = 0; k < kFine; k++)
       _fin[k] = x[r * kFine + k] * _fwin[k];
-    fftwf_execute(_fplan);
+    _ffine->run();
     for (int k = 0; k < kFine; k++)
       P[k] += std::norm(_fout[(k + kFine / 2) % kFine]);
   }

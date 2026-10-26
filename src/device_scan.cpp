@@ -15,7 +15,7 @@ namespace studio {
 namespace fs = std::filesystem;
 
 namespace {
-std::string read_line(const fs::path &p) {
+[[maybe_unused]] std::string read_line(const fs::path &p) { // (sysfs: not in the web build)
   std::ifstream f(p);
   std::string s;
   std::getline(f, s);
@@ -26,8 +26,10 @@ std::string read_line(const fs::path &p) {
 std::vector<DeviceInfo> scan_devices() {
   std::vector<DeviceInfo> out;
   libusb_context *ctx = nullptr;
-  if (libusb_init(&ctx) != 0)
+  if (const int rc = libusb_init(&ctx); rc != 0) {
+    std::fprintf(stderr, "wsdr-studio: cannot look for adapters: libusb_init: %s\n", libusb_error_name(rc));
     return out;
+  }
   libusb_device **list = nullptr;
   const ssize_t n = libusb_get_device_list(ctx, &list);
   for (ssize_t i = 0; i < n; i++) {
@@ -46,6 +48,17 @@ std::vector<DeviceInfo> scan_devices() {
     for (int k = 0; k < np; k++)
       info.port += (k ? "." : "") + std::to_string(ports[k]);
     info.sysfs = std::to_string(info.bus) + "-" + info.port;
+#ifdef __EMSCRIPTEN__
+    // WebUSB: no sysfs, no kernel driver to see; a paired device is one this page may open. The port is
+    // the WebUSB backend's session id (stable while the device stays plugged in).
+    switch (libusb_get_device_speed(list[i])) {
+    case LIBUSB_SPEED_SUPER_PLUS: info.speed_mbps = 10000; break;
+    case LIBUSB_SPEED_SUPER: info.speed_mbps = 5000; break;
+    case LIBUSB_SPEED_HIGH: info.speed_mbps = 480; break;
+    default: info.speed_mbps = 12; break;
+    }
+    info.can_open = true;
+#else
     const fs::path dev = fs::path("/sys/bus/usb/devices") / info.sysfs;
     info.speed_mbps = std::atoi(read_line(dev / "speed").c_str());
     info.devnum = std::atoi(read_line(dev / "devnum").c_str());
@@ -65,6 +78,7 @@ std::vector<DeviceInfo> scan_devices() {
     char node[64];
     std::snprintf(node, sizeof node, "/dev/bus/usb/%03d/%03d", info.bus, libusb_get_device_address(list[i]));
     info.can_open = access(node, R_OK | W_OK) == 0;
+#endif
     info.max_msps = !cu && info.speed_mbps >= 5000 ? 40 : 5;
     info.gapped_msps = cu || info.speed_mbps < 5000 ? 40 : 0; // gapped wide spans where the link is too slow
     out.push_back(info);

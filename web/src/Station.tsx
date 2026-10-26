@@ -6,11 +6,13 @@ import { createPortal } from 'react-dom';
 import { channelAt } from './channels';
 import { Display, type Source } from './display';
 import type { Hub } from './hub';
+import { PAIR_TITLE, pairAdapter, type UsbLike } from './pairing';
+import { ensureFolder, idbFolderStore, pickFolder } from './recordFolder';
 import type { Caps, Device, DspSettings, Rate, RxSettings, Row, Status, WifiFrame } from './protocol';
 import { Seg } from './ui';
 import {
   ANT_COLOUR, LOCKED, SLOT_NAME, UDEV_CMD, isDual, VIEW_COLOUR, bandOf, baseName, bytes, chanShort, devKey, devLabel, devTitle, fmtClock,
-  fmtDur, gappedDuty, loadPrefs, mhz, ratesFor, snap, spanLabel, type Mode, type Prefs, type Scale, type Tuning,
+  diskWarning, fmtDur, gappedDuty, loadPrefs, mhz, ratesFor, snap, spanLabel, type Mode, type Prefs, type Scale, type Tuning,
 } from './util';
 
 type Banner = { id: number; text: string; kind: 'info' | 'error' };
@@ -132,6 +134,12 @@ export function Station(p: {
     if (kind === 'info') window.setTimeout(() => setBanners((b) => b.filter((x) => x.id !== id)), 6000);
   };
   const dropBanner = (id: number) => setBanners((b) => b.filter((x) => x.id !== id));
+  const web = hub.kind === 'web';
+  const pair = () =>
+    pairAdapter((navigator as unknown as { usb: UsbLike }).usb).then(
+      (r) => r === 'paired' && req('scan').catch(() => {}),
+      (e: Error) => addBanner(`Pairing failed: ${e.message}`, 'error'),
+    );
   const req = (cmd: string, args: Record<string, unknown> = {}) =>
     hub.request(cmd, { ...args, slot }).catch((e: Error & { kind?: string }) => {
       addBanner(e.message, e.kind === 'busy' ? 'info' : 'error'); // "try again in a moment" is not a fault
@@ -614,6 +622,12 @@ export function Station(p: {
   };
   const toggleRecord = async () => {
     try {
+      if (web && !recording) {
+        // the folder first (this click / key press is the gesture its prompt or picker needs)
+        const folder = await ensureFolder(idbFolderStore(), pickFolder);
+        if (!folder) return addBanner('Recording needs a folder: none was chosen.', 'error');
+        hub.setRecordFolder(folder);
+      }
       await req('record', { action: recording ? 'stop' : 'start' });
       if (!recording) setSaved(null);
     } catch {
@@ -644,6 +658,7 @@ export function Station(p: {
   const recRate = fsNow * 4; // bytes/s (int16 I + Q)
   const diskFree = status?.disk_free ?? 0;
   const secsLeft = diskFree / recRate;
+  const diskWarn = diskWarning(status?.disk_free, recRate);
   const lockTitle = locked ? LOCKED : undefined;
   const runGapped = !!run?.gapped;
   const recTitle = !recording && gapped
@@ -699,9 +714,14 @@ export function Station(p: {
               ⟳
             </button>
           )}
+          {web && !open && (
+            <button disabled={opening} onClick={() => void pair()} title={PAIR_TITLE}>
+              Pair adapter…
+            </button>
+          )}
         </div>
         {twoPaths && <Seg wide value={dsp.paths} disabled={locked} options={[['a', 'Ant 1'], ['b', 'Ant 2'], ['ab', 'Both']]} onChange={setPaths} title="Antennas" />}
-        {sel && sel.driver && sel.driver !== 'usbfs' && !open && (
+        {!web && sel && sel.driver && sel.driver !== 'usbfs' && !open && (
           <span className="note">The kernel driver <code>{sel.driver}</code> is using this adapter; ▶ Start takes it over.</span>
         )}
         {sel && sel.pid === 0xb812 && sel.speed_mbps < 5000 && !open && (
@@ -948,10 +968,17 @@ export function Station(p: {
               <line x1="10" y1="21" x2="14" y2="21" />
             </svg>
             <h2>No adapter found</h2>
-            <p>Plug in an RTL8812BU or RTL8812CU. It appears here by itself; Rescan looks again now.</p>
+            {web ? (
+              <>
+                <p>Plug in an RTL8812BU or RTL8812CU, then let this page use it (Chrome asks once per adapter).</p>
+                <button onClick={() => void pair()} title={PAIR_TITLE}>Pair adapter…</button>
+              </>
+            ) : (
+              <p>Plug in an RTL8812BU or RTL8812CU. It appears here by itself; Rescan looks again now.</p>
+            )}
             <button onClick={() => req('scan').catch(() => {})}>⟳ Rescan</button>
           </div>
-        ) : sel && !sel.can_open ? (
+        ) : !web && sel && !sel.can_open ? (
           <div className="vcard" role="status">
             <svg aria-hidden="true" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#e0b46a" strokeWidth="1.6">
               <rect x="5" y="11" width="14" height="10" rx="2" />
@@ -976,7 +1003,7 @@ export function Station(p: {
         <canvas ref={wfRef} className="waterfall" />
       </main>
 
-      {(warn.length > 0 || (!prefs.retuned && open && !recording) || (recording && secsLeft < 60)) && (
+      {(warn.length > 0 || (!prefs.retuned && open && !recording) || (recording && diskWarn)) && (
         <footer className="vfoot">
           {warn.map((w) => (
             <span
@@ -987,7 +1014,7 @@ export function Station(p: {
               {w}
             </span>
           ))}
-          {recording && secsLeft < 60 && <span className="warn">disk nearly full: {fmtDur(secsLeft)} left</span>}
+          {recording && diskWarn && <span className="warn">{diskWarn}</span>}
           {!prefs.retuned && open && !recording && <span className="hint">tip: double-click the spectrum to tune there</span>}
         </footer>
       )}

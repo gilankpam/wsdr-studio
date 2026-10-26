@@ -26,6 +26,14 @@ export const devTitle = (d: Device) =>
 export const bytes = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e11 ? 0 : 2)} GB` : `${(n / 1e6).toFixed(0)} MB`);
 export const baseName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
 export const chanShort = (c: Channel) => `ch ${c.width === 40 ? c.ch + 2 : c.label}`;
+// While recording: the warning when less than a minute of room is left, or null. Free space unknown
+// (undefined: the web build has no figure for the folder it records into) is not "none left".
+export function diskWarning(diskFree: number | undefined, bytesPerS: number): string | null {
+  if (diskFree === undefined || !(bytesPerS > 0)) return null;
+  const left = diskFree / bytesPerS;
+  return left < 60 ? `disk nearly full: ${fmtDur(left)} left` : null;
+}
+
 export const fmtDur = (s: number) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : s >= 60 ? `${Math.floor(s / 60)} min` : `${Math.max(0, Math.floor(s))} s`);
 export const fmtClock = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 // The radio tunes 2.4 GHz channels 1-13 (2412-2472, 5 MHz apart) and 14 (2484), and 5 GHz in 5 MHz

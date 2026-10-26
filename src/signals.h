@@ -9,10 +9,11 @@
 
 #include <complex>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
-typedef struct fftwf_plan_s *fftwf_plan;
+#include "fft.h"
 
 namespace sig {
 
@@ -80,8 +81,9 @@ private:
   std::vector<cf> _carry;            // samples from _carry_at on, not yet in a column
   uint64_t _carry_at = 0;
   std::vector<float> _win, _p, _floor; // window; this column's power; each bin's noise floor (20% quantile)
-  fftwf_plan _plan = nullptr, _fplan = nullptr;
-  cf *_in = nullptr, *_out = nullptr, *_fin = nullptr, *_fout = nullptr; // FFTW's buffers (the fine one 8192)
+  std::unique_ptr<studio::Fft> _fft, _ffine; // the column FFT (_nf) and the fine one (8192)
+  cf *_in = nullptr, *_fin = nullptr;         // their inputs and outputs
+  const cf *_out = nullptr, *_fout = nullptr;
   std::vector<float> _fwin;          // its window
   std::vector<std::pair<int, unsigned>> _steady; // fine-spectrum lines: bin, seen in which of the last 4 windows
   std::vector<uint8_t> _occ;

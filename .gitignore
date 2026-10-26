@@ -3,3 +3,5 @@ build*/
 *.sigmf-data
 .cache/
 compile_commands.json
+.superpowers/
+docs/superpowers/

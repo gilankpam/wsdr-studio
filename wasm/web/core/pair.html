@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Pair an adapter</title>
+<p>Pair the dongle for the web tests (once per Chrome profile), then close Chrome.</p>
+<button id="pair">Pair adapter</button> <span id="out"></span>
+<script>
+document.getElementById('pair').onclick = async () => {
+  const out = document.getElementById('out');
+  try {
+    const d = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x0bda, productId: 0xb812 }, { vendorId: 0x0bda, productId: 0xc812 }] });
+    out.textContent = `paired ${d.productId.toString(16)} serial ${d.serialNumber ?? '(none)'}`;
+  } catch (e) { out.textContent = String(e); }
+};
+</script>

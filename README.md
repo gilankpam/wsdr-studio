@@ -136,6 +136,40 @@ The window needs at least 1280 × 720.
 - **Unplugged** while streaming: the view says so, keeps its picture and starts again by itself when
   the dongle is back (an 8812BU comes back at USB 3 and its span).
 
+## Web version
+
+The same app as a web page, nothing to install: **https://gilankpam.github.io/wsdr-studio/** (built from
+`main` by `.github/workflows/pages.yml`). The engine runs in the page as WebAssembly and talks to the
+dongle over WebUSB.
+
+- **Browser:** Chrome or Chromium 137 or newer, on a desktop computer. Other browsers have no WebUSB.
+- **Pair the dongle once:** *Pair adapter…* (in the Adapter row, or the "No adapter found" card), pick it
+  in Chrome's list. Chrome remembers it.
+- **Linux:** the udev rule from the quick start is still needed (Chrome opens the dongle as you), and the
+  kernel driver must not hold it: Chrome cannot take it over the way the desktop app does. Use the
+  blacklist from the quick start, or `sudo modprobe -r rtw88_8822bu rtw88_8822cu` before Start.
+- **Windows:** the dongle needs the WinUSB driver (e.g. with Zadig) instead of Realtek's. **macOS:** no
+  driver is involved; not tested yet.
+- **Recording:** the first ● Rec asks for a folder (Chrome remembers it). Files are written to the
+  browser's own storage while recording and moved into the folder when the recording ends.
+- **What differs from the desktop app:** no free-space figure while recording; Start takes as long (about
+  40 s on the 8812CU over USB 2); the browser costs more CPU (about a third of a core at 5 MS/s, plus
+  a quarter in the browser's USB service). The 8812BU's continuous 10–40 MHz spans and two dongles at
+  once are not tested in the browser yet; 40 MS/s is likely too much for WebUSB (`wasm/README.md`).
+
+Build and run it locally:
+
+```sh
+wasm/build.sh jspi                    # the engine (Emscripten 4.0.12; see the script for the tools)
+(cd web && npm ci && npm run build:web)
+node wasm/serve.mjs 8080 web/dist-web # http://localhost:8080/ (sends the COOP/COEP headers itself)
+```
+
+Tests in Chrome with a dongle (pair it once in a test profile: `node tests/lib/chrome.mjs --pair`, with
+`WSDR_CHROME_PROFILE` set): `tests/web-core.mjs` (the engine alone), `tests/web-e2e.mjs` (the app:
+streaming, retunes, a recording, a second tab), `tests/web-coi.mjs` (a host without COOP/COEP, like
+GitHub Pages), `tests/web-unplug.mjs` (unplug / replug, with a person at the dongle).
+
 ## Troubleshooting
 
 - **"cannot open it" / no permission:** the udev rule is missing, or the dongle was not replugged
@@ -202,6 +236,7 @@ The backend listens on 127.0.0.1 only and checks every request's `Host` header a
 | `src/` | backend: `engine` (adapter, DSP thread, recorder), `dsp` (FFT), `server` (HTTP/WebSocket), `protocol`, `recorder` (SigMF), `device_scan` |
 | `web/` | React + TypeScript UI (Vite): `App.tsx` shell (modes, sidebar, links), `Station.tsx` one view, `display.ts` spectrum + waterfall (also the stitched Panorama), `BandRuler.tsx` + `bands.ts` the channel axis, `SpectralMap.tsx` the sweep, `hub.ts` the shared socket |
 | `desktop/` | Electron shell: `main.js` (starts the backend, window, lock-down), `preload.js` (token bridge) |
+| `wasm/` | the web version's engine: `core.cpp` (the engine behind a worker), `build.sh` (Emscripten), libusb's WebUSB backend, the spike's findings (`README.md`) |
 | `external/wifi-sdr` | the receive core (submodule; brings devourer) |
 | `docs/` | design and build plan |
 | `tests/` | unit tests (C++), the end-to-end checks against a running app (`e2e.mjs` view A, `e2e-dual.mjs` view B); `web/tests` the UI's unit tests (`npm test`) |

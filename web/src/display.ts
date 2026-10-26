@@ -27,10 +27,11 @@ export type DisplayOpts = {
   stitch: Source[] | null;      // Panorama: the views on this axis (index = slot); null: one view
   wifi: boolean;                // mark the Wi-Fi frames found in the samples on the waterfall
 };
-// The marks' colours by frame format: none of them is in the waterfall's colour scale (white legacy,
-// magenta 11n, lavender 11ac; the switch's caption names each)
-export const WIFI_COLOUR = { L: '#ffffff', H: '#ff4fd8', V: '#c4a7ff' } as const;
-const WIFI_NAME = { L: 'legacy', H: '11n', V: '11ac' } as const;
+// The marks' colours by frame format, apart from the waterfall's colour scale (white legacy OFDM,
+// magenta 11n, lavender 11ac, pale yellow 802.11b; the switch's caption names each; a dark border
+// keeps them visible on any colour)
+export const WIFI_COLOUR = { L: '#ffffff', H: '#ff4fd8', V: '#c4a7ff', B: '#fff59d' } as const;
+const WIFI_NAME = { L: 'legacy', H: '11n', V: '11ac', B: '11b' } as const;
 // A view on a stitched axis.
 export type Source = {
   lo: number; hi: number;       // the span it shows (Hz)
@@ -675,10 +676,11 @@ export class Display {
     if (!hit.length) return null;
     const by: Record<string, number> = {};
     for (const k of hit) by[WIFI_NAME[k.f[3]]] = (by[WIFI_NAME[k.f[3]]] ?? 0) + 1;
-    // (11n/ac frames carry 6 Mb/s in their legacy header whatever their real rate: legacy rates only)
-    const rates = hit.filter((k) => k.f[3] === 'L').map((k) => k.f[4]), snr = hit.map((k) => k.f[7]).sort((a, b) => a - b);
+    // (11n/ac frames carry 6 Mb/s in their legacy header whatever their real rate: legacy and 11b rates only)
+    const rates = hit.filter((k) => k.f[3] === 'L' || k.f[3] === 'B').map((k) => (k.f[3] === 'B' && k.f[4] === 5 ? 5.5 : k.f[4]));
+    const snr = hit.map((k) => k.f[7]).sort((a, b) => a - b);
     const kinds = Object.entries(by).map(([k, n]) => `${k} ${n}`).join(', ');
-    const rate = !rates.length ? '' : Math.min(...rates) === Math.max(...rates) ? ` · legacy ${rates[0]} Mb/s` : ` · legacy ${Math.min(...rates)}–${Math.max(...rates)} Mb/s`;
+    const rate = !rates.length ? '' : Math.min(...rates) === Math.max(...rates) ? ` · ${rates[0]} Mb/s` : ` · ${Math.min(...rates)}–${Math.max(...rates)} Mb/s`;
     const chans: Record<string, number> = {};
     for (const k of hit) chans[`${k.f[1].toFixed(0)} MHz${k.f[2] > 20 ? ` (${k.f[2]} MHz)` : ''}`] = (chans[`${k.f[1].toFixed(0)} MHz${k.f[2] > 20 ? ` (${k.f[2]} MHz)` : ''}`] ?? 0) + 1;
     const ch = Object.entries(chans).sort((a, b) => b[1] - a[1]).map(([k]) => k).join(' / ');

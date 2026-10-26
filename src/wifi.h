@@ -18,8 +18,8 @@ struct Frame {
   double t = 0;          // start (s), on the clock of the samples fed in
   double centre_hz = 0;  // the 20 MHz channel it was decoded on (40 MHz: the pair's centre)
   int bw_mhz = 20;       // 20, or 40 when its preamble is duplicated on the paired channel (5 GHz)
-  char fmt = 'L';        // 'L' legacy, 'H' HT (802.11n), 'V' VHT (802.11ac)
-  int rate_mbps = 0;     // L-SIG rate (HT/VHT frames carry 6 here)
+  char fmt = 'L';        // 'L' legacy OFDM, 'H' HT (802.11n), 'V' VHT (802.11ac), 'B' 802.11b DSSS/CCK
+  int rate_mbps = 0;     // L-SIG rate (HT/VHT frames carry 6 here); 802.11b: 1, 2, 5 (5.5) or 11
   int length = 0;        // L-SIG length (bytes)
   double dur_us = 0;     // airtime from L-SIG (covers the whole PPDU, also HT/VHT)
   float snr_db = 0;      // from the two LTF copies
@@ -64,6 +64,13 @@ private:
     Frame f;
   };
   std::vector<Pending> _pend;
+  // 802.11b (2.4 GHz): bursts of at least the long preamble and header (192 us) found on the window
+  // power, decoded once they have ended
+  void dsss_at(uint64_t start, uint64_t end, std::vector<Frame> &out);
+  bool _dsss = false;           // the span is at 2.4 GHz
+  bool _bin = false;            // inside a burst
+  uint64_t _bstart = 0;         // where it started
+  std::vector<std::pair<uint64_t, uint64_t>> _bjobs; // ended bursts: [start, end) absolute
 
   double _fs = 0, _centre = 0;
   int _lag = 0, _win = 0, _dec = 1;

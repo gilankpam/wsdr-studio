@@ -443,6 +443,103 @@ static void test_wifi_frames() {
   }
 }
 
+// An 802.11b beacon (long preamble, 1 Mb/s DBPSK, Barker) synthesised at 40 MS/s 10 MHz below the
+// centre, with a 50 kHz offset and noise: found, its header and CRC-32 good, its network named.
+static void test_dsss_beacon() {
+  std::mt19937 rng(11);
+  std::normal_distribution<float> g(0, 1);
+  // the MAC frame: a beacon with SSID "test-ssid", DS parameter set channel 1, its FCS
+  std::vector<uint8_t> mac = {0x80, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 2, 0x11, 0x22, 0x33, 0x44, 0x55,
+                              2, 0x11, 0x22, 0x33, 0x44, 0x55, 0, 0};
+  for (int i = 0; i < 12; i++)
+    mac.push_back(0); // timestamp, interval, capabilities
+  const std::string ssid = "test-ssid";
+  mac.push_back(0);
+  mac.push_back(static_cast<uint8_t>(ssid.size()));
+  mac.insert(mac.end(), ssid.begin(), ssid.end());
+  mac.insert(mac.end(), {3, 1, 1});
+  uint32_t c = 0xFFFFFFFFu;
+  for (uint8_t b : mac) {
+    c ^= b;
+    for (int k = 0; k < 8; k++)
+      c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+  }
+  c ^= 0xFFFFFFFFu;
+  for (int k = 0; k < 4; k++)
+    mac.push_back(static_cast<uint8_t>(c >> (8 * k)));
+  std::vector<uint8_t> bits(128, 1); // SYNC
+  for (int j = 0; j < 16; j++)
+    bits.push_back((0xF3A0 >> j) & 1);
+  const unsigned length_us = static_cast<unsigned>(mac.size() * 8);
+  std::vector<uint8_t> hdr;
+  for (int j = 0; j < 8; j++)
+    hdr.push_back((0x0A >> j) & 1);
+  for (int j = 0; j < 8; j++)
+    hdr.push_back(0);
+  for (int j = 0; j < 16; j++)
+    hdr.push_back((length_us >> j) & 1);
+  unsigned reg = 0xFFFF;
+  for (uint8_t b : hdr) {
+    const unsigned fb = ((reg >> 15) & 1) ^ b;
+    reg = (reg << 1) & 0xFFFF;
+    if (fb)
+      reg ^= 0x1021;
+  }
+  reg ^= 0xFFFF;
+  for (int j = 15; j >= 0; j--)
+    hdr.push_back((reg >> j) & 1);
+  bits.insert(bits.end(), hdr.begin(), hdr.end());
+  for (uint8_t b : mac)
+    for (int j = 0; j < 8; j++)
+      bits.push_back((b >> j) & 1);
+  // scramble (self-synchronising, seed 1101100), DBPSK, Barker at 11 Mchip/s sampled at 40 MS/s
+  std::vector<uint8_t> sc(bits.size());
+  unsigned st = 0b1101100;
+  for (size_t i = 0; i < bits.size(); i++) {
+    const unsigned o = bits[i] ^ ((st >> 3) & 1) ^ ((st >> 6) & 1);
+    sc[i] = static_cast<uint8_t>(o);
+    st = ((st << 1) | o) & 0x7f;
+  }
+  static const int barker[11] = {1, -1, 1, 1, -1, 1, 1, 1, -1, -1, -1};
+  const double fs = 40e6, centre = 2422e6, off = -10e6, cfo = 50e3;
+  std::vector<std::complex<float>> x;
+  for (int i = 0; i < 20000; i++)
+    x.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  const size_t at = x.size();
+  float ph = 1;
+  for (size_t k = 0; k < sc.size(); k++) {
+    if (sc[k])
+      ph = -ph;
+    for (int n = 0; n < 40; n++) {
+      const double t = static_cast<double>(x.size() - at) / fs;
+      const float chip = static_cast<float>(barker[std::min(10, n * 11 / 40)]) * ph;
+      x.push_back(chip * 0.5f * std::polar(1.f, static_cast<float>(2 * M_PI * (off + cfo) * t)) +
+                  std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+    }
+  }
+  for (int i = 0; i < 40000; i++)
+    x.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  wifi::Decoder dec;
+  dec.reset(fs, centre);
+  std::vector<wifi::Frame> got;
+  for (size_t i = 0; i < x.size(); i += 8192) {
+    const size_t n = std::min<size_t>(8192, x.size() - i);
+    dec.feed(&x[i], n, static_cast<double>(i + n) / fs, got);
+  }
+  int b = 0;
+  for (const auto &f : got) {
+    if (f.fmt != 'B')
+      continue;
+    b++;
+    CHECK(f.rate_mbps == 1 && f.length == static_cast<int>(mac.size()));
+    CHECK(std::abs(f.centre_hz - 2412e6) < 1);
+    CHECK(f.mac && f.beacon && f.ssid == ssid && f.channel == 1);
+    CHECK(std::abs(f.t - static_cast<double>(at) / fs) < 3e-6);
+    CHECK(std::abs(f.dur_us - (192 + length_us)) < 1e-9);
+  }
+  CHECK(b == 1);
+}
+
 // Network names: whatever bytes a beacon carries, the text is valid UTF-8 the JSON writer accepts.
 static void test_ssid_text() {
   auto t = [](const std::string &b) { return wifi::ssid_text(reinterpret_cast<const uint8_t *>(b.data()), b.size()); };
@@ -511,19 +608,23 @@ static int wifi_scan(const char *path) {
     std::snprintf(b, sizeof b, "%02x:%02x:%02x:%02x:%02x:%02x", a[0], a[1], a[2], a[3], a[4], a[5]);
     return std::string(b);
   };
+  int b = 0, bmac = 0;
   for (const auto &fr : got) {
-    if (fr.rate_mbps != 6 || fr.fmt != 'L')
-      continue;
-    six++;
+    if (fr.fmt == 'B') {
+      b++;
+      bmac += fr.mac;
+    } else if (fr.rate_mbps == 6 && fr.fmt == 'L') {
+      six++;
+      mac += fr.mac;
+    }
     if (!fr.mac)
       continue;
-    mac++;
     if (fr.beacon)
       nets["\"" + fr.ssid + "\" " + hex(fr.bssid) + " ch " + std::to_string(fr.channel)]++;
     if (fr.has_ta)
       senders[hex(fr.ta)]++;
   }
-  std::printf("6 Mb/s legacy frames: %d, decoded whole (CRC good): %d\n", six, mac);
+  std::printf("6 Mb/s legacy frames: %d, decoded whole (CRC good): %d; 802.11b frames: %d, whole: %d\n", six, mac, b, bmac);
   for (const auto &[k, n] : nets)
     std::printf("  network %s  x%d\n", k.c_str(), n);
   for (const auto &[k, n] : senders)
@@ -546,6 +647,7 @@ int main(int argc, char **argv) {
   test_crop();
   test_wifi_frames();
   test_ssid_text();
+  test_dsss_beacon();
   std::printf(g_fail ? "%d FAILED\n" : "all tests passed\n", g_fail);
   return g_fail ? 1 : 0;
 }

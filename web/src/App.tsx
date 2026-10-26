@@ -709,7 +709,7 @@ export default function App() {
                     role="switch"
                     aria-checked={prefs.wifiMarks}
                     onClick={() => updatePrefs({ wifiMarks: !prefs.wifiMarks })}
-                    title="Finds Wi-Fi OFDM frames (a/g/n/ac) in the samples themselves (continuous 20 and 40 MHz spans) and marks each at its channel's centre on the waterfall; hover the waterfall for what they were. 802.11b frames are not found."
+                    title="Finds Wi-Fi frames (802.11a/g/n/ac, and 802.11b at 2.4 GHz) in the samples themselves (continuous 20 and 40 MHz spans) and marks each at its channel's centre on the waterfall; hover the waterfall for what they were."
                   >
                     <span className="tlabel">
                       Mark Wi-Fi frames
@@ -719,7 +719,8 @@ export default function App() {
                         ) : (
                           <>
                             <i className="wkey" style={{ background: WIFI_COLOUR.L }} /> legacy <i className="wkey" style={{ background: WIFI_COLOUR.H }} /> 11n{' '}
-                            <i className="wkey" style={{ background: WIFI_COLOUR.V }} /> 11ac
+                            <i className="wkey" style={{ background: WIFI_COLOUR.V }} /> 11ac{' '}
+                            <i className="wkey" style={{ background: WIFI_COLOUR.B }} /> 11b
                           </>
                         )}
                       </small>

@@ -656,7 +656,7 @@ json Engine::devices_json(const std::vector<DeviceInfo> &d) {
 // Wi-Fi frames from the samples the DSP thread hands over: found frames go out in batches as
 // {"type":"wifi","frames":[[t, centre MHz, width MHz, format, rate Mb/s, length, airtime us, SNR dB
 // (, sender, BSSID, network name, channel: 6 Mb/s frames decoded whole)]...],
-// "other":[[t, centre MHz, width MHz, kind (T Bluetooth, N narrowband, M microwave oven), us, SNR dB]...],
+// "other":[[t, centre MHz, width MHz, kind (T Bluetooth, N narrowband, M microwave oven), us]...],
 // "dropped": banks skipped because this thread fell behind}.
 void Engine::wifi_loop() {
   wifi::Decoder dec;
@@ -718,7 +718,7 @@ void Engine::wifi_loop() {
       json oth = json::array();
       for (const auto &o : other)
         oth.push_back({std::round(o.t * 1e6) / 1e6, std::round(o.mhz * 100) / 100, std::round(o.bw_mhz * 100) / 100, std::string(1, o.kind),
-                       std::round(o.dur_us), std::round(o.snr_db * 10) / 10});
+                       std::round(o.dur_us)});
       try {
         _cb.event({{"type", "wifi"}, {"frames", arr}, {"other", oth}, {"dropped", d}});
       } catch (const std::exception &) {

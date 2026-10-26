@@ -21,7 +21,6 @@ struct Burst {
   double bw_mhz = 0; // width
   double dur_us = 0;
   char kind = 'N';   // 'T' Bluetooth (narrow bursts hopping), 'N' other narrowband, 'M' microwave oven
-  float snr_db = 0;  // its peak over the noise in its bins
 };
 
 class Finder {
@@ -46,8 +45,7 @@ private:
 
   double _fs = 0, _centre = 0, _t_end = 0;
   int _nf = 0, _hop = 0;             // FFT size (625 kHz bins), a column every _hop samples (6.4 us)
-  uint64_t _abs_end = 0, _col = 0;   // samples fed; columns done
-  uint64_t _next = 0;                // absolute index of the next column's first sample
+  uint64_t _abs_end = 0, _col = 0;   // samples fed; columns done (column c starts at sample c * _hop)
   std::vector<cf> _carry;            // samples from _carry_at on, not yet in a column
   uint64_t _carry_at = 0;
   std::vector<float> _win, _p, _floor; // window; this column's power; each bin's noise floor (20% quantile)
@@ -56,10 +54,9 @@ private:
   std::vector<uint8_t> _occ;
 
   struct Track {
-    uint64_t c0, c1, s0;             // first and last column; its first sample
+    uint64_t c0, c1;                 // first and last column
     int a, b;                        // bins it covered
     double kw, w;                    // power-weighted bin sum, power sum (its centre)
-    float peak, fl;                  // its peak power, the floor there
   };
   std::vector<Track> _tracks;
   struct Seen { double t, mhz; };
@@ -71,6 +68,7 @@ private:
   int _ms_cols = 0, _ms_loud = 0;
   double _win_t0 = 0;
   std::vector<float> _loudsum;
+  bool _oven = false;                // the last 200 ms had an oven: its sweep is not narrowband
 };
 
 } // namespace sig

@@ -38,7 +38,8 @@ const OTHER_NAME = { T: 'Bluetooth', N: 'narrowband', M: 'microwave oven' } as c
 // a mark on the waterfall: a Wi-Fi frame, or another signal in the same shape (rate and length 0)
 type Mark = [t: number, mhz: number, bw: number, fmt: WifiFrame[3] | OtherSignal[3], rate: number, len: number, us: number, snr: number,
   ta?: string | null, bssid?: string | null, ssid?: string | null, ch?: number];
-const isWifi = (m: Mark) => m[3] in WIFI_NAME;
+const isWifiFmt = (k: Mark[3]): k is WifiFrame[3] => k in WIFI_NAME;
+const isWifi = (m: Mark) => isWifiFmt(m[3]);
 // A view on a stitched axis.
 export type Source = {
   lo: number; hi: number;       // the span it shows (Hz)
@@ -634,7 +635,7 @@ export class Display {
   // a little after their rows, so most land a few rows down)
   addWifi(frames: WifiFrame[], other: OtherSignal[] = []) {
     if (!this.opts.wifi || this.opts.stitch || this.opts.dim) return; // (stopped: the picture is kept as it was)
-    const marks: Mark[] = [...frames, ...other.map((o): Mark => [o[0], o[1], o[2], o[3], 0, 0, o[4], o[5]])];
+    const marks: Mark[] = [...frames, ...other.map((o): Mark => [o[0], o[1], o[2], o[3], 0, 0, o[4], 0])];
     for (const f of marks) {
       if (f[9] && f[10] != null && (f[10] || !this.wifiNames.has(f[9]))) {
         if (!this.wifiNames.has(f[9]) && this.wifiNames.size >= 300) this.wifiNames.delete(this.wifiNames.keys().next().value!);
@@ -671,7 +672,8 @@ export class Display {
     };
     c.fillStyle = '#0b0e13';
     box(x - 5 * d, x + 5 * d);
-    c.fillStyle = isWifi(f) ? WIFI_COLOUR[f[3] as WifiFrame[3]] : OTHER_COLOUR;
+    const fmt = f[3];
+    c.fillStyle = isWifiFmt(fmt) ? WIFI_COLOUR[fmt] : OTHER_COLOUR;
     box(x - 4 * d, x + 4 * d);
     this.wifiKept.push({ f, row: this.rowNo - y });
     if (this.wifiKept.length > 4000 && this.wifiKept[0].row < this.rowNo - this.wf.height)
@@ -686,7 +688,10 @@ export class Display {
     const other = this.otherText(oth.map((k) => k.f));
     if (!hit.length) return other;
     const by: Record<string, number> = {};
-    for (const k of hit) by[WIFI_NAME[k.f[3] as WifiFrame[3]]] = (by[WIFI_NAME[k.f[3] as WifiFrame[3]]] ?? 0) + 1;
+    for (const k of hit) {
+      const fmt = k.f[3];
+      if (isWifiFmt(fmt)) by[WIFI_NAME[fmt]] = (by[WIFI_NAME[fmt]] ?? 0) + 1;
+    }
     // (11n/ac frames carry 6 Mb/s in their legacy header whatever their real rate: legacy and 11b rates only)
     const rates = hit.filter((k) => k.f[3] === 'L' || k.f[3] === 'B').map((k) => (k.f[3] === 'B' && k.f[4] === 5 ? 5.5 : k.f[4]));
     const snr = hit.map((k) => k.f[7]).sort((a, b) => a - b);

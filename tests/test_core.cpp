@@ -663,7 +663,7 @@ static void test_signals() {
       for (size_t i = 0; i < 14640; i++) { // 366 us
         if (i % 40 == 0)
           b = bit(rng);
-        ph += 2 * M_PI * ((c * 1e6 - centre) + (b ? 250e3 : -250e3)) / fs;
+        ph = std::remainder(ph + 2 * M_PI * ((c * 1e6 - centre) + (b ? 250e3 : -250e3)) / fs, 2 * M_PI);
         x.push_back(std::polar(0.3f, static_cast<float>(ph)) + std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
       }
       noise(x, 50000 - (x.size() - n0)); // to 1250 us
@@ -681,7 +681,6 @@ static void test_signals() {
       t += b.kind == 'T';
       near += std::abs(b.dur_us - 366) < 25 && b.bw_mhz <= 2.5;
     }
-    for (const auto &b : got) if (getenv("DBG")) std::printf("DBG %c %.2f MHz bw %.2f dur %.0f snr %.1f t %.4f\n", b.kind, b.mhz, b.bw_mhz, b.dur_us, b.snr_db, b.t);
     CHECK(got.size() == hop.size());
     CHECK(t >= 20 && near >= 20); // (the first few are only "narrowband": not yet seen hopping)
   }
@@ -699,7 +698,7 @@ static void test_signals() {
     for (size_t i = 0; i < 40000000; i++) {
       const double t = static_cast<double>(i) / fs;
       const bool on = std::fmod(t, 0.02) < 0.01;
-      ph += 2 * M_PI * (3e6 + 3e6 * std::sin(2 * M_PI * 700 * t)) / fs;
+      ph = std::remainder(ph + 2 * M_PI * (3e6 + 3e6 * std::sin(2 * M_PI * 700 * t)) / fs, 2 * M_PI);
       x.push_back((on ? std::polar(0.5f, static_cast<float>(ph)) : std::complex<float>(0)) +
                   std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
     }
@@ -713,8 +712,8 @@ static void test_signals() {
         other++;
       }
     }
-    CHECK(m >= 3);
-    if (m < 3)
+    CHECK(m >= 4 && other == 0); // (5 windows; the first has the warm-up in it)
+    if (m < 4 || other)
       std::printf("  (oven: %d windows tagged, %d other bursts)\n", m, other);
   }
   // Wi-Fi frames (6 Mb/s, ~1.5 ms each) back to back for 10 ms of every 20: loud and switching like

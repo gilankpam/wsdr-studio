@@ -38,7 +38,8 @@ void Finder::reset(double fs, double centre_hz) {
   _centre = centre_hz;
   _nf = std::abs(fs - 40e6) < 1e3 ? 64 : std::abs(fs - 20e6) < 1e3 ? 32 : 0;
   _hop = 4 * _nf;
-  _abs_end = _col = _next = _carry_at = 0;
+  _abs_end = _col = _carry_at = 0;
+  _oven = false;
   _carry.clear();
   _tracks.clear();
   _narrow.clear();
@@ -70,12 +71,12 @@ void Finder::feed(const cf *x, size_t n, double t_end, std::vector<Burst> &out) 
   _carry.insert(_carry.end(), x, x + n);
   _abs_end += n;
   _t_end = t_end;
-  while (_next + static_cast<uint64_t>(_nf) <= _carry_at + _carry.size()) {
-    column(&_carry[_next - _carry_at], out);
-    _next += static_cast<uint64_t>(_hop);
+  const uint64_t hop = static_cast<uint64_t>(_hop);
+  while (_col * hop + static_cast<uint64_t>(_nf) <= _abs_end) {
+    column(&_carry[_col * hop - _carry_at], out);
     _col++;
   }
-  const uint64_t drop = std::min<uint64_t>(_next - _carry_at, _carry.size());
+  const uint64_t drop = std::min<uint64_t>(_col * hop - _carry_at, _carry.size());
   _carry.erase(_carry.begin(), _carry.begin() + static_cast<long>(drop));
   _carry_at += drop;
 }
@@ -110,7 +111,7 @@ void Finder::column(const cf *x, std::vector<Burst> &out) {
         _loudsum[k] += _p[k];
   }
   if (_busy.empty() && _ms_cols == 0)
-    _win_t0 = time_of(_next);
+    _win_t0 = time_of(_col * static_cast<uint64_t>(_hop));
   if (++_ms_cols == kMsCols) {
     _busy.push_back(static_cast<float>(_ms_loud) / kMsCols);
     _ms_cols = _ms_loud = 0;
@@ -146,7 +147,7 @@ void Finder::column(const cf *x, std::vector<Burst> &out) {
       while (t < _tracks.size() && !(_tracks[t].c1 + 2 >= _col && a <= _tracks[t].b + 1 && b >= _tracks[t].a - 1))
         t++;
       if (t == _tracks.size())
-        _tracks.push_back({_col, _col, _next, a, b, 0, 0, 0, 0});
+        _tracks.push_back({_col, _col, a, b, 0, 0});
       Track &tr = _tracks[t];
       tr.c1 = _col;
       tr.a = std::min(tr.a, a);
@@ -154,10 +155,6 @@ void Finder::column(const cf *x, std::vector<Burst> &out) {
       for (int k = a; k <= b; k++) {
         tr.kw += static_cast<double>(k) * _p[k];
         tr.w += _p[k];
-        if (_p[k] > tr.peak) {
-          tr.peak = _p[k];
-          tr.fl = _floor[k];
-        }
       }
     }
     a0 = b0 + 1;
@@ -173,14 +170,15 @@ void Finder::end_track(size_t i, std::vector<Burst> &out) {
   const Track tr = _tracks[i];
   _tracks.erase(_tracks.begin() + static_cast<long>(i));
   const uint64_t cols = tr.c1 - tr.c0 + 1;
-  if (cols < 3 || tr.b - tr.a + 1 > kNarrow || tr.w <= 0)
-    return; // under ~20 us, or it grew wide
+  // (under ~50 us: Wi-Fi spilling over the span's edge leaves preamble-length fragments; the shortest
+  // Bluetooth packet is 68 us) or it grew wide; or an oven is on (its sweep is not narrowband)
+  if (cols < 8 || tr.b - tr.a + 1 > kNarrow || tr.w <= 0 || _oven)
+    return;
   Burst b;
-  b.t = time_of(tr.s0);
+  b.t = time_of(tr.c0 * static_cast<uint64_t>(_hop));
   b.mhz = bin_hz(tr.kw / tr.w) / 1e6;
   b.bw_mhz = (tr.b - tr.a + 1) * _fs / _nf / 1e6;
   b.dur_us = static_cast<double>(cols * static_cast<uint64_t>(_hop)) / _fs * 1e6;
-  b.snr_db = static_cast<float>(10 * std::log10(tr.peak / (tr.fl / 0.223f))); // (the 20% quantile of noise power is 0.223 of its mean)
   // Bluetooth hops: at 2.4 GHz, bursts of at most 3 ms, at least 4 within 100 ms on 3 frequencies
   b.kind = 'N';
   if (b.mhz > 2400 && b.mhz < 2484 && b.dur_us <= 3000) {
@@ -218,7 +216,8 @@ void Finder::oven(std::vector<Burst> &out) {
   const bool band = _centre > 2.38e9 && _centre < 2.51e9;
   const bool hz50 = std::max({r(19), r(20), r(21)}) > 0.6 && std::min({r(9), r(10), r(11)}) < -0.3;
   const bool hz60 = std::max({r(16), r(17), r(18)}) > 0.6 && std::min({r(8), r(9)}) < -0.3;
-  if (band && mean > 0.1 && mean < 0.9 && (hz50 || hz60)) {
+  _oven = band && mean > 0.1 && mean < 0.9 && (hz50 || hz60);
+  if (_oven) {
     // where: the bins its loud columns occupied
     float mx = 0;
     for (float v : _loudsum)

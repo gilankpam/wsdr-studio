@@ -163,6 +163,18 @@ int rate_of(int code) {
   }
 }
 
+// x[k] *= exp(j 2 pi cycles k): a phasor stepped per sample (renormalised every 1024, in double)
+void rotate(cf *x, size_t n, double cycles) {
+  const std::complex<double> step = std::polar(1.0, 2 * kPi * cycles);
+  std::complex<double> ph = 1;
+  for (size_t k = 0; k < n; k++) {
+    x[k] *= std::complex<float>(ph);
+    ph *= step;
+    if ((k & 1023) == 1023)
+      ph /= std::abs(ph);
+  }
+}
+
 uint32_t crc32(const uint8_t *p, size_t n) {
   static const auto table = [] {
     std::array<uint32_t, 256> t{};
@@ -180,8 +192,13 @@ uint32_t crc32(const uint8_t *p, size_t n) {
   return c ^ 0xFFFFFFFFu;
 }
 
-// A network name as text: valid UTF-8 kept, anything else (and control characters) shown as '?'; all
-// zero bytes (a hidden network) gives "".
+// A network name as text: strict UTF-8 (no overlongs, surrogates or code points past U+10FFFF: the
+// JSON writer refuses them) without control characters or bidirectional overrides (a name must not
+// disguise itself); anything else shows as '?'. All zero bytes (a hidden network) gives "".
+std::string utf8(const uint8_t *p, size_t n);
+} // namespace
+std::string ssid_text(const uint8_t *p, size_t n) { return utf8(p, n); }
+namespace {
 std::string utf8(const uint8_t *p, size_t n) {
   bool zero = true;
   for (size_t i = 0; i < n; i++)
@@ -191,12 +208,35 @@ std::string utf8(const uint8_t *p, size_t n) {
     return s;
   for (size_t i = 0; i < n;) {
     const uint8_t c = p[i];
-    const size_t k = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+    size_t k = 0;
+    uint32_t cp = 0;
+    uint8_t lo = 0x80, hi = 0xBF; // the second byte's range
+    if (c < 0x80) {
+      k = 1;
+      cp = c;
+    } else if (c >= 0xC2 && c <= 0xDF) {
+      k = 2;
+      cp = c & 0x1F;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+      k = 3;
+      cp = c & 0x0F;
+      if (c == 0xE0) lo = 0xA0;
+      if (c == 0xED) hi = 0x9F; // no surrogates
+    } else if (c >= 0xF0 && c <= 0xF4) {
+      k = 4;
+      cp = c & 0x07;
+      if (c == 0xF0) lo = 0x90;
+      if (c == 0xF4) hi = 0x8F; // up to U+10FFFF
+    }
     bool ok = k > 0 && i + k <= n;
-    for (size_t j = 1; ok && j < k; j++)
-      ok = (p[i + j] & 0xC0) == 0x80;
-    if (ok && k == 1 && (c < 0x20 || c == 0x7f))
-      ok = false;
+    for (size_t j = 1; ok && j < k; j++) {
+      const uint8_t b = p[i + j];
+      ok = j == 1 ? b >= lo && b <= hi : (b & 0xC0) == 0x80;
+      cp = (cp << 6) | (b & 0x3F);
+    }
+    if (ok && (cp < 0x20 || (cp >= 0x7F && cp <= 0x9F) || (cp >= 0x202A && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069) ||
+               cp == 0x200E || cp == 0x200F))
+      ok = false; // control characters, bidirectional marks and overrides
     if (ok) {
       s.append(reinterpret_cast<const char *>(p + i), k);
       i += k;
@@ -245,8 +285,7 @@ bool Decoder::decode20(const cf *in, size_t n, Frame &f, bool payload) {
   for (size_t k = 40; k < 136; k++)
     c += std::complex<double>(x[k]) * std::conj(std::complex<double>(x[k + 16]));
   double cfo = -std::arg(c) / (2 * kPi * 16); // cycles per sample
-  for (size_t k = 0; k < n; k++)
-    x[k] *= std::polar(1.f, static_cast<float>(-2 * kPi * cfo * static_cast<double>(k)));
+  rotate(x.data(), n, -cfo);
   // the long training field: two copies 64 apart
   size_t l1 = 0;
   float best = -1;
@@ -272,8 +311,7 @@ bool Decoder::decode20(const cf *in, size_t n, Frame &f, bool payload) {
   for (int k = 0; k < 64; k++)
     d += std::complex<double>(x[l1 + 64 + k]) * std::conj(std::complex<double>(x[l1 + k]));
   const double fine = std::arg(d) / (2 * kPi * 64);
-  for (size_t k = 0; k < n; k++)
-    x[k] *= std::polar(1.f, static_cast<float>(-2 * kPi * fine * static_cast<double>(k)));
+  rotate(x.data(), n, -fine);
   cfo += fine;
   std::array<cf, 64> f1, f2, h;
   std::copy(x.begin() + static_cast<long>(l1), x.begin() + static_cast<long>(l1 + 64), f1.begin());
@@ -394,10 +432,13 @@ bool Decoder::decode20(const cf *in, size_t n, Frame &f, bool payload) {
   }
   if (crc32(by.data(), by.size() - 4) != (by[len - 4] | by[len - 3] << 8 | by[len - 2] << 16 | static_cast<uint32_t>(by[len - 1]) << 24))
     return true; // the header stands; the rest was not received cleanly
+  if ((by[0] & 3) != 0 || ((by[0] >> 2) & 3) == 3)
+    return true; // not protocol version 0, or a reserved type: no header to read
   f.mac = true;
   f.type = (by[0] >> 2) & 3;
   f.subtype = by[0] >> 4;
-  const bool no_ta = f.type == 1 && (f.subtype == 12 || f.subtype == 13); // CTS, ACK
+  // CTS and ACK carry no sender; a control wrapper (7) another layout
+  const bool no_ta = f.type == 1 && (f.subtype == 12 || f.subtype == 13 || f.subtype == 7);
   if (!no_ta && len >= 20) {
     f.has_ta = true;
     std::copy(by.begin() + 10, by.begin() + 16, f.ta.begin());
@@ -609,9 +650,8 @@ void Decoder::frame_at(uint64_t pos_abs, std::vector<Frame> &out) {
 
 std::vector<cf> Decoder::snippet(uint64_t from, uint64_t len, double off) const {
   const cf *s = &_buf[from - _abs0];
-  std::vector<cf> y(len);
-  for (uint64_t k = 0; k < len; k++)
-    y[k] = s[k] * std::polar(1.f, static_cast<float>(-2 * kPi * off / _fs * static_cast<double>(k)));
+  std::vector<cf> y(s, s + len);
+  rotate(y.data(), len, -off / _fs);
   if (_dec != 2)
     return y;
   std::vector<cf> z20;

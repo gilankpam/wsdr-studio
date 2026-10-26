@@ -709,7 +709,11 @@ void Engine::wifi_loop() {
         }
         arr.push_back(e);
       }
-      _cb.event({{"type", "wifi"}, {"frames", arr}, {"dropped", d}});
+      try {
+        _cb.event({{"type", "wifi"}, {"frames", arr}, {"dropped", d}});
+      } catch (const std::exception &) {
+        // a frame's text the JSON writer refused: this batch is lost, the thread goes on
+      }
       found.clear();
       dropped = d;
       sent = now;

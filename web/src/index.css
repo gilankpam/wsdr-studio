@@ -308,4 +308,5 @@ button.rtab.s1 { background: var(--view-b); }
 .toggle .wkey:first-child { margin-left: 0; }
 
 /* the band ruler: a network heard on a channel takes the place of its MHz */
-.rcell small.rnet { color: #eef2f6; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 3px; box-sizing: border-box; }
+button.rcell > span { max-width: 100%; }
+.rcell small.rnet { display: block; color: #eef2f6; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 3px; box-sizing: border-box; }

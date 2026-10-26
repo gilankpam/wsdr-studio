@@ -35,6 +35,9 @@ struct Frame {
   int channel = 0;       // from its DS parameter set (0: none)
 };
 
+// A network name as received, made safe to show and to write as JSON (see wifi.cpp).
+std::string ssid_text(const uint8_t *p, size_t n);
+
 class Decoder {
 public:
   // fs: 20 or 40 MS/s (anything else finds nothing); centre_hz: the samples' centre frequency.

@@ -56,6 +56,12 @@ Gapped duty cycles match the native app (35 / 21 / 12 %).
 - **CPU at 5 MS/s (40 MB/s, ~3,050 bulk transfers/s):** browser process 22 %, renderer (worker) 17 %
   of a core; native `wsdr_rxtest` 3 %. About 73 µs (browser) + 54 µs (renderer) per 16 KiB transfer.
 
+- **The app's threads work as they are** (`probe_rx`): `wsdr::Receiver` with its own stream thread,
+  opened from a command thread, streams 5.00 MS/s with 0 restarts. libusb forwards every USB call from
+  those pthreads to the module's (idle) main thread. Cost: renderer 32 % of a core (17 % single-
+  threaded), browser process unchanged (23 %). So `Engine` (command, DSP, Wi-Fi, disk threads) can be
+  compiled as it is; only the server is replaced.
+
 ### What it says about the 8812BU (not measured: no dongle)
 Its C2H packets are the same 16 KiB, so cost scales with the rate. Linear projection:
 | fs | MB/s | transfers/s | browser proc | worker |

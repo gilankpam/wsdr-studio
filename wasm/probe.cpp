@@ -6,6 +6,10 @@
 //   probe_stream(pid, rate_sel, seconds, depth, reset, freq_mhz)
 //                                             bring up, stream one run, report banks and timings
 //   probe_usb3(pid)                           the 8812BU's switch to USB 3 (it re-enumerates)
+//   probe_rx(pid, rate_sel, seconds)          wsdr::Receiver as the app uses it (its own stream thread,
+//                                             opened from a command thread): libusb forwards every USB
+//                                             call from those pthreads to this module's main thread,
+//                                             which must stay idle. Returns at once; ends with "rxtest".
 // Mirrors one pass of wsdr::Receiver::worker() without its thread, and with devourer's thermal thread
 // off (it would do register I/O from a second thread).
 #include <emscripten.h>
@@ -17,6 +21,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "receiver.h"
 #include "session.h"
@@ -177,6 +182,56 @@ EMSCRIPTEN_KEEPALIVE int probe_usb3(int pid) {
   std::printf("{\"ev\":\"usb3\",\"result\":\"%s\",\"detail\":\"%s\"}\n", usb3_switch_name(r),
               esc(bus < 0 ? "adapter not found" : detail).c_str());
   std::fflush(stdout);
+  return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int probe_rx(int pid, int rate_sel, double seconds) {
+  std::thread([=] {
+    Receiver rx(std::make_shared<Logger>());
+    RxSettings set;
+    set.freq = 5190e6;
+    set.rate_sel = rate_sel;
+    set.allow_gapped = true;
+    const auto t_open = clk::now();
+    try {
+      rx.open(static_cast<uint16_t>(pid), set);
+    } catch (const std::exception &e) {
+      std::printf("{\"ev\":\"rxtest\",\"ok\":0,\"error\":\"%s\"}\n", esc(e.what()).c_str());
+      std::fflush(stdout);
+      return;
+    }
+    std::printf("{\"ev\":\"open\",\"ok\":1,\"via\":\"receiver\",\"bringup_s\":%.2f}\n", secs(t_open, clk::now()));
+    std::fflush(stdout);
+    std::atomic<uint64_t> banks{0};
+    static uint8_t copy[65536];
+    rx.start([&](const uint8_t *bank, size_t n, const BankMeta &) {
+      std::memcpy(copy, bank, n);
+      banks++;
+    });
+    const auto t0 = clk::now();
+    uint64_t last = 0;
+    while (secs(t0, clk::now()) < seconds) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      const RxStatus st = rx.status();
+      const uint64_t b = banks.load();
+      std::printf("{\"ev\":\"status\",\"state\":\"%s\",\"msps\":%.2f,\"restarts\":%llu,\"error\":\"%s\"}\n",
+                  rx_state_name(st.state), (b - last) * 8192.0 / 1e6, static_cast<unsigned long long>(st.restarts),
+                  esc(st.error).c_str());
+      std::fflush(stdout);
+      last = b;
+      if (st.state == RxState::Lost || st.state == RxState::Error)
+        break;
+    }
+    const double el = secs(t0, clk::now());
+    rx.stop();
+    const RxStatus st = rx.status();
+    std::printf("{\"ev\":\"rxtest\",\"ok\":1,\"rate_sel\":%d,\"banks\":%llu,\"msps\":%.2f,\"restarts\":%llu,"
+                "\"state\":\"%s\",\"error\":\"%s\"}\n",
+                rate_sel, static_cast<unsigned long long>(banks.load()), banks * 8192.0 / el / 1e6,
+                static_cast<unsigned long long>(st.restarts), rx_state_name(st.state), esc(st.error).c_str());
+    std::fflush(stdout);
+    rx.close();
+  }).detach();
   return 0;
 }
 

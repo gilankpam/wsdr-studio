@@ -11,6 +11,7 @@ export async function loadProbe(mode, onLine) {
     probe_list: [],
     probe_stream: ['number', 'number', 'number', 'number', 'number', 'number'],
     probe_usb3: ['number'],
+    probe_rx: ['number', 'number', 'number'],
   };
   return (cmd, args = []) => {
     const run = () => mod.ccall(cmd, 'number', SIG[cmd], args, { async: true });

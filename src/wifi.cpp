@@ -479,7 +479,7 @@ void Decoder::reset(double fs, double centre_hz) {
   _buf.clear();
   _pend.clear();
   _bjobs.clear();
-  _bin = false;
+  _din = false;
   _dsss = centre_hz < 3e9;
   _abs0 = _scan = _abs_end = 0;
   _in = false;
@@ -534,24 +534,33 @@ void Decoder::scan(std::vector<Frame> &out) {
     p2 += std::norm(at(k + L));
   }
   const uint64_t min_plateau = 50 * static_cast<uint64_t>(_dec), max_plateau = 400 * static_cast<uint64_t>(_dec);
+  // the 802.11b detector: lag 1 us, window 10 us, a term every 2nd sample at 20 MS/s (still coherent;
+  // 100 terms a window), kept in a ring to slide the window
+  const uint64_t us = 20 * static_cast<uint64_t>(_dec), L2 = us, W2 = 10 * us, S = 2 * static_cast<uint64_t>(_dec), NT = W2 / S;
+  std::complex<double> q4 = 0;
+  double r4 = 0;
+  const auto term = [&](uint64_t k, std::complex<float> &z4, float &rr) {
+    const cf z = at(k) * std::conj(at(k + L2));
+    const cf z2 = z * z;
+    z4 = z2 * z2;
+    rr = std::norm(z2);
+  };
+  uint64_t tick = 0, slot = 0; // samples to the next term; the ring's oldest term
+  if (_dsss) {
+    _z4.assign(NT, 0);
+    _r4.assign(NT, 0);
+    for (uint64_t j = 0; j < NT; j++) {
+      term(_scan + j * S, _z4[j], _r4[j]);
+      q4 += std::complex<double>(_z4[j]);
+      r4 += _r4[j];
+    }
+  }
   for (uint64_t i = _scan; i < limit; i++) {
     if ((i & 255) == 0) {
       const double lv = p2 / static_cast<double>(W);
       _lvl[_lvl_at] = static_cast<float>(lv);
       _lvl_at = (_lvl_at + 1) % _lvl.size();
       _lvl_n = std::min(_lvl_n + 1, _lvl.size());
-      if (_dsss && _noise > 0) { // a burst: 6 dB over the floor, up to 6 ms
-        const bool busy = lv > 4 * _noise;
-        const uint64_t us = static_cast<uint64_t>(_fs / 1e6);
-        if (busy && !_bin) {
-          _bin = true;
-          _bstart = i;
-        } else if (_bin && (!busy || i - _bstart > 6000 * us)) {
-          _bin = false;
-          if (i - _bstart >= 200 * us)
-            _bjobs.emplace_back(_bstart > _abs0 + 10 * us ? _bstart - 10 * us : _abs0, i + 10 * us);
-        }
-      }
     }
     const double m = std::norm(c) / (p1 * p2 + 1e-30);
     const bool on = m > 0.5 && _noise > 0 && p2 / static_cast<double>(W) > 2 * _noise && i >= _quiet_until;
@@ -567,6 +576,31 @@ void Decoder::scan(std::vector<Frame> &out) {
         // past its L-SIG (a later plateau inside the same preamble is not another frame)
         _quiet_until = std::max(i + 200 * static_cast<uint64_t>(_dec), _pstart + 520 * static_cast<uint64_t>(_dec));
       }
+    }
+    if (_dsss && tick-- == 0) { // every S samples: the decision, then the window slides by a term
+      tick = S - 1;
+      const double m2 = std::norm(q4), rr2 = r4 * r4; // (|q|/r, squared: on above 0.2, off below 0.1)
+      const bool loud = _noise > 0 && p2 / static_cast<double>(W) > 2 * _noise;
+      if (!_din && m2 > 0.04 * rr2 && loud) {
+        _din = true;
+        _dstart = i;
+      } else if (_din && (m2 < 0.01 * rr2 || i - _dstart > 6400 * us)) {
+        _din = false;
+        // (shorter than the long preamble and header, 192 us: nothing to decode; the window trails
+        // the frame's end by 10 us)
+        if (i - _dstart >= 190 * us)
+          _bjobs.emplace_back(_dstart > _abs0 + 10 * us ? _dstart - 10 * us : _abs0, i + 10 * us); // (its length
+          // comes from its header: the detector may end early, a collision mid-frame)
+      }
+      std::complex<float> z4; // the term at i leaves, the one at i + W2 takes its place
+      float rr;
+      term(i + W2, z4, rr);
+      q4 += std::complex<double>(z4) - std::complex<double>(_z4[slot]);
+      r4 += static_cast<double>(rr) - _r4[slot];
+      _z4[slot] = z4;
+      _r4[slot] = rr;
+      if (++slot == NT)
+        slot = 0;
     }
     // slide
     const cf a0 = at(i), aL = at(i + L), b0 = at(i + W), bL = at(i + W + L);
@@ -588,8 +622,9 @@ void Decoder::scan(std::vector<Frame> &out) {
   uint64_t from = _in ? std::min(_pstart, _scan) : _scan;
   for (const auto &p : _pend) // a frame still arriving keeps its samples
     from = std::min(from, p.pos + pre);
-  if (_bin) // a burst still going on, and ended ones not yet decoded
-    from = std::min(from, _bstart);
+  const uint64_t margin = 10 * 20 * static_cast<uint64_t>(_dec); // 10 us
+  if (_din) // a frame still going on, and ended ones not yet decoded
+    from = std::min(from, _dstart > margin ? _dstart - margin + pre : pre);
   for (const auto &b : _bjobs)
     from = std::min(from, b.first + pre);
   const uint64_t keep = from > pre ? from - pre : 0;
@@ -700,7 +735,12 @@ void Decoder::finish(std::vector<Frame> &out) {
       i++;
       continue;
     }
-    dsss_at(_bjobs[i].first, _bjobs[i].second, out);
+    uint64_t need = 0;
+    if (!dsss_at(_bjobs[i].first, _abs_end - _lp.size(), need, out) && need > _bjobs[i].second) {
+      _bjobs[i].second = need; // the rest of the frame is still arriving
+      i++;
+      continue;
+    }
     _bjobs.erase(_bjobs.begin() + static_cast<long>(i));
   }
   for (size_t i = 0; i < _pend.size();) {
@@ -729,31 +769,31 @@ void Decoder::finish(std::vector<Frame> &out) {
 }
 
 // 802.11b: 1 Mb/s DBPSK spread by an 11-chip Barker code (a symbol is 1 us: 20 samples at 20 MS/s).
-// The channel is the one whose matched filter shows the 1 us rhythm best; then symbol timing from
-// it, DBPSK (a phase change of pi is a 1), the self-synchronising descrambler (x^7 + x^4 + 1), the long
-// preamble's SFD, the PLCP header (CRC-16), the PSDU at 1 Mb/s (DBPSK) or 2 Mb/s (DQPSK), CRC-32, the
-// MAC header. Short preambles and CCK (5.5, 11 Mb/s) payloads are not decoded.
-void Decoder::dsss_at(uint64_t start, uint64_t end, std::vector<Frame> &out) {
+// The channel is the one whose matched filter shows the 1 us rhythm best; then symbol timing from it,
+// kept on the peak through the frame (early/late: the clocks differ by tens of ppm), the frequency
+// offset removed (2 Mb/s DQPSK needs it), DBPSK (a phase change of pi is a 1), the self-synchronising
+// descrambler (x^7 + x^4 + 1), the long preamble's SFD, the PLCP header (CRC-16), the PSDU at 1 Mb/s
+// (DBPSK) or 2 Mb/s (DQPSK), CRC-32, the MAC header. Short preambles and CCK (5.5, 11 Mb/s) payloads
+// are not decoded (a CCK frame is reported from its header).
+bool Decoder::dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<Frame> &out) {
   static const float barker[11] = {1, -1, 1, 1, -1, 1, 1, 1, -1, -1, -1};
   float tmpl[20];
   for (int n = 0; n < 20; n++)
     tmpl[n] = barker[std::min(10, n * 11 / 20)];
   const uint64_t len = end - start;
-  const auto match = [&](const std::vector<cf> &z, size_t n, std::vector<cf> &y) {
-    y.assign(n > 20 ? n - 20 : 0, cf(0));
-    for (size_t m = 0; m < y.size(); m++) {
-      cf acc = 0;
+  const auto mf = [&](const std::vector<cf> &z, size_t m) { // the matched filter at m
+    cf acc = 0;
+    if (m + 20 <= z.size())
       for (int k = 0; k < 20; k++)
         acc += z[m + k] * tmpl[k];
-      y[m] = acc;
-    }
+    return acc;
   };
-  // the rhythm: the matched filter's power folded on 1 us; its peak against the mean
-  const auto rhythm = [](const std::vector<cf> &y, size_t nsym, int &ph) {
+  // the rhythm: the matched filter's power folded on 1 us over the first nsym symbols
+  const auto rhythm = [&](const std::vector<cf> &z, size_t nsym, int &ph) {
     float fold[20] = {};
-    for (size_t k = 0; k < nsym && 20 * k + 20 <= y.size(); k++)
+    for (size_t k = 0; k < nsym && 20 * k + 40 <= z.size(); k++)
       for (int p = 0; p < 20; p++)
-        fold[p] += std::norm(y[20 * k + p]);
+        fold[p] += std::norm(mf(z, 20 * k + static_cast<size_t>(p)));
     float mx = 0, sum = 0;
     ph = 0;
     for (int p = 0; p < 20; p++) {
@@ -765,35 +805,63 @@ void Decoder::dsss_at(uint64_t start, uint64_t end, std::vector<Frame> &out) {
     }
     return sum > 0 ? mx / (sum / 20) : 0.f;
   };
+  // the channel and where the frame starts: the first 100 us block (within 1 ms) whose matched filter
+  // shows the rhythm on some channel (the detector may have come on early: a steady tone is periodic too)
   double best = 0, c = 0;
-  std::vector<cf> y;
-  const uint64_t probe = std::min<uint64_t>(len, static_cast<uint64_t>(110e-6 * _fs) + _lp.size());
-  for (double cand : _cands) {
-    if (cand > 3e9)
-      continue;
-    const auto z = snippet(start, probe, cand - _centre);
-    match(z, z.size(), y);
-    int ph;
-    const double r = rhythm(y, 100, ph);
-    if (r > best) {
-      best = r;
-      c = cand;
+  const uint64_t us = static_cast<uint64_t>(_fs / 1e6), probe = 110 * us + _lp.size();
+  uint64_t from = start;
+  for (uint64_t b = 0; b + probe <= len && b <= 1000 * us && best < 2.5; b += 100 * us)
+    for (double cand : _cands) {
+      if (cand > 3e9)
+        continue;
+      int ph;
+      const double r = rhythm(snippet(start + b, probe, cand - _centre), 100, ph);
+      if (r > best) {
+        best = r;
+        c = cand;
+        from = start + (b > 10 * us ? b - 10 * us : 0);
+      }
+    }
+  if (best < 2.5)
+    return true; // no Barker rhythm after all
+  start = from;
+  const uint64_t len2 = end - start;
+  const auto z = snippet(start, len2, c - _centre);
+  int ph;
+  rhythm(z, 100, ph);
+  // the symbols, on the peak: early and late compared every 16 symbols, the timing moved a sample
+  std::vector<cf> sym;
+  double early = 0, late = 0;
+  for (size_t m = static_cast<size_t>(ph), k = 0; m + 21 < z.size(); m += 20, k++) {
+    sym.push_back(mf(z, m));
+    if (m > 0) {
+      early += std::norm(mf(z, m - 1));
+      late += std::norm(mf(z, m + 1));
+    }
+    if (k % 16 == 15) {
+      if (late > 1.25 * early)
+        m++;
+      else if (early > 1.25 * late && m > 0)
+        m--;
+      early = late = 0;
     }
   }
-  if (best < 2.5)
-    return; // no Barker rhythm: OFDM or something else
-  const auto z = snippet(start, len, c - _centre);
-  match(z, z.size(), y);
-  int ph;
-  const float r = rhythm(y, 100, ph);
-  std::vector<cf> sym;
-  for (size_t m = static_cast<size_t>(ph); m < y.size(); m += 20)
-    sym.push_back(y[m]);
   if (sym.size() < 200)
-    return;
-  std::vector<uint8_t> raw(sym.size(), 0), bits(sym.size(), 0);
+    return true;
+  // phase steps; the frequency offset from the DBPSK preamble (squared: the +-1 goes) taken out
+  std::vector<cf> d(sym.size(), cf(0));
+  std::complex<double> sq = 0;
+  for (size_t k = 1; k < sym.size(); k++) {
+    d[k] = sym[k] * std::conj(sym[k - 1]);
+    if (k < 150)
+      sq += std::complex<double>(d[k]) * std::complex<double>(d[k]);
+  }
+  const cf derot = std::polar(1.f, static_cast<float>(-std::arg(sq) / 2));
+  for (auto &v : d)
+    v *= derot;
+  std::vector<uint8_t> raw(sym.size(), 0), bits;
   for (size_t k = 1; k < sym.size(); k++)
-    raw[k] = (sym[k] * std::conj(sym[k - 1])).real() < 0;
+    raw[k] = d[k].real() < 0;
   const auto descr = [](const std::vector<uint8_t> &in, std::vector<uint8_t> &o) {
     o.assign(in.size(), 0);
     for (size_t i = 0; i < in.size(); i++)
@@ -813,7 +881,7 @@ void Decoder::dsss_at(uint64_t start, uint64_t end, std::vector<Frame> &out) {
     }
   }
   if (!found)
-    return;
+    return true;
   const size_t h0 = sfd + 16;
   auto field = [&](size_t at, int n) {
     unsigned v = 0;
@@ -833,18 +901,40 @@ void Decoder::dsss_at(uint64_t start, uint64_t end, std::vector<Frame> &out) {
   for (int j = 0; j < 16; j++)
     crc |= static_cast<unsigned>(bits[h0 + 32 + j]) << (15 - j);
   if ((reg ^ 0xFFFF) != crc)
-    return;
-  const unsigned sig = field(h0, 8), length_us = field(h0 + 16, 16);
+    return true;
+  const unsigned sig = field(h0, 8), service = field(h0 + 8, 8), length_us = field(h0 + 16, 16);
   Frame f;
   f.fmt = 'B';
   f.rate_mbps = sig == 0x0A ? 1 : sig == 0x14 ? 2 : sig == 0x37 ? 5 : sig == 0x6E ? 11 : 0;
   if (!f.rate_mbps || length_us == 0)
-    return;
+    return true;
+  // the samples the whole frame needs (1 and 2 Mb/s payloads are decoded; CCK: the header is enough)
+  const uint64_t psym = sig == 0x0A ? 8 * static_cast<uint64_t>(length_us / 8) : sig == 0x14 ? 4 * static_cast<uint64_t>(length_us / 4) : 0;
+  const uint64_t want = start + (static_cast<uint64_t>(ph) + 20 * (h0 + 48 + psym + 2)) * static_cast<uint64_t>(_dec) + _lp.size();
+  if (want > end && want - start < 7000 * us) {
+    need = want;
+    return false;
+  }
   f.dur_us = 192 + length_us;
-  f.length = static_cast<int>(sig == 0x0A ? length_us / 8 : sig == 0x14 ? length_us / 4 : length_us * f.rate_mbps / 8);
+  f.length = static_cast<int>(sig == 0x0A   ? length_us / 8
+                              : sig == 0x14 ? length_us / 4
+                              : sig == 0x37 ? length_us * 11 / 16
+                                            : length_us * 11 / 8 - ((service >> 7) & 1)); // (length extension)
   f.centre_hz = c;
   f.bw_mhz = 22;
-  f.snr_db = static_cast<float>(10 * std::log10(std::max(1.f, r - 1)));
+  // SNR, decision-directed over the preamble and header (DBPSK): each step with its sign removed
+  std::complex<double> mean = 0;
+  size_t nm = 0;
+  const size_t k0 = h0 > 100 ? h0 - 100 : 1;
+  for (size_t k = k0; k < h0 + 48; k++, nm++)
+    mean += std::complex<double>(d[k]) * (d[k].real() < 0 ? -1.0 : 1.0);
+  mean /= static_cast<double>(nm);
+  double var = 0;
+  for (size_t k = k0; k < h0 + 48; k++)
+    var += std::norm(std::complex<double>(d[k]) * (d[k].real() < 0 ? -1.0 : 1.0) - mean);
+  var /= static_cast<double>(nm);
+  // (a step multiplies two noisy symbols: roughly twice the noise of one)
+  f.snr_db = static_cast<float>(10 * std::log10(2 * std::norm(mean) / (var + 1e-30)));
   // the frame starts 144 symbols (SYNC 128 + SFD 16) before its header
   const double sync = static_cast<double>(ph) + 20.0 * (static_cast<double>(h0) - 144);
   f.t = _t_end - static_cast<double>(_abs_end - start) / _fs + sync / 20e6 + (_dec == 2 ? 10 / 20e6 : 0);
@@ -852,10 +942,10 @@ void Decoder::dsss_at(uint64_t start, uint64_t end, std::vector<Frame> &out) {
   std::vector<uint8_t> pb;
   if (sig == 0x0A && p0 + 8 * nb <= bits.size()) {
     pb.assign(bits.begin() + static_cast<long>(p0), bits.begin() + static_cast<long>(p0 + 8 * nb));
-  } else if (sig == 0x14 && p0 + 4 * nb <= sym.size()) { // DQPSK: dibits from the phase change (Gray)
+  } else if (sig == 0x14 && p0 + 4 * nb <= d.size()) { // DQPSK: dibits from the phase step (Gray)
     std::vector<uint8_t> raw2(raw.begin(), raw.begin() + static_cast<long>(p0));
     for (size_t k = p0; k < p0 + 4 * nb; k++) {
-      const double a = std::arg(sym[k] * std::conj(sym[k - 1]));
+      const double a = std::arg(d[k]);
       const int q = static_cast<int>(std::lround((a < 0 ? a + 2 * kPi : a) / (kPi / 2))) % 4;
       static const uint8_t d0[4] = {0, 0, 1, 1}, d1[4] = {0, 1, 1, 0};
       raw2.push_back(d0[q]);
@@ -877,6 +967,7 @@ void Decoder::dsss_at(uint64_t start, uint64_t end, std::vector<Frame> &out) {
       parse_mac(by, f);
   }
   out.push_back(f);
+  return true;
 }
 
 } // namespace wifi

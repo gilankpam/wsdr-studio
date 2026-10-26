@@ -644,9 +644,10 @@ export class Display {
     if (this.wifiPending.length > 2000) this.wifiPending.splice(0, this.wifiPending.length - 2000);
   }
 
-  // A mark at the centre of the frame's channel, on its row, in that row's own span: OFDM leaves its
-  // centre subcarrier empty, so the mark hides none of the signal; a dark pixel on each side keeps it
-  // visible on any waterfall colour. Rows of marks show the channel's activity.
+  // A mark at the centre of the frame's channel, on its row, in that row's own span (OFDM leaves its
+  // centre subcarrier empty, so there it hides none of the signal; an 802.11b mark does cover a little);
+  // a dark pixel on each side keeps it visible on any waterfall colour. Rows of marks show the
+  // channel's activity.
   private wifiMark(f: WifiFrame, y: number) {
     const rg = this.rowT[y];
     if (!rg || rg.hi <= rg.lo) return; // a separator line: no span

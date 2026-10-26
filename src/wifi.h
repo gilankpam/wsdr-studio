@@ -64,13 +64,19 @@ private:
     Frame f;
   };
   std::vector<Pending> _pend;
-  // 802.11b (2.4 GHz): bursts of at least the long preamble and header (192 us) found on the window
-  // power, decoded once they have ended
-  void dsss_at(uint64_t start, uint64_t end, std::vector<Frame> &out);
+  // 802.11b (2.4 GHz): x[k] * conj(x[k + 1 us]) of a DSSS signal is the same Barker waveform times
+  // a phase step of 0/90/180/270 degrees, so its 4th power adds up coherently over a 10 us window
+  // (OFDM, noise and other channels' traffic do not): that marks each 802.11b frame from its start to
+  // its end, whatever else is on the air; the frame is decoded once it has ended
+  // decodes the frame from `start` with the samples up to `end`; false: it needs the samples up to
+  // `need` (its header gave its length), call again then
+  bool dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<Frame> &out);
   bool _dsss = false;           // the span is at 2.4 GHz
-  bool _bin = false;            // inside a burst
-  uint64_t _bstart = 0;         // where it started
-  std::vector<std::pair<uint64_t, uint64_t>> _bjobs; // ended bursts: [start, end) absolute
+  bool _din = false;            // inside an 802.11b frame
+  uint64_t _dstart = 0;         // where it started
+  std::vector<std::complex<float>> _z4; // the window's terms (a ring), to slide it
+  std::vector<float> _r4;
+  std::vector<std::pair<uint64_t, uint64_t>> _bjobs; // frames to decode: start, samples needed first
 
   double _fs = 0, _centre = 0;
   int _lag = 0, _win = 0, _dec = 1;

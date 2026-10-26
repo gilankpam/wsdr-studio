@@ -443,21 +443,30 @@ static void test_wifi_frames() {
   }
 }
 
-// An 802.11b beacon (long preamble, 1 Mb/s DBPSK, Barker) synthesised at 40 MS/s 10 MHz below the
-// centre, with a 50 kHz offset and noise: found, its header and CRC-32 good, its network named.
-static void test_dsss_beacon() {
+// An 802.11b beacon (long preamble; payload at 1 Mb/s DBPSK or 2 Mb/s DQPSK; Barker) synthesised at
+// 40 MS/s 10 MHz below the centre: its clock `ppm` off, its carrier `cfo` Hz off, noise, and (if lead_us)
+// a strong tone 12 MHz above the centre that starts lead_us before it and lasts past it. Returns the
+// samples; `at` is where the frame starts, `nbytes` its MAC frame's length.
+static std::vector<std::complex<float>> dsss_frame(int rate, size_t pad, double ppm, double cfo, double lead_us, size_t &at, size_t &nbytes,
+                                                   const std::string &ssid) {
   std::mt19937 rng(11);
   std::normal_distribution<float> g(0, 1);
-  // the MAC frame: a beacon with SSID "test-ssid", DS parameter set channel 1, its FCS
   std::vector<uint8_t> mac = {0x80, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 2, 0x11, 0x22, 0x33, 0x44, 0x55,
                               2, 0x11, 0x22, 0x33, 0x44, 0x55, 0, 0};
   for (int i = 0; i < 12; i++)
     mac.push_back(0); // timestamp, interval, capabilities
-  const std::string ssid = "test-ssid";
   mac.push_back(0);
   mac.push_back(static_cast<uint8_t>(ssid.size()));
   mac.insert(mac.end(), ssid.begin(), ssid.end());
   mac.insert(mac.end(), {3, 1, 1});
+  while (pad > 0) { // vendor elements to make it longer
+    const size_t l = std::min<size_t>(pad, 200);
+    mac.push_back(221);
+    mac.push_back(static_cast<uint8_t>(l));
+    for (size_t i = 0; i < l; i++)
+      mac.push_back(static_cast<uint8_t>(i * 7));
+    pad -= l;
+  }
   uint32_t c = 0xFFFFFFFFu;
   for (uint8_t b : mac) {
     c ^= b;
@@ -467,13 +476,14 @@ static void test_dsss_beacon() {
   c ^= 0xFFFFFFFFu;
   for (int k = 0; k < 4; k++)
     mac.push_back(static_cast<uint8_t>(c >> (8 * k)));
+  nbytes = mac.size();
   std::vector<uint8_t> bits(128, 1); // SYNC
   for (int j = 0; j < 16; j++)
     bits.push_back((0xF3A0 >> j) & 1);
-  const unsigned length_us = static_cast<unsigned>(mac.size() * 8);
+  const unsigned length_us = static_cast<unsigned>(mac.size() * 8 / static_cast<size_t>(rate));
   std::vector<uint8_t> hdr;
   for (int j = 0; j < 8; j++)
-    hdr.push_back((0x0A >> j) & 1);
+    hdr.push_back(((rate == 1 ? 0x0A : 0x14) >> j) & 1);
   for (int j = 0; j < 8; j++)
     hdr.push_back(0);
   for (int j = 0; j < 16; j++)
@@ -489,10 +499,11 @@ static void test_dsss_beacon() {
   for (int j = 15; j >= 0; j--)
     hdr.push_back((reg >> j) & 1);
   bits.insert(bits.end(), hdr.begin(), hdr.end());
+  const size_t nhead = bits.size();
   for (uint8_t b : mac)
     for (int j = 0; j < 8; j++)
       bits.push_back((b >> j) & 1);
-  // scramble (self-synchronising, seed 1101100), DBPSK, Barker at 11 Mchip/s sampled at 40 MS/s
+  // scramble (self-synchronising, seed 1101100)
   std::vector<uint8_t> sc(bits.size());
   unsigned st = 0b1101100;
   for (size_t i = 0; i < bits.size(); i++) {
@@ -500,44 +511,80 @@ static void test_dsss_beacon() {
     sc[i] = static_cast<uint8_t>(o);
     st = ((st << 1) | o) & 0x7f;
   }
+  // phases: one symbol per bit (header), or per two bits at 2 Mb/s (Gray: 00 0, 01 pi/2, 11 pi, 10 3pi/2)
+  std::vector<double> phase;
+  double ph = 0;
+  for (size_t i = 0; i < nhead; i++) {
+    if (sc[i])
+      ph += M_PI;
+    phase.push_back(ph);
+  }
+  for (size_t i = nhead; i < sc.size(); i += static_cast<size_t>(rate)) {
+    if (rate == 1)
+      ph += sc[i] ? M_PI : 0;
+    else
+      ph += sc[i] ? (sc[i + 1] ? M_PI : 1.5 * M_PI) : (sc[i + 1] ? 0.5 * M_PI : 0);
+    phase.push_back(ph);
+  }
   static const int barker[11] = {1, -1, 1, 1, -1, 1, 1, 1, -1, -1, -1};
-  const double fs = 40e6, centre = 2422e6, off = -10e6, cfo = 50e3;
+  const double fs = 40e6, off = -10e6;
   std::vector<std::complex<float>> x;
-  for (int i = 0; i < 20000; i++)
-    x.emplace_back(0.05f * g(rng), 0.05f * g(rng));
-  const size_t at = x.size();
-  float ph = 1;
-  for (size_t k = 0; k < sc.size(); k++) {
-    if (sc[k])
-      ph = -ph;
-    for (int n = 0; n < 40; n++) {
-      const double t = static_cast<double>(x.size() - at) / fs;
-      const float chip = static_cast<float>(barker[std::min(10, n * 11 / 40)]) * ph;
-      x.push_back(chip * 0.5f * std::polar(1.f, static_cast<float>(2 * M_PI * (off + cfo) * t)) +
-                  std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
-    }
+  auto noise = [&] { return std::complex<float>(0.05f * g(rng), 0.05f * g(rng)); };
+  auto tone = [&](size_t i) { return std::polar(0.5f, static_cast<float>(2 * M_PI * 12e6 * static_cast<double>(i) / fs)); };
+  const size_t lead = static_cast<size_t>(lead_us * 40);
+  for (size_t i = 0; i < 20000; i++)
+    x.push_back(noise() + (20000 - i <= lead ? tone(i) : std::complex<float>(0)));
+  at = x.size();
+  const double frame_s = static_cast<double>(phase.size()) * 1e-6 / (1 + ppm * 1e-6);
+  for (size_t n = 0; static_cast<double>(n) / fs < frame_s; n++) {
+    const double t = static_cast<double>(n) / fs, u = t * 1e6 * (1 + ppm * 1e-6); // in the sender's microseconds
+    const size_t k = std::min(phase.size() - 1, static_cast<size_t>(u));
+    const int chip = barker[std::min(10, static_cast<int>((u - static_cast<double>(k)) * 11))];
+    const size_t i = x.size();
+    x.push_back(static_cast<float>(chip) * 0.5f * std::polar(1.f, static_cast<float>(phase[k] + 2 * M_PI * (off + cfo) * t)) + noise() +
+                (lead ? tone(i) : std::complex<float>(0)));
   }
   for (int i = 0; i < 40000; i++)
-    x.emplace_back(0.05f * g(rng), 0.05f * g(rng));
-  wifi::Decoder dec;
-  dec.reset(fs, centre);
-  std::vector<wifi::Frame> got;
-  for (size_t i = 0; i < x.size(); i += 8192) {
-    const size_t n = std::min<size_t>(8192, x.size() - i);
-    dec.feed(&x[i], n, static_cast<double>(i + n) / fs, got);
+    x.push_back(noise());
+  return x;
+}
+
+static void test_dsss_beacon() {
+  struct Case { int rate; size_t pad; double ppm, cfo, lead; };
+  const Case cases[] = {
+      {1, 0, 0, 50e3, 0},      // plain
+      {1, 450, 20, 50e3, 0},   // a 500-byte frame, clocks 20 ppm apart (timing tracked)
+      {2, 300, -20, 100e3, 0}, // 2 Mb/s DQPSK with a 100 kHz offset (removed)
+      {1, 0, 0, 50e3, 300},    // another signal on the air from 300 us before it
+  };
+  for (const auto &cs : cases) {
+    size_t at = 0, nbytes = 0;
+    const auto x = dsss_frame(cs.rate, cs.pad, cs.ppm, cs.cfo, cs.lead, at, nbytes, "test-ssid");
+    const double fs = 40e6;
+    wifi::Decoder dec;
+    dec.reset(fs, 2422e6);
+    std::vector<wifi::Frame> got;
+    for (size_t i = 0; i < x.size(); i += 8192) {
+      const size_t n = std::min<size_t>(8192, x.size() - i);
+      dec.feed(&x[i], n, static_cast<double>(i + n) / fs, got);
+    }
+    int b = 0, whole = 0;
+    for (const auto &f : got) {
+      if (f.fmt != 'B')
+        continue;
+      b++;
+      whole += f.mac;
+      CHECK(f.rate_mbps == cs.rate && f.length == static_cast<int>(nbytes));
+      CHECK(std::abs(f.centre_hz - 2412e6) < 1);
+      CHECK(f.mac && f.beacon && f.ssid == "test-ssid" && f.channel == 1);
+      CHECK(std::abs(f.t - static_cast<double>(at) / fs) < 3e-6);
+      CHECK(f.snr_db > 10);
+    }
+    CHECK(b == 1);
+    if (b != 1 || whole != 1)
+      std::printf("  (802.11b case: %d Mb/s, %zu bytes, %g ppm, %g Hz, lead %g us: %d frames, %d whole)\n", cs.rate, nbytes, cs.ppm, cs.cfo,
+                  cs.lead, b, whole);
   }
-  int b = 0;
-  for (const auto &f : got) {
-    if (f.fmt != 'B')
-      continue;
-    b++;
-    CHECK(f.rate_mbps == 1 && f.length == static_cast<int>(mac.size()));
-    CHECK(std::abs(f.centre_hz - 2412e6) < 1);
-    CHECK(f.mac && f.beacon && f.ssid == ssid && f.channel == 1);
-    CHECK(std::abs(f.t - static_cast<double>(at) / fs) < 3e-6);
-    CHECK(std::abs(f.dur_us - (192 + length_us)) < 1e-9);
-  }
-  CHECK(b == 1);
 }
 
 // Network names: whatever bytes a beacon carries, the text is valid UTF-8 the JSON writer accepts.

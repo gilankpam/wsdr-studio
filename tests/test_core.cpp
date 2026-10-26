@@ -737,6 +737,80 @@ static void test_signals() {
   }
 }
 
+// A BLE advertisement (ADV_IND from a random address c0:ff:ee:12:34:56 with the name "test-ble"),
+// GFSK (BT 0.5, +-250 kHz) on channel 38 (2426 MHz) 40 kHz off, at 40 MS/s around 2422 MHz: decoded.
+static void test_ble() {
+  std::mt19937 rng(9);
+  std::normal_distribution<float> g(0, 1);
+  const std::string name = "test-ble";
+  std::vector<uint8_t> pdu = {0x40, 0, 0x56, 0x34, 0x12, 0xee, 0xff, 0xc0, 2, 0x01, 0x06, static_cast<uint8_t>(name.size() + 1), 0x09};
+  pdu.insert(pdu.end(), name.begin(), name.end());
+  pdu[1] = static_cast<uint8_t>(pdu.size() - 2);
+  std::vector<uint8_t> bits;
+  for (uint8_t b : pdu)
+    for (int j = 0; j < 8; j++)
+      bits.push_back((b >> j) & 1);
+  unsigned reg = 0x555555; // CRC-24, sent MSB first
+  for (uint8_t b : bits) {
+    const unsigned fb = ((reg >> 23) & 1) ^ b;
+    reg = (reg << 1) & 0xFFFFFF;
+    if (fb)
+      reg ^= 0x00065B;
+  }
+  for (int i = 23; i >= 0; i--)
+    bits.push_back((reg >> i) & 1);
+  for (unsigned i = 0, w = (38 & 0x3F) | 0x40; i < bits.size(); i++) { // whitening
+    bits[i] ^= w & 1;
+    w = (w >> 1) ^ ((w & 1) ? 0x44 : 0);
+  }
+  std::vector<uint8_t> air = {1, 0, 1, 0, 1, 0, 1, 0}; // preamble, then the access address (LSB first)
+  for (int i = 0; i < 32; i++)
+    air.push_back((0x8E89BED6u >> i) & 1);
+  air.insert(air.end(), bits.begin(), bits.end());
+  // GFSK: NRZ at 40 samples a bit through a Gaussian (BT 0.5), the phase integrated
+  const double fs = 40e6;
+  std::vector<double> nrz(air.size() * 40), gs;
+  for (size_t i = 0; i < nrz.size(); i++)
+    nrz[i] = air[i / 40] ? 1 : -1;
+  const double sigma = std::sqrt(std::log(2.0)) / (2 * M_PI * 0.5) * 40;
+  for (int k = -80; k <= 80; k++)
+    gs.push_back(std::exp(-0.5 * k * k / (sigma * sigma)));
+  double gsum = 0;
+  for (double v : gs)
+    gsum += v;
+  std::vector<std::complex<float>> x;
+  for (int i = 0; i < 800000; i++) // 20 ms (the finder's warm-up)
+    x.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  double ph = 0;
+  for (size_t i = 0; i < nrz.size(); i++) {
+    double f = 0;
+    for (size_t k = 0; k < gs.size(); k++) {
+      const long j = static_cast<long>(i) + static_cast<long>(k) - 80;
+      f += gs[k] * (j < 0 ? -1 : j >= static_cast<long>(nrz.size()) ? 1 : nrz[static_cast<size_t>(j)]);
+    }
+    ph = std::remainder(ph + 2 * M_PI * (4e6 + 40e3 + 250e3 * f / gsum) / fs, 2 * M_PI);
+    x.push_back(std::polar(0.3f, static_cast<float>(ph)) + std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+  }
+  for (int i = 0; i < 80000; i++)
+    x.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  sig::Finder f;
+  f.reset(fs, 2422e6);
+  std::vector<sig::Burst> out;
+  for (size_t i = 0; i < x.size(); i += 8192) {
+    const size_t n = std::min<size_t>(8192, x.size() - i);
+    f.feed(&x[i], n, static_cast<double>(i + n) / fs, out);
+  }
+  int e = 0;
+  for (const auto &b : out)
+    if (b.kind == 'E') {
+      e++;
+      CHECK(b.addr == "c0:ff:ee:12:34:56" && b.random && b.name == name && std::abs(b.mhz - 2426) < 0.1);
+    }
+  CHECK(e == 1 && out.size() == 1);
+  if (e != 1 || out.size() != 1)
+    std::printf("  (BLE: %zu reported, %d decoded)\n", out.size(), e);
+}
+
 // Network names: whatever bytes a beacon carries, the text is valid UTF-8 the JSON writer accepts.
 static void test_ssid_text() {
   auto t = [](const std::string &b) { return wifi::ssid_text(reinterpret_cast<const uint8_t *>(b.data()), b.size()); };
@@ -798,7 +872,7 @@ static int wifi_scan(const char *path) {
   std::map<std::string, int> kinds;
   for (const auto &o : other) {
     char k[64];
-    std::snprintf(k, sizeof k, "%c %.0f MHz", o.kind, o.mhz);
+    std::snprintf(k, sizeof k, "%c %.0f MHz %s%s%s", o.kind, o.mhz, o.addr.c_str(), o.random ? " (random)" : "", o.name.empty() ? "" : (" " + o.name).c_str());
     kinds[k]++;
   }
   std::printf("other signals (found in %.2f s): %zu\n", ssecs, other.size());
@@ -862,6 +936,7 @@ int main(int argc, char **argv) {
   test_ssid_text();
   test_dsss_beacon();
   test_signals();
+  test_ble();
   std::printf(g_fail ? "%d FAILED\n" : "all tests passed\n", g_fail);
   return g_fail ? 1 : 0;
 }

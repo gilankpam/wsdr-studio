@@ -4,6 +4,7 @@
 #include <fftw3.h>
 
 #include "dsp.h"
+#include "wifi.h" // (ssid_text: names made safe to show)
 
 #include <algorithm>
 #include <cmath>
@@ -40,6 +41,10 @@ void Finder::reset(double fs, double centre_hz) {
   _hop = 4 * _nf;
   _abs_end = _col = _carry_at = 0;
   _oven = false;
+  _adv.clear();
+  _advch.clear();
+  _held.clear();
+  _decoded.clear();
   _carry.clear();
   _tracks.clear();
   _narrow.clear();
@@ -63,6 +68,11 @@ void Finder::reset(double fs, double centre_hz) {
   _floor.assign(_nf, 0);
   _occ.assign(_nf, 0);
   _loudsum.assign(_nf, 0);
+  for (const auto &[mhz, chan] : {std::pair{2402.0, 37}, {2426.0, 38}, {2480.0, 39}}) {
+    const int k = static_cast<int>(std::lround((mhz * 1e6 - _centre) / (_fs / _nf) + 0.5 * _nf));
+    if (k >= 2 && k <= _nf - 3)
+      _advch.push_back({chan, k, mhz, false, 0, 0});
+  }
 }
 
 void Finder::feed(const cf *x, size_t n, double t_end, std::vector<Burst> &out) {
@@ -76,9 +86,40 @@ void Finder::feed(const cf *x, size_t n, double t_end, std::vector<Burst> &out) 
     column(&_carry[_col * hop - _carry_at], out);
     _col++;
   }
-  const uint64_t drop = std::min<uint64_t>(_col * hop - _carry_at, _carry.size());
-  _carry.erase(_carry.begin(), _carry.begin() + static_cast<long>(drop));
-  _carry_at += drop;
+  // activity on an advertising channel, once 420 us from its start are in (the longest advertising
+  // packet is 376 us), from 30 us before it: a packet that decodes is reported (activity that does not
+  // is often Wi-Fi covering the channel: the narrow-burst tracker reports what is narrowband there)
+  const uint64_t m = static_cast<uint64_t>(30e-6 * _fs), span = static_cast<uint64_t>(420e-6 * _fs);
+  while (!_adv.empty() && _adv.front().s0 + span <= _abs_end) {
+    Adv a = _adv.front();
+    _adv.erase(_adv.begin());
+    if (ble(a.s0 > _carry_at + m ? a.s0 - m : _carry_at, a.s0 + span, a.mhz, a.chan, a.b)) {
+      a.b.kind = 'E';
+      out.push_back(a.b);
+      _decoded.emplace_back(a.b.t - 30e-6, a.b.t + 420e-6);
+    }
+  }
+  // the narrow bursts held there: dropped when a decoded packet covers them, once its decode is done
+  const double t_done = _t_end - (_adv.empty() ? 0 : static_cast<double>(_abs_end - _adv.front().s0) / _fs) - 450e-6;
+  while (!_held.empty() && _held.front().t < t_done) {
+    const Burst h = _held.front();
+    _held.erase(_held.begin());
+    bool dup = false;
+    for (const auto &[t0, t1] : _decoded)
+      dup = dup || (h.t < t1 && h.t + h.dur_us * 1e-6 > t0);
+    if (!dup)
+      out.push_back(h);
+  }
+  while (!_decoded.empty() && _decoded.front().second < t_done - 0.01)
+    _decoded.erase(_decoded.begin());
+  // the last ~1 ms stays (a BLE packet is decoded from it once its burst has ended); trimmed in steps
+  const uint64_t keep = static_cast<uint64_t>(_fs * 1e-3);
+  const uint64_t start = _col * hop > keep ? _col * hop - keep : 0;
+  if (start > _carry_at + 4 * keep) {
+    const uint64_t drop = std::min<uint64_t>(start - _carry_at, _carry.size());
+    _carry.erase(_carry.begin(), _carry.begin() + static_cast<long>(drop));
+    _carry_at += drop;
+  }
 }
 
 void Finder::column(const cf *x, std::vector<Burst> &out) {
@@ -119,6 +160,32 @@ void Finder::column(const cf *x, std::vector<Burst> &out) {
       oven(out);
   }
 
+  // the advertising channels: active while their three bins hold 6x their noise (gaps up to 10
+  // columns bridged); an active stretch of 50 us or more is decoded (below)
+  for (auto &a : _advch) {
+    float p = 0, fl = 0;
+    for (int k = a.bin - 1; k <= a.bin + 1; k++) {
+      p += _p[k];
+      fl += _floor[k] / 0.223f;
+    }
+    if (p > 6 * fl && _col >= kWarm) {
+      if (!a.on)
+        a.c0 = _col;
+      a.on = true;
+      a.c1 = _col;
+    } else if (a.on && _col > a.c1 + 10) {
+      a.on = false;
+      if (a.c1 - a.c0 + 1 >= 8 && !_oven) {
+        Burst b;
+        b.t = time_of(a.c0 * static_cast<uint64_t>(_hop));
+        b.mhz = a.mhz;
+        b.bw_mhz = 2;
+        b.dur_us = static_cast<double>((a.c1 - a.c0 + 1) * static_cast<uint64_t>(_hop)) / _fs * 1e6;
+        _adv.push_back({a.c0 * static_cast<uint64_t>(_hop), a.mhz, a.chan, b});
+      }
+    }
+  }
+
   // narrow runs: occupied bins whose core (within 10 dB of their peak) is at most kNarrow bins, with
   // nothing within kAround bins either side reaching that core (a strong Wi-Fi frame's shoulder is not
   // narrowband); measured from the run's own peak, so a strong burst's skirts do not widen it
@@ -139,9 +206,11 @@ void Finder::column(const cf *x, std::vector<Burst> &out) {
         a = std::min(a, k);
         b = std::max(b, k);
       }
+    // (neighbours count by their power over their usual level: a steady spur, such as the adapter's
+    // DC at the centre, is no neighbour)
     bool alone = true;
     for (int k = std::max(0, a0 - kAround); alone && k <= std::min(_nf - 1, b0 + kAround); k++)
-      alone = (k >= a0 && k <= b0) || _p[k] <= 0.1f * pk;
+      alone = (k >= a0 && k <= b0) || _p[k] - _floor[k] / 0.223f <= 0.1f * pk;
     if (b - a + 1 <= kNarrow && b0 - a0 + 1 <= 3 * kNarrow && alone && _col >= kWarm) {
       size_t t = 0;
       while (t < _tracks.size() && !(_tracks[t].c1 + 2 >= _col && a <= _tracks[t].b + 1 && b >= _tracks[t].a - 1))
@@ -181,6 +250,11 @@ void Finder::end_track(size_t i, std::vector<Burst> &out) {
   b.dur_us = static_cast<double>(cols * static_cast<uint64_t>(_hop)) / _fs * 1e6;
   // Bluetooth hops: at 2.4 GHz, bursts of at most 3 ms, at least 4 within 100 ms on 3 frequencies
   b.kind = 'N';
+  for (const auto &a : _advch) // (held until that channel's decodes are in: it may be one of them)
+    if (std::abs(b.mhz - a.mhz) < 1.2) {
+      _held.push_back(b);
+      return;
+    }
   if (b.mhz > 2400 && b.mhz < 2484 && b.dur_us <= 3000) {
     _narrow.push_back({b.t, b.mhz});
     while (!_narrow.empty() && _narrow.front().t < b.t - 0.1)
@@ -243,6 +317,113 @@ void Finder::oven(std::vector<Burst> &out) {
   }
   _busy.clear();
   std::fill(_loudsum.begin(), _loudsum.end(), 0.f);
+}
+
+// BLE advertising (1M PHY): the channel mixed to 0 and filtered (~600 kHz), 4 samples a bit; the FM
+// discriminator integrated over each bit, for each of the 4 phases; the access address 0x8E89BED6
+// found with at most one bit wrong (sliced at 0, and midway between its ones and zeros for a carrier
+// offset: it has 18 ones and 14 zeros); then the bits dewhitened
+// (x^7 + x^4 + 1 seeded from the channel), the PDU header's length, CRC-24 (0x00065B from 0x555555, sent
+// MSB first). A good CRC gives the advertiser's address and its name (AD types 0x08, 0x09).
+bool Finder::ble(uint64_t s0, uint64_t s1, double mhz, int chan, Burst &b) const {
+  const int dec = static_cast<int>(std::lround(_fs / 4e6)); // 10 or 5
+  static std::vector<float> lp;
+  static int lp_dec = 0;
+  if (lp_dec != dec) { // windowed sinc, cutoff 600 kHz, 8 bits' span
+    const int nt = 8 * dec + 1;
+    lp.assign(nt, 0);
+    double sum = 0;
+    for (int i = 0; i < nt; i++) {
+      const double m = i - (nt - 1) / 2.0, fc = 0.6e6 / _fs;
+      lp[i] = static_cast<float>((m == 0 ? 2 * fc : std::sin(2 * kPi * fc * m) / (kPi * m)) * (0.54 - 0.46 * std::cos(2 * kPi * i / (nt - 1))));
+      sum += lp[i];
+    }
+    for (auto &v : lp)
+      v = static_cast<float>(v / sum);
+    lp_dec = dec;
+  }
+  const cf *x = &_carry[s0 - _carry_at];
+  const size_t n = s1 - s0, nt = lp.size();
+  const double step = -2 * kPi * (mhz * 1e6 - _centre) / _fs;
+  std::vector<cf> z;
+  for (size_t o = 0; o + nt <= n; o += static_cast<size_t>(dec)) {
+    cf acc = 0;
+    for (size_t k = 0; k < nt; k++)
+      acc += x[o + k] * std::polar(lp[k], static_cast<float>(step * static_cast<double>(o + k)));
+    z.push_back(acc);
+  }
+  if (z.size() < 4 * 80)
+    return false;
+  std::vector<float> d(z.size() - 1);
+  for (size_t i = 0; i + 1 < z.size(); i++)
+    d[i] = std::arg(z[i + 1] * std::conj(z[i]));
+  static const uint32_t kAA = 0x8E89BED6;
+  // the whitening sequence for this channel (bit 6 set, bits 5..0 the channel index)
+  std::vector<uint8_t> wseq(8 * 260);
+  for (unsigned i = 0, reg = (static_cast<unsigned>(chan) & 0x3F) | 0x40; i < wseq.size(); i++) {
+    wseq[i] = reg & 1;
+    reg = (reg >> 1) ^ ((reg & 1) ? 0x44 : 0);
+  }
+  for (int ph = 0; ph < 4; ph++) {
+    std::vector<float> s; // one soft value per bit
+    for (size_t i = static_cast<size_t>(ph); i + 4 <= d.size(); i += 4)
+      s.push_back(d[i] + d[i + 1] + d[i + 2] + d[i + 3]);
+    for (size_t k = 0; k + 32 + 16 <= s.size(); k++) {
+      float m1 = 0, m0 = 0;
+      for (int i = 0; i < 32; i++)
+        (((kAA >> i) & 1) ? m1 : m0) += s[k + i];
+      // the threshold: 0, or (a carrier offset) midway between the address's ones and zeros; the
+      // address may have one bit wrong, the CRC decides
+      for (const float mean : {0.f, (m1 / 18 + m0 / 14) / 2}) {
+      int wrong = 0;
+      for (int i = 0; i < 32; i++)
+        wrong += (s[k + i] > mean) != (((kAA >> i) & 1) != 0);
+      if (wrong > 1)
+        continue;
+      const size_t p = k + 32;
+      auto bit = [&](size_t i) { return static_cast<uint8_t>((s[p + i] > mean ? 1 : 0) ^ wseq[i]); };
+      int len = 0;
+      for (int j = 0; j < 8; j++)
+        len |= bit(8 + static_cast<size_t>(j)) << j;
+      const size_t nb = 16 + 8 * static_cast<size_t>(len);
+      if (len < 6 || len > 37 || p + nb + 24 > s.size())
+        continue;
+      unsigned reg = 0x555555;
+      for (size_t i = 0; i < nb; i++) {
+        const unsigned fb = ((reg >> 23) & 1) ^ bit(i);
+        reg = (reg << 1) & 0xFFFFFF;
+        if (fb)
+          reg ^= 0x00065B;
+      }
+      bool ok = true;
+      for (int i = 0; i < 24 && ok; i++)
+        ok = bit(nb + static_cast<size_t>(i)) == ((reg >> (23 - i)) & 1);
+      if (!ok)
+        continue;
+      std::vector<uint8_t> by(nb / 8);
+      for (size_t i = 0; i < nb; i++)
+        by[i / 8] |= static_cast<uint8_t>(bit(i) << (i % 8));
+      // ADV_IND, ADV_DIRECT_IND, ADV_NONCONN_IND, SCAN_RSP, ADV_SCAN_IND carry AdvA first; others not
+      const int type = by[0] & 0x0F;
+      if (type != 0 && type != 1 && type != 2 && type != 4 && type != 6)
+        return false;
+      char a[18];
+      std::snprintf(a, sizeof a, "%02x:%02x:%02x:%02x:%02x:%02x", by[7], by[6], by[5], by[4], by[3], by[2]);
+      b.addr = a;
+      b.random = (by[0] >> 6) & 1; // TxAdd
+      for (size_t i = 8; type != 1 && i + 1 < by.size();) { // the AD structures
+        const size_t l = by[i];
+        if (l == 0 || i + 1 + l > by.size())
+          break;
+        if (by[i + 1] == 0x08 || by[i + 1] == 0x09)
+          b.name = wifi::ssid_text(&by[i + 2], l - 1);
+        i += 1 + l;
+      }
+      return true;
+      }
+    }
+  }
+  return false;
 }
 
 } // namespace sig

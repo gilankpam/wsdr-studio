@@ -34,7 +34,7 @@ export const WIFI_COLOUR = { L: '#ffffff', H: '#ff4fd8', V: '#c4a7ff', B: '#fff5
 const WIFI_NAME = { L: 'legacy', H: '11n', V: '11ac', B: '11b' } as const;
 // other signals share one colour (aquamarine); the hover names their kind
 export const OTHER_COLOUR = '#7fffd4';
-const OTHER_NAME = { T: 'Bluetooth', N: 'narrowband', M: 'microwave oven' } as const;
+const OTHER_NAME = { T: 'Bluetooth', N: 'narrowband', M: 'microwave oven', E: 'BLE advertising' } as const;
 // a mark on the waterfall: a Wi-Fi frame, or another signal in the same shape (rate and length 0)
 type Mark = [t: number, mhz: number, bw: number, fmt: WifiFrame[3] | OtherSignal[3], rate: number, len: number, us: number, snr: number,
   ta?: string | null, bssid?: string | null, ssid?: string | null, ch?: number];
@@ -635,7 +635,11 @@ export class Display {
   // a little after their rows, so most land a few rows down)
   addWifi(frames: WifiFrame[], other: OtherSignal[] = []) {
     if (!this.opts.wifi || this.opts.stitch || this.opts.dim) return; // (stopped: the picture is kept as it was)
-    const marks: Mark[] = [...frames, ...other.map((o): Mark => [o[0], o[1], o[2], o[3], 0, 0, o[4], 0])];
+    // (a BLE advertiser's address and name ride where a Wi-Fi frame's sender and network name do)
+    const marks: Mark[] = [
+      ...frames,
+      ...other.map((o): Mark => [o[0], o[1], o[2], o[3], 0, 0, o[4], 0, o[5] ? `${o[5]}${o[6] ? ' (random)' : ''}` : null, null, o[7] ?? null]),
+    ];
     for (const f of marks) {
       if (f[9] && f[10] != null && (f[10] || !this.wifiNames.has(f[9]))) {
         if (!this.wifiNames.has(f[9]) && this.wifiNames.size >= 300) this.wifiNames.delete(this.wifiNames.keys().next().value!);
@@ -715,7 +719,9 @@ export class Display {
     const kinds = Object.entries(by).map(([k, n]) => (k === OTHER_NAME.M ? k : `${k} ${n}`)).join(', ');
     const bursts = ms.filter((m) => m[3] !== 'M');
     const mhz = ms.map((m) => m[1]).sort((a, b) => a - b), us = bursts.map((m) => m[6]).sort((a, b) => a - b);
-    return `${kinds} · ${mhz[mhz.length >> 1].toFixed(0)} MHz${us.length ? ` · ${us[us.length >> 1].toFixed(0)} µs` : ''}`;
+    // BLE advertisers: a name when they send one, else the address
+    const ble = [...new Set(ms.filter((m) => m[3] === 'E').map((m) => (m[10] ? `“${m[10]}” ${m[8]}` : m[8])))].slice(0, 2);
+    return `${kinds} · ${mhz[mhz.length >> 1].toFixed(0)} MHz${us.length ? ` · ${us[us.length >> 1].toFixed(0)} µs` : ''}${ble.length ? ` · ${ble.join(', ')}` : ''}`;
   }
 
   private drawSpectrum() {

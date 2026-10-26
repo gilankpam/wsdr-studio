@@ -119,9 +119,11 @@ The window needs at least 1280 × 720.
   sent the frames under the pointer (other devices' addresses too, often randomised ones). Only
   addresses and network names are read; no payload is kept, nothing is saved.
   Other signals get an aquamarine mark, named in the hover: narrow bursts (up to 2.5 MHz) are
-  "Bluetooth" when they hop between frequencies and "narrowband" otherwise (BLE advertising, wireless
-  mice and keyboards, ...), and a microwave oven is recognised by the span switching on and off with
-  the mains. These are cheap rules, close enough to tag what the waterfall shows; signals at the very
+  "Bluetooth" when they hop between frequencies and "narrowband" otherwise (wireless mice and
+  keyboards, ...), and a microwave oven is recognised by the span switching on and off with the mains.
+  BLE advertising on the channels inside the span (2402, 2426, 2480 MHz; a 40 MHz span holds at most
+  two) is decoded: the hover shows the advertiser's address (most are random and change) and its name
+  when it sends one. These are cheap rules, close enough to tag what the waterfall shows; signals at the very
   edge of the span are missed.
 - **Keyboard** (? shows the list): ←/→ tune 5 MHz (Shift 20), [ ] span, digits or Enter type a
   frequency, A / B select the view, Space Start/Stop, Ctrl+R record.

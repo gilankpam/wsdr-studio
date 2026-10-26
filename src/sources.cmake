@@ -3,4 +3,4 @@
 set(STUDIO_CORE_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/dsp.cpp ${CMAKE_CURRENT_LIST_DIR}/protocol.cpp ${CMAKE_CURRENT_LIST_DIR}/device_scan.cpp
   ${CMAKE_CURRENT_LIST_DIR}/recorder.cpp ${CMAKE_CURRENT_LIST_DIR}/engine.cpp ${CMAKE_CURRENT_LIST_DIR}/wifi.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/studio.cpp)
+  ${CMAKE_CURRENT_LIST_DIR}/signals.cpp ${CMAKE_CURRENT_LIST_DIR}/studio.cpp)

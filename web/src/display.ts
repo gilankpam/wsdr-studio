@@ -5,7 +5,7 @@
 // frequencies are; the waterfall's lines are made of each view's newest row.
 import { channelsIn } from './channels';
 import { TURBO } from './colormap';
-import type { Row, WifiFrame } from './protocol';
+import type { OtherSignal, Row, WifiFrame } from './protocol';
 
 export type DisplayOpts = {
   dbMin: number; dbMax: number; // spectrum scale (dBFS)
@@ -27,10 +27,23 @@ export type DisplayOpts = {
   stitch: Source[] | null;      // Panorama: the views on this axis (index = slot); null: one view
   wifi: boolean;                // mark the Wi-Fi frames found in the samples on the waterfall
 };
-// The marks' colours by frame format: none of them is in the waterfall's colour scale (white legacy,
-// magenta 11n, lavender 11ac; the switch's caption names each)
-export const WIFI_COLOUR = { L: '#ffffff', H: '#ff4fd8', V: '#c4a7ff' } as const;
-const WIFI_NAME = { L: 'legacy', H: '11n', V: '11ac' } as const;
+// The marks' colours by frame format, apart from the waterfall's colour scale (white legacy OFDM,
+// magenta 11n, lavender 11ac, pale yellow 802.11b; the switch's caption names each; a dark border
+// keeps them visible on any colour)
+export const WIFI_COLOUR = { L: '#ffffff', H: '#ff4fd8', V: '#c4a7ff', B: '#fff59d' } as const;
+const WIFI_NAME = { L: 'legacy', H: '11n', V: '11ac', B: '11b' } as const;
+// other signals share one colour (aquamarine); the hover names their kind
+export const OTHER_COLOUR = '#7fffd4';
+const OTHER_NAME = { T: 'Bluetooth', N: 'narrowband', M: 'microwave oven', E: 'BLE advertising', C: 'steady carrier' } as const;
+// video line rates (kHz: PAL/NTSC, 480p, 1080i/p30, 720p50, 800x600, 720p60, 1024x768, 1080p50,
+// 1280x1024, 1080p60, 1440p60, 4K60): a steady carrier with a comb at one of these is most likely a
+// display's pixel clock harmonic
+const LINE_RATES = [15.625, 15.734, 31.469, 33.75, 37.5, 37.879, 45, 48.363, 56.25, 63.981, 67.5, 88.8, 135];
+// a mark on the waterfall: a Wi-Fi frame, or another signal in the same shape (rate and length 0)
+type Mark = [t: number, mhz: number, bw: number, fmt: WifiFrame[3] | OtherSignal[3], rate: number, len: number, us: number, snr: number,
+  ta?: string | null, bssid?: string | null, ssid?: string | null, ch?: number];
+const isWifiFmt = (k: Mark[3]): k is WifiFrame[3] => k in WIFI_NAME;
+const isWifi = (m: Mark) => isWifiFmt(m[3]);
 // A view on a stitched axis.
 export type Source = {
   lo: number; hi: number;       // the span it shows (Hz)
@@ -82,8 +95,8 @@ export class Display {
   // frames kept for the hover readout
   private rowT: { t: number; lo: number; hi: number } [] = [];
   private rowNo = 0;
-  private wifiPending: WifiFrame[] = [];
-  private wifiKept: { f: WifiFrame; row: number }[] = [];
+  private wifiPending: Mark[] = [];
+  private wifiKept: { f: Mark; row: number }[] = [];
   private wifiNames = new Map<string, string>(); // BSSID -> network name, from the beacons seen here
   private hover: number | null = null; // CSS x
   private hoverWfY = -1;               // CSS y over the waterfall (-1: over the spectrum)
@@ -624,9 +637,15 @@ export class Display {
 
   // Wi-Fi frames found in this view's samples: each on the row whose time covers its start (frames come
   // a little after their rows, so most land a few rows down)
-  addWifi(frames: WifiFrame[]) {
+  addWifi(frames: WifiFrame[], other: OtherSignal[] = []) {
     if (!this.opts.wifi || this.opts.stitch || this.opts.dim) return; // (stopped: the picture is kept as it was)
-    for (const f of frames) {
+    // (a BLE advertiser's address and name ride where a Wi-Fi frame's sender and network name do)
+    const marks: Mark[] = [
+      ...frames,
+      // (a steady carrier's comb rides in the rate slot)
+      ...other.map((o): Mark => [o[0], o[1], o[2], o[3], o[8] ?? 0, 0, o[4], 0, o[5] ? `${o[5]}${o[6] ? ' (random)' : ''}` : null, null, o[7] ?? null]),
+    ];
+    for (const f of marks) {
       if (f[9] && f[10] != null && (f[10] || !this.wifiNames.has(f[9]))) {
         if (!this.wifiNames.has(f[9]) && this.wifiNames.size >= 300) this.wifiNames.delete(this.wifiNames.keys().next().value!);
         this.wifiNames.set(f[9], f[10] || '(hidden)');
@@ -643,10 +662,11 @@ export class Display {
     if (this.wifiPending.length > 2000) this.wifiPending.splice(0, this.wifiPending.length - 2000);
   }
 
-  // A mark at the centre of the frame's channel, on its row, in that row's own span: OFDM leaves its
-  // centre subcarrier empty, so the mark hides none of the signal; a dark pixel on each side keeps it
-  // visible on any waterfall colour. Rows of marks show the channel's activity.
-  private wifiMark(f: WifiFrame, y: number) {
+  // A mark at the centre of the frame's channel, on its row, in that row's own span (OFDM leaves its
+  // centre subcarrier empty, so there it hides none of the signal; an 802.11b mark does cover a little);
+  // a dark pixel on each side keeps it visible on any waterfall colour. Rows of marks show the
+  // channel's activity.
+  private wifiMark(f: Mark, y: number) {
     const rg = this.rowT[y];
     if (!rg || rg.hi <= rg.lo) return; // a separator line: no span
     const hz = f[1] * 1e6;
@@ -661,24 +681,31 @@ export class Display {
     };
     c.fillStyle = '#0b0e13';
     box(x - 5 * d, x + 5 * d);
-    c.fillStyle = WIFI_COLOUR[f[3]] ?? WIFI_COLOUR.L;
+    const fmt = f[3];
+    c.fillStyle = isWifiFmt(fmt) ? WIFI_COLOUR[fmt] : OTHER_COLOUR;
     box(x - 4 * d, x + 4 * d);
     this.wifiKept.push({ f, row: this.rowNo - y });
     if (this.wifiKept.length > 4000 && this.wifiKept[0].row < this.rowNo - this.wf.height)
       this.wifiKept = this.wifiKept.filter((k) => k.row >= this.rowNo - this.wf.height); // off the picture
   }
 
-  // The Wi-Fi frames under the pointer: on that row (+-2) and covering that frequency
+  // The Wi-Fi frames and other signals under the pointer: on that row (+-2) and covering that frequency
   private wifiAt(f: number, rowsAgo: number): string | null {
     const row = this.rowNo - rowsAgo;
-    const hit = this.wifiKept.filter((k) => Math.abs(k.row - row) <= 2 && Math.abs(f - k.f[1] * 1e6) <= (k.f[2] / 2) * 1e6);
-    if (!hit.length) return null;
+    const near = this.wifiKept.filter((k) => Math.abs(k.row - row) <= 2 && Math.abs(f - k.f[1] * 1e6) <= (k.f[2] / 2) * 1e6);
+    const hit = near.filter((k) => isWifi(k.f)), oth = near.filter((k) => !isWifi(k.f));
+    const other = this.otherText(oth.map((k) => k.f));
+    if (!hit.length) return other;
     const by: Record<string, number> = {};
-    for (const k of hit) by[WIFI_NAME[k.f[3]]] = (by[WIFI_NAME[k.f[3]]] ?? 0) + 1;
-    // (11n/ac frames carry 6 Mb/s in their legacy header whatever their real rate: legacy rates only)
-    const rates = hit.filter((k) => k.f[3] === 'L').map((k) => k.f[4]), snr = hit.map((k) => k.f[7]).sort((a, b) => a - b);
+    for (const k of hit) {
+      const fmt = k.f[3];
+      if (isWifiFmt(fmt)) by[WIFI_NAME[fmt]] = (by[WIFI_NAME[fmt]] ?? 0) + 1;
+    }
+    // (11n/ac frames carry 6 Mb/s in their legacy header whatever their real rate: legacy and 11b rates only)
+    const rates = hit.filter((k) => k.f[3] === 'L' || k.f[3] === 'B').map((k) => (k.f[3] === 'B' && k.f[4] === 5 ? 5.5 : k.f[4]));
+    const snr = hit.map((k) => k.f[7]).sort((a, b) => a - b);
     const kinds = Object.entries(by).map(([k, n]) => `${k} ${n}`).join(', ');
-    const rate = !rates.length ? '' : Math.min(...rates) === Math.max(...rates) ? ` · legacy ${rates[0]} Mb/s` : ` · legacy ${Math.min(...rates)}–${Math.max(...rates)} Mb/s`;
+    const rate = !rates.length ? '' : Math.min(...rates) === Math.max(...rates) ? ` · ${rates[0]} Mb/s` : ` · ${Math.min(...rates)}–${Math.max(...rates)} Mb/s`;
     const chans: Record<string, number> = {};
     for (const k of hit) chans[`${k.f[1].toFixed(0)} MHz${k.f[2] > 20 ? ` (${k.f[2]} MHz)` : ''}`] = (chans[`${k.f[1].toFixed(0)} MHz${k.f[2] > 20 ? ` (${k.f[2]} MHz)` : ''}`] ?? 0) + 1;
     const ch = Object.entries(chans).sort((a, b) => b[1] - a[1]).map(([k]) => k).join(' / ');
@@ -686,7 +713,23 @@ export class Display {
     const from: Record<string, number> = {};
     for (const k of hit) if (k.f[8]) from[this.wifiNames.get(k.f[8]) ?? k.f[8]] = (from[this.wifiNames.get(k.f[8]) ?? k.f[8]] ?? 0) + 1;
     const who = Object.entries(from).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k]) => k);
-    return `Wi-Fi ${ch}: ${hit.length} frame${hit.length > 1 ? 's' : ''} (${kinds})${rate} · SNR ${snr[snr.length >> 1].toFixed(0)} dB${who.length ? ` · from ${who.join(', ')}` : ''}`;
+    return `Wi-Fi ${ch}: ${hit.length} frame${hit.length > 1 ? 's' : ''} (${kinds})${rate} · SNR ${snr[snr.length >> 1].toFixed(0)} dB${who.length ? ` · from ${who.join(', ')}` : ''}${other ? ` · ${other}` : ''}`;
+  }
+
+  // e.g. "Bluetooth 3, narrowband 1 · 2426 MHz · 366 µs"
+  private otherText(ms: Mark[]): string | null {
+    if (!ms.length) return null;
+    const by: Record<string, number> = {};
+    for (const m of ms) by[OTHER_NAME[m[3] as OtherSignal[3]]] = (by[OTHER_NAME[m[3] as OtherSignal[3]]] ?? 0) + 1;
+    const kinds = Object.entries(by).map(([k, n]) => (k === OTHER_NAME.M || k === OTHER_NAME.C ? k : `${k} ${n}`)).join(', ');
+    const bursts = ms.filter((m) => m[3] !== 'M' && m[3] !== 'C');
+    const comb = ms.find((m) => m[3] === 'C' && m[4] > 0)?.[4] ?? 0;
+    const video = comb > 0 && LINE_RATES.some((r) => Math.abs(comb - r) < 0.02 * r);
+    const combText = comb > 0 ? ` · comb ${comb.toFixed(1)} kHz${video ? ': a video line rate, likely a display\'s clock harmonic (HDMI/DP)' : ''}` : '';
+    const mhz = ms.map((m) => m[1]).sort((a, b) => a - b), us = bursts.map((m) => m[6]).sort((a, b) => a - b);
+    // BLE advertisers: a name when they send one, else the address
+    const ble = [...new Set(ms.filter((m) => m[3] === 'E').map((m) => (m[10] ? `“${m[10]}” ${m[8]}` : m[8])))].slice(0, 2);
+    return `${kinds} · ${mhz[mhz.length >> 1].toFixed(comb > 0 || ms.some((m) => m[3] === 'C') ? 3 : 0)} MHz${us.length ? ` · ${us[us.length >> 1].toFixed(0)} µs` : ''}${ble.length ? ` · ${ble.join(', ')}` : ''}${combText}`;
   }
 
   private drawSpectrum() {
@@ -828,6 +871,27 @@ export class Display {
             c.textBaseline = 'middle';
           }
         }
+        // the adapter's own 40 MHz crystal: its harmonics show as weak steady lines at n x 40 MHz (not at
+        // the centre: DC is removed there)
+        if (lr)
+          for (let n = Math.ceil(rg.lo / 40e6); n * 40e6 < rg.hi; n++) {
+            const hz = n * 40e6;
+            if (Math.abs(hz - mid0) < 1e6 || !Display.onAxis(ax, hz)) continue;
+            const x = Math.round(xOf(hz)) + 0.5;
+            c.strokeStyle = 'rgba(163,174,187,0.55)';
+            c.setLineDash([2 * d, 3 * d]);
+            c.beginPath();
+            c.moveTo(x, ph - 16 * d);
+            c.lineTo(x, ph);
+            c.stroke();
+            c.setLineDash([]);
+            c.font = `${9 * d}px system-ui, sans-serif`;
+            c.textAlign = 'center';
+            c.textBaseline = 'bottom';
+            c.fillStyle = '#8a94a3';
+            c.fillText('spur', x, ph - 17 * d);
+            c.textBaseline = 'middle';
+          }
         // requested frequency, when the hardware centre differs (5 MHz synthesizer grid)
         const m = v.src.marker;
         if (m !== null && Display.onAxis(ax, m) && Math.abs(m - mid0) > (rg.hi - rg.lo) / 200) {
@@ -985,11 +1049,14 @@ export class Display {
           const older = this.hoverWfY >= 0 && this.sepRows >= 0 && wy > this.sepRows;
           const beforeStop = this.hoverWfY >= 0 && (this.opts.dim || (this.stopRows >= 0 && wy > this.stopRows));
           const wifi = this.hoverWfY >= 0 && !older && this.wifiKept.length ? this.wifiAt(f, Math.round(wy)) : null;
+          // on one of the adapter's own lines (n x 40 MHz, within a few pixels)
+          const n40 = Math.round(f / 40e6), spur = Math.abs(f - n40 * 40e6) <= Math.max(2 * r.df, (r.df * r.bins) / 300) && Math.abs(f - (r.f0 + (r.df * r.bins) / 2)) > 1e6
+            ? ` · adapter spur (${n40} × 40 MHz)` : '';
           const txt = older
             ? 'older rows: another frequency/span (see the label at the line)'
             : this.hoverWfY >= 0
-              ? `${this.opts.stitch ? `${SLOT[r.slot]} · ` : ''}${(f / 1e6).toFixed(3)} MHz · ${beforeStop ? 'before Stop' : `${(wy / this.rowsPerS).toFixed(1)} s ago`}${wifi ? ` · ${wifi}` : ''}`
-              : `${this.opts.stitch ? `${SLOT[r.slot]} · ` : ''}${(f / 1e6).toFixed(3)} MHz · avg ${sm[b].toFixed(1)} · peak ${pk[b].toFixed(1)} dBFS`;
+              ? `${this.opts.stitch ? `${SLOT[r.slot]} · ` : ''}${(f / 1e6).toFixed(3)} MHz · ${beforeStop ? 'before Stop' : `${(wy / this.rowsPerS).toFixed(1)} s ago`}${wifi ? ` · ${wifi}` : ''}${spur}`
+              : `${this.opts.stitch ? `${SLOT[r.slot]} · ` : ''}${(f / 1e6).toFixed(3)} MHz · avg ${sm[b].toFixed(1)} · peak ${pk[b].toFixed(1)} dBFS${spur}`;
           c.font = `${12 * d}px system-ui, sans-serif`;
           const tw = c.measureText(txt).width + 12 * d;
           const tx = Math.min(W - tw, x + 8 * d);

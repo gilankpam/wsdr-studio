@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "engine.h"
 #include "usbmode.h"
+#include "signals.h"
 #include "wifi.h"
 
 #include <set>
@@ -669,9 +670,13 @@ json Engine::devices_json(const std::vector<DeviceInfo> &d) {
 // Wi-Fi frames from the samples the DSP thread hands over: found frames go out in batches as
 // {"type":"wifi","frames":[[t, centre MHz, width MHz, format, rate Mb/s, length, airtime us, SNR dB
 // (, sender, BSSID, network name, channel: 6 Mb/s frames decoded whole)]...],
+// "other":[[t, centre MHz, width MHz, kind (T Bluetooth, N narrowband, M microwave oven, E BLE
+// advertising, C steady carrier), us (, E: address, random, name; C: null, null, null, comb kHz)]...],
 // "dropped": banks skipped because this thread fell behind}.
 void Engine::wifi_loop() {
   wifi::Decoder dec;
+  sig::Finder sf; // other signals in the same samples (Bluetooth, narrowband, a microwave oven)
+  std::vector<sig::Burst> other;
   uint32_t gen = ~0u;
   uint64_t next = 0;
   double fs = 0, centre = 0, sent = 0;
@@ -696,16 +701,18 @@ void Engine::wifi_loop() {
         fs = w.fs;
         centre = w.centre;
         dec.reset(fs, centre);
+        sf.reset(fs, centre);
       }
       next = w.seq + 1;
       dec.feed(w.x.data(), w.x.size(), w.t_end, found);
+      sf.feed(w.x.data(), w.x.size(), w.t_end, other);
       std::lock_guard<std::mutex> l(_wm);
       if (_wpool.size() < 8)
         _wpool.push_back(std::move(w.x));
     }
     const double now = now_s();
     const uint64_t d = _wifi_dropped.load();
-    if ((!found.empty() || d != dropped) && (now - sent > 0.2 || found.size() > 400)) {
+    if ((!found.empty() || !other.empty() || d != dropped) && (now - sent > 0.2 || found.size() > 400)) {
       json arr = json::array();
       auto hex = [](const std::array<uint8_t, 6> &a) {
         char b[18];
@@ -723,12 +730,26 @@ void Engine::wifi_loop() {
         }
         arr.push_back(e);
       }
+      json oth = json::array();
+      for (const auto &o : other) {
+        json e = {std::round(o.t * 1e6) / 1e6, std::round(o.mhz * 100) / 100, std::round(o.bw_mhz * 100) / 100, std::string(1, o.kind),
+                  std::round(o.dur_us)};
+        if (o.kind == 'E') { // a decoded BLE advertisement: who sent it
+          e.push_back(o.addr);
+          e.push_back(o.random);
+          e.push_back(o.name);
+        } else if (o.kind == 'C') { // a steady carrier: the comb around it
+          e.insert(e.end(), {nullptr, nullptr, nullptr, std::round(o.comb_khz * 10) / 10});
+        }
+        oth.push_back(e);
+      }
       try {
-        _cb.event({{"type", "wifi"}, {"frames", arr}, {"dropped", d}});
+        _cb.event({{"type", "wifi"}, {"frames", arr}, {"other", oth}, {"dropped", d}});
       } catch (const std::exception &) {
         // a frame's text the JSON writer refused: this batch is lost, the thread goes on
       }
       found.clear();
+      other.clear();
       dropped = d;
       sent = now;
     }

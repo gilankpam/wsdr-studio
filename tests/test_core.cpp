@@ -19,6 +19,7 @@
 #include "dsp.h"
 #include "protocol.h"
 #include "receiver.h"
+#include "signals.h"
 #include "studio.h"
 #include "wifi.h"
 
@@ -446,6 +447,434 @@ static void test_wifi_frames() {
   }
 }
 
+// An 802.11b beacon (long preamble; payload at 1 Mb/s DBPSK or 2 Mb/s DQPSK; Barker) synthesised at
+// 40 MS/s 10 MHz below the centre: its clock `ppm` off, its carrier `cfo` Hz off, noise of `sigma`, a DC
+// offset `dc`, and (if lead_us) another signal that starts lead_us before it and lasts past it: a
+// strong tone 12 MHz above the centre, or (`inoise`) white noise 8 dB below the frame. With `ack`, an
+// ACK (1 Mb/s, long preamble) follows a SIFS (10 us) after it. Returns the samples; `at` is where the
+// frame starts, `nbytes` its MAC frame's length.
+static std::vector<std::complex<float>> dsss_frame(int rate, size_t pad, double ppm, double cfo, double lead_us, size_t &at, size_t &nbytes,
+                                                   const std::string &ssid, float sigma = 0.05f, float dc = 0, bool inoise = false,
+                                                   bool ack = false) {
+  std::mt19937 rng(11);
+  std::normal_distribution<float> g(0, 1);
+  std::vector<uint8_t> mac = {0x80, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 2, 0x11, 0x22, 0x33, 0x44, 0x55,
+                              2, 0x11, 0x22, 0x33, 0x44, 0x55, 0, 0};
+  for (int i = 0; i < 12; i++)
+    mac.push_back(0); // timestamp, interval, capabilities
+  mac.push_back(0);
+  mac.push_back(static_cast<uint8_t>(ssid.size()));
+  mac.insert(mac.end(), ssid.begin(), ssid.end());
+  mac.insert(mac.end(), {3, 1, 1});
+  while (pad > 0) { // vendor elements to make it longer
+    const size_t l = std::min<size_t>(pad, 200);
+    mac.push_back(221);
+    mac.push_back(static_cast<uint8_t>(l));
+    for (size_t i = 0; i < l; i++)
+      mac.push_back(static_cast<uint8_t>(i * 7));
+    pad -= l;
+  }
+  uint32_t c = 0xFFFFFFFFu;
+  for (uint8_t b : mac) {
+    c ^= b;
+    for (int k = 0; k < 8; k++)
+      c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+  }
+  c ^= 0xFFFFFFFFu;
+  for (int k = 0; k < 4; k++)
+    mac.push_back(static_cast<uint8_t>(c >> (8 * k)));
+  nbytes = mac.size();
+  // the PHY: phases, one per symbol (1 us)
+  const auto ppdu = [](const std::vector<uint8_t> &mac, int rate) {
+  std::vector<uint8_t> bits(128, 1); // SYNC
+  for (int j = 0; j < 16; j++)
+    bits.push_back((0xF3A0 >> j) & 1);
+  const unsigned length_us = static_cast<unsigned>(mac.size() * 8 / static_cast<size_t>(rate));
+  std::vector<uint8_t> hdr;
+  for (int j = 0; j < 8; j++)
+    hdr.push_back(((rate == 1 ? 0x0A : 0x14) >> j) & 1);
+  for (int j = 0; j < 8; j++)
+    hdr.push_back(0);
+  for (int j = 0; j < 16; j++)
+    hdr.push_back((length_us >> j) & 1);
+  unsigned reg = 0xFFFF;
+  for (uint8_t b : hdr) {
+    const unsigned fb = ((reg >> 15) & 1) ^ b;
+    reg = (reg << 1) & 0xFFFF;
+    if (fb)
+      reg ^= 0x1021;
+  }
+  reg ^= 0xFFFF;
+  for (int j = 15; j >= 0; j--)
+    hdr.push_back((reg >> j) & 1);
+  bits.insert(bits.end(), hdr.begin(), hdr.end());
+  const size_t nhead = bits.size();
+  for (uint8_t b : mac)
+    for (int j = 0; j < 8; j++)
+      bits.push_back((b >> j) & 1);
+  // scramble (self-synchronising, seed 1101100)
+  std::vector<uint8_t> sc(bits.size());
+  unsigned st = 0b1101100;
+  for (size_t i = 0; i < bits.size(); i++) {
+    const unsigned o = bits[i] ^ ((st >> 3) & 1) ^ ((st >> 6) & 1);
+    sc[i] = static_cast<uint8_t>(o);
+    st = ((st << 1) | o) & 0x7f;
+  }
+  // phases: one symbol per bit (header), or per two bits at 2 Mb/s (Gray: 00 0, 01 pi/2, 11 pi, 10 3pi/2)
+  std::vector<double> phase;
+  double ph = 0;
+  for (size_t i = 0; i < nhead; i++) {
+    if (sc[i])
+      ph += M_PI;
+    phase.push_back(ph);
+  }
+  for (size_t i = nhead; i < sc.size(); i += static_cast<size_t>(rate)) {
+    if (rate == 1)
+      ph += sc[i] ? M_PI : 0;
+    else
+      ph += sc[i] ? (sc[i + 1] ? M_PI : 1.5 * M_PI) : (sc[i + 1] ? 0.5 * M_PI : 0);
+    phase.push_back(ph);
+  }
+  return phase;
+  };
+  static const int barker[11] = {1, -1, 1, 1, -1, 1, 1, 1, -1, -1, -1};
+  const double fs = 40e6, off = -10e6;
+  std::vector<std::complex<float>> x;
+  const std::complex<float> dco(dc, -0.7f * dc);
+  auto noise = [&] { return std::complex<float>(sigma * g(rng), sigma * g(rng)) + dco; };
+  auto other = [&](size_t i) {
+    return inoise ? std::complex<float>(0.14f * g(rng), 0.14f * g(rng)) : std::polar(0.5f, static_cast<float>(2 * M_PI * 12e6 * static_cast<double>(i) / fs));
+  };
+  const size_t lead = static_cast<size_t>(lead_us * 40);
+  bool on = false; // the other signal, once started, lasts to the end
+  for (size_t i = 0; i < 20000; i++) {
+    on = on || 20000 - i <= lead;
+    x.push_back(noise() + (on ? other(i) : std::complex<float>(0)));
+  }
+  at = x.size();
+  const auto put = [&](const std::vector<double> &phase) {
+    const size_t a0 = x.size();
+    const double frame_s = static_cast<double>(phase.size()) * 1e-6 / (1 + ppm * 1e-6);
+    for (size_t n = 0; static_cast<double>(n) / fs < frame_s; n++) {
+      const double t = static_cast<double>(n) / fs, u = t * 1e6 * (1 + ppm * 1e-6); // in the sender's microseconds
+      const size_t k = std::min(phase.size() - 1, static_cast<size_t>(u));
+      const int chip = barker[std::min(10, static_cast<int>((u - static_cast<double>(k)) * 11))];
+      const double tt = static_cast<double>(a0 - at + n) / fs;
+      x.push_back(static_cast<float>(chip) * 0.5f * std::polar(1.f, static_cast<float>(phase[k] + 2 * M_PI * (off + cfo) * tt)) + noise() +
+                  (on ? other(x.size()) : std::complex<float>(0)));
+    }
+  };
+  put(ppdu(mac, rate));
+  if (ack) { // a SIFS, then an ACK to 02:11:22:33:44:55
+    for (int i = 0; i < 400; i++)
+      x.push_back(noise() + (on ? other(x.size()) : std::complex<float>(0)));
+    std::vector<uint8_t> a = {0xd4, 0, 0, 0, 2, 0x11, 0x22, 0x33, 0x44, 0x55};
+    uint32_t ca = 0xFFFFFFFFu;
+    for (uint8_t b : a) {
+      ca ^= b;
+      for (int k = 0; k < 8; k++)
+        ca = ca & 1 ? 0xEDB88320u ^ (ca >> 1) : ca >> 1;
+    }
+    ca ^= 0xFFFFFFFFu;
+    for (int k = 0; k < 4; k++)
+      a.push_back(static_cast<uint8_t>(ca >> (8 * k)));
+    put(ppdu(a, 1));
+  }
+  for (int i = 0; i < 40000; i++)
+    x.push_back(noise() + (on ? other(x.size()) : std::complex<float>(0)));
+  return x;
+}
+
+static void test_dsss_beacon() {
+  struct Case { int rate; size_t pad; double ppm, cfo, lead; float sigma, dc; bool inoise, ack; };
+  const Case cases[] = {
+      {1, 0, 0, 50e3, 0, 0.05f, 0, false, false},      // plain
+      {1, 450, 20, 50e3, 0, 0.05f, 0, false, false},   // a 500-byte frame, clocks 20 ppm apart (timing tracked)
+      {2, 300, -20, 100e3, 0, 0.05f, 0, false, false}, // 2 Mb/s DQPSK with a 100 kHz offset (removed)
+      {1, 0, 0, 50e3, 300, 0.05f, 0, false, false},    // a tone on the air from 300 us before it
+      {1, 0, 0, 50e3, 300, 0.05f, 0, true, false},     // noise 8 dB below it, from 300 us before it
+      {1, 0, 0, 50e3, 0, 0.2f, 0, false, false},       // weak (~4 dB over the noise in 40 MHz)
+      {1, 0, 0, 50e3, 0, 0.05f, 0.05f, false, false},  // the adapter's DC offset
+      {1, 0, 0, 50e3, 0, 0.05f, 0, false, true},       // its ACK a SIFS later (two frames)
+      {1, 0, 0, 50e3, 300, 0.05f, 0, false, true},     // both under a tone that holds the detector on
+  };
+  for (const auto &cs : cases) {
+    size_t at = 0, nbytes = 0;
+    const auto x = dsss_frame(cs.rate, cs.pad, cs.ppm, cs.cfo, cs.lead, at, nbytes, "test-ssid", cs.sigma, cs.dc, cs.inoise, cs.ack);
+    const double fs = 40e6;
+    wifi::Decoder dec;
+    dec.reset(fs, 2422e6);
+    std::vector<wifi::Frame> got;
+    for (size_t i = 0; i < x.size(); i += 8192) {
+      const size_t n = std::min<size_t>(8192, x.size() - i);
+      dec.feed(&x[i], n, static_cast<double>(i + n) / fs, got);
+    }
+    int b = 0, whole = 0, acks = 0;
+    for (const auto &f : got) {
+      if (f.fmt != 'B')
+        continue;
+      if (cs.ack && f.length == 14) { // the ACK: no sender, from the 2nd frame's place
+        acks += f.mac && f.type == 1 && f.subtype == 13 && !f.has_ta;
+        continue;
+      }
+      b++;
+      whole += f.mac;
+      CHECK(f.rate_mbps == cs.rate && f.length == static_cast<int>(nbytes));
+      CHECK(std::abs(f.centre_hz - 2412e6) < 1);
+      CHECK(f.mac && f.beacon && f.ssid == "test-ssid" && f.channel == 1);
+      CHECK(std::abs(f.t - static_cast<double>(at) / fs) < 3e-6);
+      CHECK(f.snr_db > (cs.sigma > 0.1f ? 5 : 10));
+    }
+    CHECK(b == 1);
+    CHECK(acks == (cs.ack ? 1 : 0));
+    if (b != 1 || whole != 1 || acks != (cs.ack ? 1 : 0))
+      std::printf("  (802.11b case: %d Mb/s, %zu bytes, %g ppm, %g Hz, lead %g us%s, sigma %g, dc %g, ack %d: %d frames, %d whole, %d acks)\n", cs.rate,
+                  nbytes, cs.ppm, cs.cfo, cs.lead, cs.inoise ? " (noise)" : "", cs.sigma, cs.dc, cs.ack, b, whole, acks);
+  }
+}
+
+// Signals other than Wi-Fi, at 40 MS/s around 2422 MHz (2452 for the oven): Bluetooth's hops,
+// a device fixed on one frequency, a microwave oven, and Wi-Fi switching with the same rhythm (not an
+// oven).
+static void test_signals() {
+  std::mt19937 rng(5);
+  std::normal_distribution<float> g(0, 1);
+  std::uniform_int_distribution<int> bit(0, 1);
+  const double fs = 40e6;
+  auto run = [&](double centre, const std::vector<std::complex<float>> &x) {
+    sig::Finder f;
+    f.reset(fs, centre);
+    std::vector<sig::Burst> out;
+    for (size_t i = 0; i < x.size(); i += 8192) {
+      const size_t n = std::min<size_t>(8192, x.size() - i);
+      f.feed(&x[i], n, static_cast<double>(i + n) / fs, out);
+    }
+    return out;
+  };
+  auto noise = [&](std::vector<std::complex<float>> &x, size_t n) {
+    for (size_t i = 0; i < n; i++)
+      x.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  };
+  // GFSK-like bursts (1 Mb/s, +-250 kHz), 366 us (one slot), every 1250 us, on `chans` (MHz) in turn
+  auto bursts = [&](const std::vector<double> &chans, double centre) {
+    std::vector<std::complex<float>> x;
+    noise(x, 800000); // 20 ms (the finder reports nothing for its first ~13 ms)
+    double ph = 0;
+    for (double c : chans) {
+      const size_t n0 = x.size();
+      int b = 0;
+      for (size_t i = 0; i < 14640; i++) { // 366 us
+        if (i % 40 == 0)
+          b = bit(rng);
+        ph = std::remainder(ph + 2 * M_PI * ((c * 1e6 - centre) + (b ? 250e3 : -250e3)) / fs, 2 * M_PI);
+        x.push_back(std::polar(0.3f, static_cast<float>(ph)) + std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+      }
+      noise(x, 50000 - (x.size() - n0)); // to 1250 us
+    }
+    noise(x, 40000);
+    return x;
+  };
+  {
+    std::vector<double> hop;
+    for (int k = 0; k < 24; k++)
+      hop.push_back(2404 + (k * 13) % 35); // 2404..2438
+    const auto got = run(2422e6, bursts(hop, 2422e6));
+    int t = 0, near = 0;
+    for (const auto &b : got) {
+      t += b.kind == 'T';
+      near += std::abs(b.dur_us - 366) < 25 && b.bw_mhz <= 2.5;
+    }
+    CHECK(got.size() == hop.size());
+    CHECK(t >= 20 && near >= 20); // (the first few are only "narrowband": not yet seen hopping)
+  }
+  {
+    const auto got = run(2422e6, bursts(std::vector<double>(24, 2433), 2422e6));
+    int n = 0;
+    for (const auto &b : got)
+      n += b.kind == 'N' && std::abs(b.mhz - 2433) < 0.5;
+    CHECK(n == 24 && got.size() == 24);
+  }
+  // an oven: a carrier wobbling +-3 MHz around 2455 MHz, on 10 ms of every 20 ms, for 1 s
+  {
+    std::vector<std::complex<float>> x;
+    double ph = 0;
+    for (size_t i = 0; i < 40000000; i++) {
+      const double t = static_cast<double>(i) / fs;
+      const bool on = std::fmod(t, 0.02) < 0.01;
+      ph = std::remainder(ph + 2 * M_PI * (3e6 + 3e6 * std::sin(2 * M_PI * 700 * t)) / fs, 2 * M_PI);
+      x.push_back((on ? std::polar(0.5f, static_cast<float>(ph)) : std::complex<float>(0)) +
+                  std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+    }
+    const auto got = run(2452e6, x);
+    int m = 0, other = 0;
+    for (const auto &b : got) {
+      if (b.kind == 'M') {
+        m++;
+        CHECK(b.mhz > 2451 && b.mhz < 2459);
+      } else {
+        other++;
+      }
+    }
+    CHECK(m >= 4 && other == 0); // (5 windows; the first has the warm-up in it)
+    if (m < 4 || other)
+      std::printf("  (oven: %d windows tagged, %d other bursts)\n", m, other);
+  }
+  // a carrier switched on and off at 67.5 kHz (a 1080p60 display's line rate) at 5773.1 MHz, centre
+  // 5770: a steady carrier with that comb; a steady line at 5760 MHz (n x 40 MHz: the adapter's own
+  // crystal) is not reported
+  {
+    std::vector<std::complex<float>> x;
+    double ph = 0, ph2 = 0;
+    for (size_t i = 0; i < 40000000; i++) {
+      ph = std::remainder(ph + 2 * M_PI * 3.1e6 / fs, 2 * M_PI);
+      ph2 = std::remainder(ph2 + 2 * M_PI * -10e6 / fs, 2 * M_PI);
+      const bool on = std::fmod(static_cast<double>(i) / fs * 67.5e3, 1.0) < 0.3;
+      x.push_back((on ? std::polar(0.05f, static_cast<float>(ph)) : std::complex<float>(0)) + std::polar(0.03f, static_cast<float>(ph2)) +
+                  std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+    }
+    const auto got = run(5770e6, x);
+    int c = 0, wrong = 0;
+    for (const auto &b : got) {
+      if (b.kind != 'C')
+        continue;
+      if (std::abs(b.mhz - 5773.1) < 0.01 && std::abs(b.comb_khz - 67.5) < 1)
+        c++;
+      else
+        wrong++;
+    }
+    CHECK(c >= 3 && wrong == 0);
+    if (c < 3 || wrong)
+      std::printf("  (carrier: %d right, %d wrong of %zu)\n", c, wrong, got.size());
+    // the same carrier at 20 MS/s (half the samples a window: the comb must still come out right)
+    std::vector<std::complex<float>> h;
+    for (size_t i = 0; i < x.size(); i += 2)
+      h.push_back(x[i]);
+    sig::Finder f20;
+    f20.reset(20e6, 5770e6);
+    std::vector<sig::Burst> o20;
+    for (size_t i = 0; i < h.size(); i += 8192) {
+      const size_t n = std::min<size_t>(8192, h.size() - i);
+      f20.feed(&h[i], n, static_cast<double>(i + n) / 20e6, o20);
+    }
+    int c20 = 0, w20 = 0;
+    for (const auto &b : o20)
+      if (b.kind == 'C')
+        (std::abs(b.mhz - 5773.1) < 0.01 && std::abs(b.comb_khz - 67.5) < 1 ? c20 : w20)++;
+    CHECK(c20 >= 2 && w20 == 0); // (1 s: about three windows past the 3-of-4 rule)
+    if (c20 < 2 || w20)
+      std::printf("  (carrier at 20 MS/s: %d right, %d wrong)\n", c20, w20);
+  }
+  // Wi-Fi frames (6 Mb/s, ~1.5 ms each) back to back for 10 ms of every 20: loud and switching like
+  // an oven, but 20 MHz wide: no oven, no narrow bursts
+  {
+    std::vector<std::complex<float>> x;
+    while (x.size() < 30000000) {
+      const size_t n0 = x.size();
+      while (x.size() - n0 < 400000) {
+        const auto fr = ofdm_frame(0b1101, 1100, -10e6, false, 0, rng);
+        for (const auto &v : fr)
+          x.push_back(v * 8.9f + std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+        noise(x, 640); // 16 us
+      }
+      noise(x, 800000 - (x.size() - n0));
+    }
+    const auto got = run(2422e6, x);
+    CHECK(got.empty());
+    if (!got.empty())
+      std::printf("  (Wi-Fi: %zu bursts, first '%c' %.1f MHz %.0f us)\n", got.size(), got[0].kind, got[0].mhz, got[0].dur_us);
+  }
+}
+
+// A BLE advertisement (ADV_IND from a random address c0:ff:ee:12:34:56 with the name "test-ble"),
+// GFSK (BT 0.5, +-250 kHz) on channel 38 (2426 MHz) 40 kHz off, at 40 MS/s around 2422 MHz: decoded.
+static void test_ble() {
+  std::mt19937 rng(9);
+  std::normal_distribution<float> g(0, 1);
+  const std::string name = "test-ble";
+  std::vector<uint8_t> pdu = {0x40, 0, 0x56, 0x34, 0x12, 0xee, 0xff, 0xc0, 2, 0x01, 0x06, static_cast<uint8_t>(name.size() + 1), 0x09};
+  pdu.insert(pdu.end(), name.begin(), name.end());
+  pdu[1] = static_cast<uint8_t>(pdu.size() - 2);
+  std::vector<uint8_t> bits;
+  for (uint8_t b : pdu)
+    for (int j = 0; j < 8; j++)
+      bits.push_back((b >> j) & 1);
+  unsigned reg = 0x555555; // CRC-24, sent MSB first
+  for (uint8_t b : bits) {
+    const unsigned fb = ((reg >> 23) & 1) ^ b;
+    reg = (reg << 1) & 0xFFFFFF;
+    if (fb)
+      reg ^= 0x00065B;
+  }
+  for (int i = 23; i >= 0; i--)
+    bits.push_back((reg >> i) & 1);
+  for (unsigned i = 0, w = (38 & 0x3F) | 0x40; i < bits.size(); i++) { // whitening
+    bits[i] ^= w & 1;
+    w = (w >> 1) ^ ((w & 1) ? 0x44 : 0);
+  }
+  std::vector<uint8_t> air = {1, 0, 1, 0, 1, 0, 1, 0}; // preamble, then the access address (LSB first)
+  for (int i = 0; i < 32; i++)
+    air.push_back((0x8E89BED6u >> i) & 1);
+  air.insert(air.end(), bits.begin(), bits.end());
+  // GFSK: NRZ at 40 samples a bit through a Gaussian (BT 0.5), the phase integrated
+  const double fs = 40e6;
+  std::vector<double> nrz(air.size() * 40), gs;
+  for (size_t i = 0; i < nrz.size(); i++)
+    nrz[i] = air[i / 40] ? 1 : -1;
+  const double sigma = std::sqrt(std::log(2.0)) / (2 * M_PI * 0.5) * 40;
+  for (int k = -80; k <= 80; k++)
+    gs.push_back(std::exp(-0.5 * k * k / (sigma * sigma)));
+  double gsum = 0;
+  for (double v : gs)
+    gsum += v;
+  std::vector<std::complex<float>> x;
+  for (int i = 0; i < 800000; i++) // 20 ms (the finder's warm-up)
+    x.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  double ph = 0;
+  for (size_t i = 0; i < nrz.size(); i++) {
+    double f = 0;
+    for (size_t k = 0; k < gs.size(); k++) {
+      const long j = static_cast<long>(i) + static_cast<long>(k) - 80;
+      f += gs[k] * (j < 0 ? -1 : j >= static_cast<long>(nrz.size()) ? 1 : nrz[static_cast<size_t>(j)]);
+    }
+    ph = std::remainder(ph + 2 * M_PI * (4e6 + 40e3 + 250e3 * f / gsum) / fs, 2 * M_PI);
+    x.push_back(std::polar(0.3f, static_cast<float>(ph)) + std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+  }
+  for (int i = 0; i < 80000; i++)
+    x.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  sig::Finder f;
+  f.reset(fs, 2422e6);
+  std::vector<sig::Burst> out;
+  for (size_t i = 0; i < x.size(); i += 8192) {
+    const size_t n = std::min<size_t>(8192, x.size() - i);
+    f.feed(&x[i], n, static_cast<double>(i + n) / fs, out);
+  }
+  int e = 0;
+  for (const auto &b : out)
+    if (b.kind == 'E') {
+      e++;
+      CHECK(b.addr == "c0:ff:ee:12:34:56" && b.random && b.name == name && std::abs(b.mhz - 2426) < 0.1);
+    }
+  CHECK(e == 1 && out.size() == 1);
+  if (e != 1 || out.size() != 1)
+    std::printf("  (BLE: %zu reported, %d decoded)\n", out.size(), e);
+  // 10 ms of a carrier on that channel (longer than the samples kept): no packet, no crash
+  std::vector<std::complex<float>> y;
+  for (int i = 0; i < 800000; i++)
+    y.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  for (int i = 0; i < 400000; i++)
+    y.push_back(std::polar(0.3f, static_cast<float>(std::remainder(2 * M_PI * 4e6 * i / fs, 2 * M_PI))) + std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+  for (int i = 0; i < 80000; i++)
+    y.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  f.reset(fs, 2422e6);
+  out.clear();
+  for (size_t i = 0; i < y.size(); i += 8192) {
+    const size_t n = std::min<size_t>(8192, y.size() - i);
+    f.feed(&y[i], n, static_cast<double>(i + n) / fs, out);
+  }
+  for (const auto &b : out)
+    CHECK(b.kind != 'E');
+}
+
 // Network names: whatever bytes a beacon carries, the text is valid UTF-8 the JSON writer accepts.
 static void test_ssid_text() {
   auto t = [](const std::string &b) { return wifi::ssid_text(reinterpret_cast<const uint8_t *>(b.data()), b.size()); };
@@ -488,15 +917,33 @@ static int wifi_scan(const char *path) {
   std::vector<int16_t> raw(2 * 8192);
   std::vector<std::complex<float>> x(8192);
   std::vector<wifi::Frame> got;
+  sig::Finder sf;
+  sf.reset(fs, fc);
+  std::vector<sig::Burst> other;
   uint64_t done = 0;
-  const auto t0 = std::chrono::steady_clock::now();
+  double secs = 0, ssecs = 0;
   while (f.read(reinterpret_cast<char *>(raw.data()), static_cast<std::streamsize>(raw.size() * 2))) {
     for (size_t i = 0; i < 8192; i++)
       x[i] = {raw[2 * i] / 16.f, raw[2 * i + 1] / 16.f};
     done += 8192;
+    const auto t0 = std::chrono::steady_clock::now();
     dec.feed(x.data(), 8192, static_cast<double>(done) / fs, got);
+    const auto t1 = std::chrono::steady_clock::now();
+    sf.feed(x.data(), 8192, static_cast<double>(done) / fs, other);
+    secs += std::chrono::duration<double>(t1 - t0).count();
+    ssecs += std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
   }
-  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::map<std::string, int> kinds;
+  for (const auto &o : other) {
+    char k[64];
+    std::snprintf(k, sizeof k, "%c %.0f MHz %s%s%s", o.kind, o.mhz, o.addr.c_str(), o.random ? " (random)" : "", o.name.empty() ? "" : (" " + o.name).c_str());
+    if (o.kind == 'C')
+      std::snprintf(k, sizeof k, "C %.3f MHz comb %.1f kHz", o.mhz, o.comb_khz);
+    kinds[k]++;
+  }
+  std::printf("other signals (found in %.2f s): %zu\n", ssecs, other.size());
+  for (const auto &[k, n] : kinds)
+    std::printf("  %-14s %d\n", k.c_str(), n);
   std::map<std::string, int> by;
   for (const auto &fr : got) {
     char k[64];
@@ -514,19 +961,23 @@ static int wifi_scan(const char *path) {
     std::snprintf(b, sizeof b, "%02x:%02x:%02x:%02x:%02x:%02x", a[0], a[1], a[2], a[3], a[4], a[5]);
     return std::string(b);
   };
+  int b = 0, bmac = 0;
   for (const auto &fr : got) {
-    if (fr.rate_mbps != 6 || fr.fmt != 'L')
-      continue;
-    six++;
+    if (fr.fmt == 'B') {
+      b++;
+      bmac += fr.mac;
+    } else if (fr.rate_mbps == 6 && fr.fmt == 'L') {
+      six++;
+      mac += fr.mac;
+    }
     if (!fr.mac)
       continue;
-    mac++;
     if (fr.beacon)
       nets["\"" + fr.ssid + "\" " + hex(fr.bssid) + " ch " + std::to_string(fr.channel)]++;
     if (fr.has_ta)
       senders[hex(fr.ta)]++;
   }
-  std::printf("6 Mb/s legacy frames: %d, decoded whole (CRC good): %d\n", six, mac);
+  std::printf("6 Mb/s legacy frames: %d, decoded whole (CRC good): %d; 802.11b frames: %d, whole: %d\n", six, mac, b, bmac);
   for (const auto &[k, n] : nets)
     std::printf("  network %s  x%d\n", k.c_str(), n);
   for (const auto &[k, n] : senders)
@@ -588,6 +1039,9 @@ int main(int argc, char **argv) {
   test_crop();
   test_wifi_frames();
   test_ssid_text();
+  test_dsss_beacon();
+  test_signals();
+  test_ble();
   test_studio_dispatch();
   std::printf(g_fail ? "%d FAILED\n" : "all tests passed\n", g_fail);
   return g_fail ? 1 : 0;

@@ -106,16 +106,31 @@ The window needs at least 1280 × 720.
 - **Spectral Map**: pick the range and how long each step is listened to (120 ms, 250 ms, 1 s) in
   the sidebar. Each channel is heard only while the sweep is on it; the header says how long of how
   often. A click on a channel leaves the map onto it; leaving puts both views back as they were.
-- **Mark Wi-Fi frames** (Display, Single and Compare, 20 and 40 MHz spans): the app finds Wi-Fi frames in
+- **Mark signals** (Display, Single and Compare, 20 and 40 MHz spans): the app finds Wi-Fi frames in
   the samples themselves (their preamble, then the legacy header: rate, length, airtime, and whether
-  it is 802.11n or ac) and marks each on the waterfall at its channel's centre (white legacy, magenta
-  11n, lavender 11ac); hover the waterfall for what was there. Nothing is transmitted; it costs about a
-  third of a CPU core at 40 MS/s. It finds OFDM frames (802.11a/g/n/ac) with a clear preamble;
-  802.11b frames (many 2.4 GHz beacons) and very weak frames get no mark.
-  Frames sent at 6 Mb/s (beacons, ACKs, RTS/CTS) are decoded whole when the signal allows: the band
+  it is 802.11n or ac; at 2.4 GHz also 802.11b) and marks each on the waterfall at its channel's
+  centre (white legacy, magenta 11n, lavender 11ac, pale yellow 11b); hover the waterfall for what was
+  there. Nothing is transmitted; it costs about a
+  third to half of a CPU core at 40 MS/s. Very weak frames get no mark; 802.11b frames need the long
+  preamble (most beacons have it) and are read whole at 1 and 2 Mb/s.
+  Frames sent at 6 Mb/s (beacons, ACKs, RTS/CTS), and 802.11b frames at 1 or 2 Mb/s, are decoded
+  whole when the signal allows: the band
   ruler then names the networks heard on each channel (from their beacons), and the hover names who
   sent the frames under the pointer (other devices' addresses too, often randomised ones). Only
   addresses and network names are read; no payload is kept, nothing is saved.
+  Other signals get an aquamarine mark, named in the hover: narrow bursts (up to 2.5 MHz) are
+  "Bluetooth" when they hop between frequencies and "narrowband" otherwise (wireless mice and
+  keyboards, ...), and a microwave oven is recognised by the span switching on and off with the mains.
+  BLE advertising on the channels inside the span (2402, 2426, 2480 MHz; a 40 MHz span holds at most
+  two) is decoded: the hover shows the advertiser's address (most are random and change) and its name
+  when it sends one.
+  A narrow line that stays on is a "steady carrier"; when evenly spaced lines around it repeat at a
+  video line rate (67.5 kHz for 1080p60, ...) the hover says it is most likely a display's clock
+  harmonic (an HDMI/DisplayPort cable, a monitor or a GPU nearby: they show up as a ladder of such
+  lines across 5 GHz). These are cheap rules, close enough to tag what the waterfall shows; signals at
+  the very edge of the span are missed.
+- **Adapter spurs**: the dongle's own 40 MHz crystal leaves weak steady lines at every multiple of
+  40 MHz; the spectrum marks them "spur" (and the hover says so) so they are not taken for signals.
 - **Keyboard** (? shows the list): ←/→ tune 5 MHz (Shift 20), [ ] span, digits or Enter type a
   frequency, A / B select the view, Space Start/Stop, Ctrl+R record.
 - **Unplugged** while streaming: the view says so, keeps its picture and starts again by itself when

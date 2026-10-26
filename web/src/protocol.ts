@@ -17,13 +17,20 @@ export type Caps = {
 export type RxSettings = { freq: number; rate_sel: number; wide: boolean; agc: boolean; gain_db: number; allow_gapped?: boolean };
 export type DspSettings = { fft: number; rows_per_s: number; paths: 'a' | 'b' | 'ab'; dc_remove: boolean; wifi?: boolean };
 // A Wi-Fi frame found in the samples (the "wifi" event): start (s, the rows' clock), channel centre
-// (MHz), width (MHz), format (L legacy, H 802.11n, V 802.11ac), L-SIG rate (Mb/s), length (bytes),
+// (MHz), width (MHz), format (L legacy OFDM, H 802.11n, V 802.11ac, B 802.11b), L-SIG rate (Mb/s;
+// 802.11b: 1, 2, 5 for 5.5, 11), length (bytes),
 // airtime (us), SNR (dB)
 // A 6 Mb/s frame decoded whole adds its sender's address, and a beacon its network (BSSID, name, channel).
 export type WifiFrame = [
-  t: number, mhz: number, bw: number, fmt: 'L' | 'H' | 'V', rate: number, len: number, us: number, snr: number,
+  t: number, mhz: number, bw: number, fmt: 'L' | 'H' | 'V' | 'B', rate: number, len: number, us: number, snr: number,
   ta?: string | null, bssid?: string | null, ssid?: string | null, ch?: number,
 ];
+// Another signal found in the samples (the "wifi" event's "other"): start (s), centre (MHz), width
+// (MHz), kind (T Bluetooth, N narrowband, M microwave oven, E BLE advertising, C steady carrier),
+// duration (us); a decoded BLE advertisement adds its sender's address, whether it is random, and its
+// name ("" none); a steady carrier the spacing of the comb around it (kHz, 0 none).
+export type OtherSignal = [t: number, mhz: number, bw: number, kind: 'T' | 'N' | 'M' | 'E' | 'C', us: number,
+  addr?: string | null, random?: boolean | null, name?: string | null, comb?: number];
 export type Status = {
   state: string; adapter: string; error: string; t: number; rows: number; ring_dropped: number; dsp_load: number;
   rx?: { state: string; banks: number; restarts: number; channel: number; width: number; centre: number; fs: number; gapped?: boolean; error: string;

@@ -480,6 +480,8 @@ void Decoder::reset(double fs, double centre_hz) {
   _pend.clear();
   _bjobs.clear();
   _din = false;
+  _dloud = _dseg = _bdone = 0;
+  _dc = 0;
   _dsss = centre_hz < 3e9;
   _abs0 = _scan = _abs_end = 0;
   _in = false;
@@ -511,7 +513,28 @@ void Decoder::reset(double fs, double centre_hz) {
 void Decoder::feed(const cf *x, size_t n, double t_end, std::vector<Frame> &out) {
   if (!_dec || _cands.empty())
     return;
+  // the adapters' DC offset (coherent to both detectors) taken out as the samples arrive: each
+  // chunk's mean (from every 32nd sample) moves the estimate (time constant ~100 us at 40 MS/s), which
+  // is subtracted on a ramp from the old value to the new one
+  const size_t b0 = _buf.size();
   _buf.insert(_buf.end(), x, x + n);
+  if (n) {
+    float sr = 0, si = 0;
+    size_t m = 0;
+    for (size_t k = 0; k < n; k += 32, m++) {
+      sr += x[k].real();
+      si += x[k].imag();
+    }
+    const float w = static_cast<float>(static_cast<double>(n) / (static_cast<double>(n) + 4096)), fn = static_cast<float>(n);
+    const cf dc0 = _dc, dc1 = _dc + (cf(sr, si) / static_cast<float>(m) - _dc) * w;
+    const float r0 = dc0.real(), i0 = dc0.imag(), dr = (dc1.real() - r0) / fn, di = (dc1.imag() - i0) / fn;
+    float *b = reinterpret_cast<float *>(_buf.data() + b0); // (on the floats, so the loop vectorises)
+    for (size_t k = 0; k < n; k++) {
+      b[2 * k] -= r0 + dr * static_cast<float>(k);
+      b[2 * k + 1] -= i0 + di * static_cast<float>(k);
+    }
+    _dc = dc1;
+  }
   _abs_end += n;
   _t_end = t_end;
   scan(out);
@@ -534,25 +557,30 @@ void Decoder::scan(std::vector<Frame> &out) {
     p2 += std::norm(at(k + L));
   }
   const uint64_t min_plateau = 50 * static_cast<uint64_t>(_dec), max_plateau = 400 * static_cast<uint64_t>(_dec);
-  // the 802.11b detector: lag 1 us, window 10 us, a term every 2nd sample at 20 MS/s (still coherent;
-  // 100 terms a window), kept in a ring to slide the window
+  // the 802.11b detector: lag 1 us, window 10 us; a term per 0.1 us (the lag product summed over it,
+  // as a unit phasor, to the 4th power: noise gives |mean| ~0.09, an 802.11b frame near 1), 100 terms
+  // a window, kept in a ring to slide the window
   const uint64_t us = 20 * static_cast<uint64_t>(_dec), L2 = us, W2 = 10 * us, S = 2 * static_cast<uint64_t>(_dec), NT = W2 / S;
   std::complex<double> q4 = 0;
-  double r4 = 0;
-  const auto term = [&](uint64_t k, std::complex<float> &z4, float &rr) {
-    const cf z = at(k) * std::conj(at(k + L2));
-    const cf z2 = z * z;
-    z4 = z2 * z2;
-    rr = std::norm(z2);
+  const auto term = [&](uint64_t k) { // (written out: std::complex's product checks for NaN)
+    const cf *p = &_buf[k - _abs0], *q = p + L2;
+    float re = 0, im = 0;
+    for (uint64_t j = 0; j < S; j++) {
+      re += p[j].real() * q[j].real() + p[j].imag() * q[j].imag();
+      im += p[j].imag() * q[j].real() - p[j].real() * q[j].imag();
+    }
+    const float a = re * re + im * im;
+    if (!(a > 0))
+      return cf(0);
+    const float r2 = re * re - im * im, i2 = 2 * re * im, inv = 1 / (a * a); // z^2, then (z^2)^2 / |z|^4
+    return cf((r2 * r2 - i2 * i2) * inv, 2 * r2 * i2 * inv);
   };
   uint64_t tick = 0, slot = 0; // samples to the next term; the ring's oldest term
   if (_dsss) {
     _z4.assign(NT, 0);
-    _r4.assign(NT, 0);
     for (uint64_t j = 0; j < NT; j++) {
-      term(_scan + j * S, _z4[j], _r4[j]);
+      _z4[j] = term(_scan + j * S);
       q4 += std::complex<double>(_z4[j]);
-      r4 += _r4[j];
     }
   }
   for (uint64_t i = _scan; i < limit; i++) {
@@ -579,26 +607,31 @@ void Decoder::scan(std::vector<Frame> &out) {
     }
     if (_dsss && tick-- == 0) { // every S samples: the decision, then the window slides by a term
       tick = S - 1;
-      const double m2 = std::norm(q4), rr2 = r4 * r4; // (|q|/r, squared: on above 0.2, off below 0.1)
-      const bool loud = _noise > 0 && p2 / static_cast<double>(W) > 2 * _noise;
-      if (!_din && m2 > 0.04 * rr2 && loud) {
+      // on above 0.3 while loud; off below 0.12, or after 2 us without power (a frame and its ACK a
+      // SIFS later are two; a spur cannot hold it on)
+      const double m2 = std::norm(q4) / static_cast<double>(NT * NT); // (the mean's magnitude, squared)
+      const bool loud = _noise > 0 && p2 > 2 * _noise * static_cast<double>(W);
+      if (loud)
+        _dloud = i;
+      if (!_din && m2 > 0.3 * 0.3 && loud) {
         _din = true;
-        _dstart = i;
-      } else if (_din && (m2 < 0.01 * rr2 || i - _dstart > 6400 * us)) {
+        _dstart = _dseg = i;
+      } else if (_din && i - _dseg >= 800 * us && m2 >= 0.12 * 0.12 && i - _dloud <= 2 * us) {
+        // still on after 800 us (a tone or spur is coherent too and can hold it on): this part is
+        // probed now (its first ms, so the parts overlap), the next part starts here
+        _bjobs.emplace_back(_dseg > _abs0 + 10 * us ? _dseg - 10 * us : _abs0, i + 330 * us);
+        _dseg = i;
+      } else if (_din && (m2 < 0.12 * 0.12 || i - _dloud > 2 * us)) {
         _din = false;
         // (shorter than the long preamble and header, 192 us: nothing to decode; the window trails
         // the frame's end by 10 us)
         if (i - _dstart >= 190 * us)
-          _bjobs.emplace_back(_dstart > _abs0 + 10 * us ? _dstart - 10 * us : _abs0, i + 10 * us); // (its length
+          _bjobs.emplace_back(_dseg > _abs0 + 10 * us ? _dseg - 10 * us : _abs0, i + 10 * us); // (its length
           // comes from its header: the detector may end early, a collision mid-frame)
       }
-      std::complex<float> z4; // the term at i leaves, the one at i + W2 takes its place
-      float rr;
-      term(i + W2, z4, rr);
+      const cf z4 = term(i + W2); // the term at i leaves, the one at i + W2 takes its place
       q4 += std::complex<double>(z4) - std::complex<double>(_z4[slot]);
-      r4 += static_cast<double>(rr) - _r4[slot];
       _z4[slot] = z4;
-      _r4[slot] = rr;
       if (++slot == NT)
         slot = 0;
     }
@@ -624,7 +657,7 @@ void Decoder::scan(std::vector<Frame> &out) {
     from = std::min(from, p.pos + pre);
   const uint64_t margin = 10 * 20 * static_cast<uint64_t>(_dec); // 10 us
   if (_din) // a frame still going on, and ended ones not yet decoded
-    from = std::min(from, _dstart > margin ? _dstart - margin + pre : pre);
+    from = std::min(from, _dseg > margin ? _dseg - margin + pre : pre);
   for (const auto &b : _bjobs)
     from = std::min(from, b.first + pre);
   const uint64_t keep = from > pre ? from - pre : 0;
@@ -730,18 +763,14 @@ std::vector<cf> Decoder::snippet(uint64_t from, uint64_t len, double off) const 
 }
 
 void Decoder::finish(std::vector<Frame> &out) {
-  for (size_t i = 0; i < _bjobs.size();) {
-    if (_bjobs[i].second + _lp.size() > _abs_end) {
-      i++;
-      continue;
-    }
+  // (in order: a job starts after the frame the one before it decoded, so none is reported twice)
+  while (!_bjobs.empty() && _bjobs.front().second + _lp.size() <= _abs_end) {
     uint64_t need = 0;
-    if (!dsss_at(_bjobs[i].first, _abs_end - _lp.size(), need, out) && need > _bjobs[i].second) {
-      _bjobs[i].second = need; // the rest of the frame is still arriving
-      i++;
-      continue;
+    if (!dsss_at(_bjobs.front().first, _abs_end - _lp.size(), need, out) && need > _bjobs.front().second) {
+      _bjobs.front().second = need; // the rest of the frame is still arriving
+      break;
     }
-    _bjobs.erase(_bjobs.begin() + static_cast<long>(i));
+    _bjobs.erase(_bjobs.begin());
   }
   for (size_t i = 0; i < _pend.size();) {
     auto &p = _pend[i];
@@ -780,6 +809,9 @@ bool Decoder::dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<
   float tmpl[20];
   for (int n = 0; n < 20; n++)
     tmpl[n] = barker[std::min(10, n * 11 / 20)];
+  start = std::max(start, _bdone);
+  if (start + 200 * static_cast<uint64_t>(_fs / 1e6) > end)
+    return true;
   const uint64_t len = end - start;
   const auto mf = [&](const std::vector<cf> &z, size_t m) { // the matched filter at m
     cf acc = 0;
@@ -911,7 +943,7 @@ bool Decoder::dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<
   // the samples the whole frame needs (1 and 2 Mb/s payloads are decoded; CCK: the header is enough)
   const uint64_t psym = sig == 0x0A ? 8 * static_cast<uint64_t>(length_us / 8) : sig == 0x14 ? 4 * static_cast<uint64_t>(length_us / 4) : 0;
   const uint64_t want = start + (static_cast<uint64_t>(ph) + 20 * (h0 + 48 + psym + 2)) * static_cast<uint64_t>(_dec) + _lp.size();
-  if (want > end && want - start < 7000 * us) {
+  if (want > end && want - start < 20000 * us) { // (the longest 1 Mb/s frame: ~19 ms)
     need = want;
     return false;
   }
@@ -967,6 +999,7 @@ bool Decoder::dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<
       parse_mac(by, f);
   }
   out.push_back(f);
+  _bdone = start + static_cast<uint64_t>(std::max(0.0, sync)) * static_cast<uint64_t>(_dec) + static_cast<uint64_t>(f.dur_us) * us;
   return true;
 }
 

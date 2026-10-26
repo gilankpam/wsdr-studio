@@ -444,11 +444,14 @@ static void test_wifi_frames() {
 }
 
 // An 802.11b beacon (long preamble; payload at 1 Mb/s DBPSK or 2 Mb/s DQPSK; Barker) synthesised at
-// 40 MS/s 10 MHz below the centre: its clock `ppm` off, its carrier `cfo` Hz off, noise, and (if lead_us)
-// a strong tone 12 MHz above the centre that starts lead_us before it and lasts past it. Returns the
-// samples; `at` is where the frame starts, `nbytes` its MAC frame's length.
+// 40 MS/s 10 MHz below the centre: its clock `ppm` off, its carrier `cfo` Hz off, noise of `sigma`, a DC
+// offset `dc`, and (if lead_us) another signal that starts lead_us before it and lasts past it: a
+// strong tone 12 MHz above the centre, or (`inoise`) white noise 8 dB below the frame. With `ack`, an
+// ACK (1 Mb/s, long preamble) follows a SIFS (10 us) after it. Returns the samples; `at` is where the
+// frame starts, `nbytes` its MAC frame's length.
 static std::vector<std::complex<float>> dsss_frame(int rate, size_t pad, double ppm, double cfo, double lead_us, size_t &at, size_t &nbytes,
-                                                   const std::string &ssid) {
+                                                   const std::string &ssid, float sigma = 0.05f, float dc = 0, bool inoise = false,
+                                                   bool ack = false) {
   std::mt19937 rng(11);
   std::normal_distribution<float> g(0, 1);
   std::vector<uint8_t> mac = {0x80, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 2, 0x11, 0x22, 0x33, 0x44, 0x55,
@@ -477,6 +480,8 @@ static std::vector<std::complex<float>> dsss_frame(int rate, size_t pad, double 
   for (int k = 0; k < 4; k++)
     mac.push_back(static_cast<uint8_t>(c >> (8 * k)));
   nbytes = mac.size();
+  // the PHY: phases, one per symbol (1 us)
+  const auto ppdu = [](const std::vector<uint8_t> &mac, int rate) {
   std::vector<uint8_t> bits(128, 1); // SYNC
   for (int j = 0; j < 16; j++)
     bits.push_back((0xF3A0 >> j) & 1);
@@ -526,40 +531,71 @@ static std::vector<std::complex<float>> dsss_frame(int rate, size_t pad, double 
       ph += sc[i] ? (sc[i + 1] ? M_PI : 1.5 * M_PI) : (sc[i + 1] ? 0.5 * M_PI : 0);
     phase.push_back(ph);
   }
+  return phase;
+  };
   static const int barker[11] = {1, -1, 1, 1, -1, 1, 1, 1, -1, -1, -1};
   const double fs = 40e6, off = -10e6;
   std::vector<std::complex<float>> x;
-  auto noise = [&] { return std::complex<float>(0.05f * g(rng), 0.05f * g(rng)); };
-  auto tone = [&](size_t i) { return std::polar(0.5f, static_cast<float>(2 * M_PI * 12e6 * static_cast<double>(i) / fs)); };
+  const std::complex<float> dco(dc, -0.7f * dc);
+  auto noise = [&] { return std::complex<float>(sigma * g(rng), sigma * g(rng)) + dco; };
+  auto other = [&](size_t i) {
+    return inoise ? std::complex<float>(0.14f * g(rng), 0.14f * g(rng)) : std::polar(0.5f, static_cast<float>(2 * M_PI * 12e6 * static_cast<double>(i) / fs));
+  };
   const size_t lead = static_cast<size_t>(lead_us * 40);
-  for (size_t i = 0; i < 20000; i++)
-    x.push_back(noise() + (20000 - i <= lead ? tone(i) : std::complex<float>(0)));
+  bool on = false; // the other signal, once started, lasts to the end
+  for (size_t i = 0; i < 20000; i++) {
+    on = on || 20000 - i <= lead;
+    x.push_back(noise() + (on ? other(i) : std::complex<float>(0)));
+  }
   at = x.size();
-  const double frame_s = static_cast<double>(phase.size()) * 1e-6 / (1 + ppm * 1e-6);
-  for (size_t n = 0; static_cast<double>(n) / fs < frame_s; n++) {
-    const double t = static_cast<double>(n) / fs, u = t * 1e6 * (1 + ppm * 1e-6); // in the sender's microseconds
-    const size_t k = std::min(phase.size() - 1, static_cast<size_t>(u));
-    const int chip = barker[std::min(10, static_cast<int>((u - static_cast<double>(k)) * 11))];
-    const size_t i = x.size();
-    x.push_back(static_cast<float>(chip) * 0.5f * std::polar(1.f, static_cast<float>(phase[k] + 2 * M_PI * (off + cfo) * t)) + noise() +
-                (lead ? tone(i) : std::complex<float>(0)));
+  const auto put = [&](const std::vector<double> &phase) {
+    const size_t a0 = x.size();
+    const double frame_s = static_cast<double>(phase.size()) * 1e-6 / (1 + ppm * 1e-6);
+    for (size_t n = 0; static_cast<double>(n) / fs < frame_s; n++) {
+      const double t = static_cast<double>(n) / fs, u = t * 1e6 * (1 + ppm * 1e-6); // in the sender's microseconds
+      const size_t k = std::min(phase.size() - 1, static_cast<size_t>(u));
+      const int chip = barker[std::min(10, static_cast<int>((u - static_cast<double>(k)) * 11))];
+      const double tt = static_cast<double>(a0 - at + n) / fs;
+      x.push_back(static_cast<float>(chip) * 0.5f * std::polar(1.f, static_cast<float>(phase[k] + 2 * M_PI * (off + cfo) * tt)) + noise() +
+                  (on ? other(x.size()) : std::complex<float>(0)));
+    }
+  };
+  put(ppdu(mac, rate));
+  if (ack) { // a SIFS, then an ACK to 02:11:22:33:44:55
+    for (int i = 0; i < 400; i++)
+      x.push_back(noise() + (on ? other(x.size()) : std::complex<float>(0)));
+    std::vector<uint8_t> a = {0xd4, 0, 0, 0, 2, 0x11, 0x22, 0x33, 0x44, 0x55};
+    uint32_t ca = 0xFFFFFFFFu;
+    for (uint8_t b : a) {
+      ca ^= b;
+      for (int k = 0; k < 8; k++)
+        ca = ca & 1 ? 0xEDB88320u ^ (ca >> 1) : ca >> 1;
+    }
+    ca ^= 0xFFFFFFFFu;
+    for (int k = 0; k < 4; k++)
+      a.push_back(static_cast<uint8_t>(ca >> (8 * k)));
+    put(ppdu(a, 1));
   }
   for (int i = 0; i < 40000; i++)
-    x.push_back(noise());
+    x.push_back(noise() + (on ? other(x.size()) : std::complex<float>(0)));
   return x;
 }
 
 static void test_dsss_beacon() {
-  struct Case { int rate; size_t pad; double ppm, cfo, lead; };
+  struct Case { int rate; size_t pad; double ppm, cfo, lead; float sigma, dc; bool inoise, ack; };
   const Case cases[] = {
-      {1, 0, 0, 50e3, 0},      // plain
-      {1, 450, 20, 50e3, 0},   // a 500-byte frame, clocks 20 ppm apart (timing tracked)
-      {2, 300, -20, 100e3, 0}, // 2 Mb/s DQPSK with a 100 kHz offset (removed)
-      {1, 0, 0, 50e3, 300},    // another signal on the air from 300 us before it
+      {1, 0, 0, 50e3, 0, 0.05f, 0, false, false},      // plain
+      {1, 450, 20, 50e3, 0, 0.05f, 0, false, false},   // a 500-byte frame, clocks 20 ppm apart (timing tracked)
+      {2, 300, -20, 100e3, 0, 0.05f, 0, false, false}, // 2 Mb/s DQPSK with a 100 kHz offset (removed)
+      {1, 0, 0, 50e3, 300, 0.05f, 0, false, false},    // a tone on the air from 300 us before it
+      {1, 0, 0, 50e3, 300, 0.05f, 0, true, false},     // noise 8 dB below it, from 300 us before it
+      {1, 0, 0, 50e3, 0, 0.2f, 0, false, false},       // weak (~4 dB over the noise in 40 MHz)
+      {1, 0, 0, 50e3, 0, 0.05f, 0.05f, false, false},  // the adapter's DC offset
+      {1, 0, 0, 50e3, 0, 0.05f, 0, false, true},       // its ACK a SIFS later (two frames)
   };
   for (const auto &cs : cases) {
     size_t at = 0, nbytes = 0;
-    const auto x = dsss_frame(cs.rate, cs.pad, cs.ppm, cs.cfo, cs.lead, at, nbytes, "test-ssid");
+    const auto x = dsss_frame(cs.rate, cs.pad, cs.ppm, cs.cfo, cs.lead, at, nbytes, "test-ssid", cs.sigma, cs.dc, cs.inoise, cs.ack);
     const double fs = 40e6;
     wifi::Decoder dec;
     dec.reset(fs, 2422e6);
@@ -568,22 +604,27 @@ static void test_dsss_beacon() {
       const size_t n = std::min<size_t>(8192, x.size() - i);
       dec.feed(&x[i], n, static_cast<double>(i + n) / fs, got);
     }
-    int b = 0, whole = 0;
+    int b = 0, whole = 0, acks = 0;
     for (const auto &f : got) {
       if (f.fmt != 'B')
         continue;
+      if (cs.ack && f.length == 14) { // the ACK: no sender, from the 2nd frame's place
+        acks += f.mac && f.type == 1 && f.subtype == 13 && !f.has_ta;
+        continue;
+      }
       b++;
       whole += f.mac;
       CHECK(f.rate_mbps == cs.rate && f.length == static_cast<int>(nbytes));
       CHECK(std::abs(f.centre_hz - 2412e6) < 1);
       CHECK(f.mac && f.beacon && f.ssid == "test-ssid" && f.channel == 1);
       CHECK(std::abs(f.t - static_cast<double>(at) / fs) < 3e-6);
-      CHECK(f.snr_db > 10);
+      CHECK(f.snr_db > (cs.sigma > 0.1f ? 5 : 10));
     }
     CHECK(b == 1);
-    if (b != 1 || whole != 1)
-      std::printf("  (802.11b case: %d Mb/s, %zu bytes, %g ppm, %g Hz, lead %g us: %d frames, %d whole)\n", cs.rate, nbytes, cs.ppm, cs.cfo,
-                  cs.lead, b, whole);
+    CHECK(acks == (cs.ack ? 1 : 0));
+    if (b != 1 || whole != 1 || acks != (cs.ack ? 1 : 0))
+      std::printf("  (802.11b case: %d Mb/s, %zu bytes, %g ppm, %g Hz, lead %g us%s, sigma %g, dc %g, ack %d: %d frames, %d whole, %d acks)\n", cs.rate,
+                  nbytes, cs.ppm, cs.cfo, cs.lead, cs.inoise ? " (noise)" : "", cs.sigma, cs.dc, cs.ack, b, whole, acks);
   }
 }
 

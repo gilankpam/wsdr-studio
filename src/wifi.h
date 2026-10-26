@@ -65,18 +65,21 @@ private:
   };
   std::vector<Pending> _pend;
   // 802.11b (2.4 GHz): x[k] * conj(x[k + 1 us]) of a DSSS signal is the same Barker waveform times
-  // a phase step of 0/90/180/270 degrees, so its 4th power adds up coherently over a 10 us window
-  // (OFDM, noise and other channels' traffic do not): that marks each 802.11b frame from its start to
-  // its end, whatever else is on the air; the frame is decoded once it has ended
+  // a phase step of 0/90/180/270 degrees, so (summed over a few samples, as a unit phasor) its 4th
+  // power adds up coherently over a 10 us window, which noise and OFDM do not: that marks each
+  // 802.11b frame from its start while the span is loud; it is decoded once its samples are in
   // decodes the frame from `start` with the samples up to `end`; false: it needs the samples up to
   // `need` (its header gave its length), call again then
   bool dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<Frame> &out);
   bool _dsss = false;           // the span is at 2.4 GHz
   bool _din = false;            // inside an 802.11b frame
   uint64_t _dstart = 0;         // where it started
+  uint64_t _dseg = 0;           // where its current segment started (a long one is probed in parts)
+  uint64_t _bdone = 0;          // the end of the last frame decoded (absolute): later jobs start there
+  uint64_t _dloud = 0;          // the last time (absolute sample) the span was loud
   std::vector<std::complex<float>> _z4; // the window's terms (a ring), to slide it
-  std::vector<float> _r4;
-  std::vector<std::pair<uint64_t, uint64_t>> _bjobs; // frames to decode: start, samples needed first
+  cf _dc = 0;                   // the samples' DC offset (taken out as they arrive)
+  std::vector<std::pair<uint64_t, uint64_t>> _bjobs; // to probe, in order: start, samples needed first
 
   double _fs = 0, _centre = 0;
   int _lag = 0, _win = 0, _dec = 1;

@@ -108,8 +108,8 @@ The window needs at least 1280 × 720.
   often. A click on a channel leaves the map onto it; leaving puts both views back as they were.
 - **Mark Wi-Fi frames** (Display, Single and Compare, 20 and 40 MHz spans): the app finds Wi-Fi frames in
   the samples themselves (their preamble, then the legacy header: rate, length, airtime, and whether
-  it is 802.11n or ac) and marks each on the waterfall at its channel's centre (amber legacy, green
-  11n, pink 11ac); hover the waterfall for what was there. Nothing is transmitted; it costs about a
+  it is 802.11n or ac) and marks each on the waterfall at its channel's centre (white legacy, magenta
+  11n, lavender 11ac); hover the waterfall for what was there. Nothing is transmitted; it costs about a
   third of a CPU core at 40 MS/s. It finds OFDM frames (802.11a/g/n/ac) with a clear preamble;
   802.11b frames (many 2.4 GHz beacons) and very weak frames get no mark.
 - **Keyboard** (? shows the list): ←/→ tune 5 MHz (Shift 20), [ ] span, digits or Enter type a

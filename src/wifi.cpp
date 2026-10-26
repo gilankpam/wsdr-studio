@@ -294,8 +294,6 @@ bool Decoder::decode20(const cf *in, size_t n, Frame &f) {
   f.rate_mbps = rate;
   f.length = len;
   f.dur_us = 20 + 4 * std::ceil((16 + 8.0 * len + 6) / (4.0 * rate));
-  if (f.dur_us > 5484) // longer than any PPDU may be
-    return false;
   f.t = (static_cast<double>(l1) - 232) / 20e6; // the frame's start relative to where it was looked for
   // HT-SIG: two QBPSK symbols; VHT-SIG-A: BPSK then QBPSK (both only after a 6 Mb/s L-SIG)
   f.fmt = 'L';
@@ -497,7 +495,9 @@ void Decoder::frame_at(uint64_t pos_abs, std::vector<Frame> &out) {
   Frame f;
   if (!decode20(z20.data(), z20.size(), f))
     return;
-  f.t += _t_end - static_cast<double>(_abs_end - pos) / _fs; // (decode20 left the offset from pos)
+  // (decode20 left the offset from pos; at 40 MS/s the 41-tap filter delays the snippet by 10 samples
+  // of 20 MS/s)
+  f.t += _t_end - static_cast<double>(_abs_end - pos) / _fs + (_dec == 2 ? 10 / 20e6 : 0);
   f.bw_mhz = forty ? 40 : 20;
   f.centre_hz = forty ? (c + partner(c)) / 2 : c;
   out.push_back(f);

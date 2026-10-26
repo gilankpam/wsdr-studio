@@ -109,6 +109,7 @@ export function Station(p: {
   // not shown, its count since Start would stay forever)
   const [recentFaults, setRecentFaults] = useState(0);
   const [wifiSkipped, setWifiSkipped] = useState(0); // when the Wi-Fi finder last fell behind (ms)
+  const wantWifiRef = useRef(false); // (for the event handler: this window wants Wi-Fi frames found)
   const [hadPicture, setHadPicture] = useState(false);
   // unplugged while running: the adapter (pid, picker key) to start again when it is back
   // gone: a scan has shown it missing; before: the adapters there were when it was lost; tries: restarts
@@ -164,7 +165,8 @@ export function Station(p: {
     let opened: { pid: number; key: string } | null = null; // the adapter of the current run
     let lastRx: RxSettings | null = null;
     let lastRestarts = 0;
-    let wifiDropped = 0;
+    let wifiDropped = -1; // the backend's count is since it started: the first event is the baseline
+    let firstDsp = true;
     let faultTimes: number[] = [];
     let lastPaths = 'a';
     let lastFft = 0;
@@ -260,6 +262,12 @@ export function Station(p: {
                 lastPaths = e.dsp.paths;
               }
               live.current.wifi = !!e.dsp.wifi;
+              // the first settings after connecting: an open view may come up searching while this
+              // window does not want it (or the other way round)
+              if (firstDsp) {
+                firstDsp = false;
+                if (live.current.open && live.current.wifi !== wantWifiRef.current) req('dsp', { wifi: wantWifiRef.current }).catch(() => {});
+              }
               setDsp(e.dsp);
             }
             break;
@@ -305,7 +313,7 @@ export function Station(p: {
             break;
           case 'wifi':
             d.addWifi(e.frames);
-            if (e.dropped > wifiDropped) setWifiSkipped(Date.now()); // the backend fell behind: some samples not searched
+            if (wifiDropped >= 0 && e.dropped > wifiDropped) setWifiSkipped(Date.now()); // the backend fell behind: some samples not searched
             wifiDropped = e.dropped;
             break;
           case 'recorded':
@@ -415,6 +423,7 @@ export function Station(p: {
   // Wi-Fi frames are found in the backend only while this view shows them (its own waterfall: not in
   // Panorama's stitched plot or the map)
   const wantWifi = prefs.wifiMarks && mode !== 'panorama' && mode !== 'map';
+  wantWifiRef.current = wantWifi;
   // (sent when this window's wish changes, not when the setting does: two windows that disagree must
   // not keep switching it back and forth)
   useEffect(() => {

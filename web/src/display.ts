@@ -650,10 +650,14 @@ export class Display {
     const x = L + Math.round(((hz - rg.lo) / (rg.hi - rg.lo)) * w);
     // 8 px of colour with a dark pixel each side, 2 px tall: a busy channel becomes a solid bar
     const c = this.wfCtx, h = Math.min(2 * d, this.wf.height - y);
+    const box = (x0: number, x1: number) => { // clipped to the plot (the gutter does not scroll)
+      const a = Math.max(L, x0), b = Math.min(this.wf.width, x1);
+      if (b > a) c.fillRect(a, y, b - a, h);
+    };
     c.fillStyle = '#0b0e13';
-    c.fillRect(x - 5 * d, y, 10 * d, h);
+    box(x - 5 * d, x + 5 * d);
     c.fillStyle = WIFI_COLOUR[f[3]] ?? WIFI_COLOUR.L;
-    c.fillRect(x - 4 * d, y, 8 * d, h);
+    box(x - 4 * d, x + 4 * d);
     this.wifiKept.push({ f, row: this.rowNo - y });
     if (this.wifiKept.length > 4000 && this.wifiKept[0].row < this.rowNo - this.wf.height)
       this.wifiKept = this.wifiKept.filter((k) => k.row >= this.rowNo - this.wf.height); // off the picture

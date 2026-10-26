@@ -11,10 +11,14 @@ import { fileURLToPath } from 'node:url';
 const repo = fileURLToPath(new URL('../..', import.meta.url));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function startChrome({ root, path = "/", port = 8080, cdpPort = 9333 }) {
+// plain: a static server without COOP/COEP (like GitHub Pages) instead of wasm/serve.mjs.
+export async function startChrome({ root, path = "/", port = 8080, cdpPort = 9333, plain = false }) {
   const profile = process.env.WSDR_CHROME_PROFILE;
   if (!profile) throw new Error('set WSDR_CHROME_PROFILE (a Chrome profile with the adapter paired; see tests/lib/chrome.mjs)');
-  const server = spawn('node', [`${repo}/wasm/serve.mjs`, String(port), `${repo}/${root}`], { stdio: 'ignore' });
+  const server = plain
+    ? spawn('python3', ['-m', 'http.server', String(port), '--bind', '127.0.0.1', '--directory', `${repo}/${root}`], { stdio: 'ignore' })
+    : spawn('node', [`${repo}/wasm/serve.mjs`, String(port), `${repo}/${root}`], { stdio: 'ignore' });
+  await sleep(500);
   const chrome = spawn(process.env.CHROME ?? 'google-chrome-stable',
     [`--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', 'about:blank'],
     { stdio: 'ignore' });

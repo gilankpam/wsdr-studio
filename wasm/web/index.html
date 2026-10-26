@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>wsdr WebUSB probe</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #111; --mut: #666; --line: #ccc; --bad: #b00; --ok: #070; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #ddd; --mut: #999; --line: #333; --bad: #f66; --ok: #6c6; } }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; margin: 16px; max-width: 1100px; }
+  fieldset { border: 1px solid var(--line); margin: 0 0 12px; }
+  label { margin-right: 12px; }
+  input[type=number] { width: 6em; }
+  button { margin: 2px 6px 2px 0; }
+  #env span { margin-right: 14px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  table { border-collapse: collapse; margin: 8px 0; font-variant-numeric: tabular-nums; }
+  th, td { border: 1px solid var(--line); padding: 2px 8px; text-align: right; }
+  pre { border: 1px solid var(--line); padding: 8px; height: 320px; overflow: auto; font-size: 12px; }
+  .mut { color: var(--mut); }
+</style>
+</head>
+<body>
+<h1>wsdr WebUSB probe</h1>
+<p class="mut">The wifi-sdr receive core and devourer, compiled to WebAssembly, driving an 8812BU / 8812CU over WebUSB.
+Close wsdr-studio first (one owner per dongle); on Linux the rtw88 driver must not hold the dongle.</p>
+<div id="env"></div>
+<fieldset>
+  <legend>Setup</legend>
+  <label>Build <select id="mode"><option>jspi</option><option>asyncify</option></select></label>
+  <label>Run in <select id="where"><option value="worker">worker</option><option value="page">page (main thread)</option></select></label>
+  <button id="load">Load</button>
+  <button id="pair">Pair a dongle…</button>
+  <button id="list" disabled>List</button>
+</fieldset>
+<fieldset>
+  <legend>Stream</legend>
+  <label>Adapter <select id="pid"><option value="47122">8812BU (b812)</option><option value="51218">8812CU (c812)</option></select></label>
+  <label>Rate <select id="rate">
+    <option value="5">2.5 MS/s</option><option value="4">5 MS/s</option><option value="3">10 MS/s</option>
+    <option value="2">20 MS/s</option><option value="1">40 MS/s</option></select></label>
+  <label>Seconds <input id="secs" type="number" value="10" min="1"></label>
+  <label>Queued transfers <input id="depth" type="number" value="0" min="0" title="0 = what the app uses (64, or 256 at >= 20 MS/s)"></label>
+  <label>Centre MHz <input id="freq" type="number" value="5190"></label>
+  <label><input id="reset" type="checkbox" checked> USB reset on open</label>
+  <br>
+  <button id="stream" disabled>Stream</button>
+  <button id="sweep" disabled>Every rate (2.5 → 40)</button>
+  <button id="usb3" disabled>Switch 8812BU to USB 3</button>
+</fieldset>
+<table id="results"><thead><tr>
+  <th>build</th><th>where</th><th>fs MS/s</th><th>depth</th><th>got MS/s</th><th>USB MB/s</th><th>banks</th>
+  <th>stale</th><th>retries</th><th>late max µs</th><th>end max µs</th><th>period µs</th><th>bring-up s</th><th>error</th>
+</tr></thead><tbody></tbody></table>
+<p class="mut">"got MS/s" below "fs" or an error (framing / deadline / timeout) means the browser did not keep up.
+"end max" must stay below the bank period: past it the chip overwrote the bank before it was shipped.</p>
+<pre id="log"></pre>
+<script type="module">
+import { env, loadProbe } from './probe-host.js';
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+function log(s, cls) {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = s;
+  logEl.append(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function showEnv(where, e) {
+  const f = (k, v) => `<span class="${v ? 'ok' : 'bad'}">${k}: ${v ? 'yes' : 'no'}</span>`;
+  $('env').innerHTML += `<div>${where}: ${f('WebUSB', e.usb)}${f('cross-origin isolated', e.crossOriginIsolated)}${f('JSPI', e.jspi)}</div>`;
+}
+showEnv('page', env());
+
+let call = null, mode = 'jspi', where = 'worker', lastOpen = null;
+function onLine(m) {
+  if (m.err !== undefined) return log(m.err, 'mut');
+  const l = m.out;
+  log(l);
+  let j;
+  try { j = JSON.parse(l); } catch { return; }
+  if (j.ev === 'open' && j.ok) lastOpen = j;
+  if (j.ev === 'stream') addResult(j);
+}
+function addResult(j) {
+  const tr = document.createElement('tr');
+  const cells = [mode, where, j.fs_msps.toFixed(1) + (j.gapped ? ' gapped' : ''), j.depth, j.msps.toFixed(2), j.usb_mbs.toFixed(0),
+    j.banks, j.stale, j.start_retries, j.late_max_us.toFixed(0), j.end_max_us.toFixed(0), j.period_us.toFixed(0),
+    lastOpen ? lastOpen.bringup_s.toFixed(1) : '', j.error];
+  for (const c of cells) { const td = document.createElement('td'); td.textContent = c; tr.append(td); }
+  if (j.error) tr.className = 'bad';
+  $('results').tBodies[0].append(tr);
+}
+
+$('load').onclick = async () => {
+  mode = $('mode').value; where = $('where').value;
+  log(`loading ${mode} build in the ${where}…`, 'mut');
+  if (where === 'page') {
+    call = await loadProbe(mode, onLine);
+  } else {
+    const w = new Worker(`./worker.js?mode=${mode}`, { type: 'module' });
+    const pending = new Map();
+    let id = 0;
+    await new Promise((resolve, reject) => {
+      w.onmessage = ({ data: m }) => {
+        if (m.env) return showEnv('worker', m.env);
+        if (m.ready) return resolve();
+        if (m.fatal) { log(m.fatal, 'bad'); return reject(new Error(m.fatal)); }
+        if (m.id !== undefined) {
+          const p = pending.get(m.id); pending.delete(m.id);
+          return m.error ? p.reject(new Error(m.error)) : p.resolve(m.rc);
+        }
+        onLine(m);
+      };
+    });
+    call = (cmd, args = []) => new Promise((resolve, reject) => {
+      pending.set(++id, { resolve, reject });
+      w.postMessage({ id, cmd, args });
+    });
+  }
+  log('loaded', 'ok');
+  for (const b of ['list', 'stream', 'sweep', 'usb3']) $(b).disabled = false;
+};
+
+$('pair').onclick = async () => {
+  try {
+    const d = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x0bda, productId: 0xb812 }, { vendorId: 0x0bda, productId: 0xc812 }] });
+    log(`paired ${d.productName ?? ''} ${d.vendorId.toString(16)}:${d.productId.toString(16)} serial=${d.serialNumber ?? '(none)'} usb=${d.usbVersionMajor}.${d.usbVersionMinor}`, 'ok');
+  } catch (e) { log(String(e), 'bad'); }
+};
+navigator.usb?.addEventListener('connect', (e) => log(`connect ${e.device.productId.toString(16)} serial=${e.device.serialNumber ?? '(none)'} usb=${e.device.usbVersionMajor}.${e.device.usbVersionMinor}`, 'mut'));
+navigator.usb?.addEventListener('disconnect', (e) => log(`disconnect ${e.device.productId.toString(16)}`, 'mut'));
+
+async function run(cmd, args) {
+  const t = performance.now();
+  try {
+    const rc = await call(cmd, args);
+    log(`${cmd} → ${rc} (${((performance.now() - t) / 1000).toFixed(1)} s)`, rc ? 'bad' : 'mut');
+    return rc;
+  } catch (e) { log(`${cmd}: ${e.message}`, 'bad'); return -1; }
+}
+const streamArgs = (rate) => [+$('pid').value, rate, +$('secs').value, +$('depth').value, $('reset').checked ? 1 : 0, +$('freq').value];
+$('list').onclick = () => run('probe_list');
+$('stream').onclick = () => run('probe_stream', streamArgs(+$('rate').value));
+$('sweep').onclick = async () => { for (const r of [5, 4, 3, 2, 1]) await run('probe_stream', streamArgs(r)); };
+$('usb3').onclick = () => run('probe_usb3', [+$('pid').value]);
+</script>
+</body>
+</html>

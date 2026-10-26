@@ -60,11 +60,27 @@ export function decodeRow(buf: ArrayBuffer): Row | null {
   };
 }
 
-let sessionPromise: Promise<string> | null = null;
+export type Pending = { resolve: (r: any) => void; reject: (e: Error) => void };
 
-type Pending = { resolve: (r: any) => void; reject: (e: Error) => void };
+// One text frame from the backend: settles the request it answers (ack / error with a pending id), or is
+// an event. Shared by both transports.
+export function onText(text: string, pending: Map<number, Pending>, onEvent: (e: any) => void) {
+  const e = JSON.parse(text);
+  if ((e.type === 'ack' || e.type === 'error') && typeof e.id === 'number' && pending.has(e.id)) {
+    const p = pending.get(e.id)!;
+    pending.delete(e.id);
+    if (e.type === 'ack') p.resolve(e);
+    else p.reject(Object.assign(new Error(e.msg ?? 'error'), { kind: e.kind as string | undefined }));
+    return;
+  }
+  onEvent(e);
+}
 
+export type Bridge = { session(): Promise<{ token: string }> };
+
+// The desktop app's transport: the backend's WebSocket on 127.0.0.1.
 export class Client {
+  readonly kind = 'desktop' as const;
   private ws: WebSocket | null = null;
   private nextId = 1;
   private pending = new Map<number, Pending>();
@@ -82,17 +98,10 @@ export class Client {
   }
 
   // The session token comes from the desktop shell (preload bridge, over IPC): it is never in a URL.
-  static fromLocation(): Promise<Client> {
-    sessionPromise ??= Client.session();
-    return sessionPromise.then((url) => new Client(url));
-  }
-
-  private static async session(): Promise<string> {
-    const bridge = (window as { wsdr?: { session(): Promise<{ token: string }> } }).wsdr;
-    if (!bridge) throw new Error('This page runs inside the wsdr-studio app. Start wsdr-studio to use it.');
+  static async fromBridge(bridge: Bridge, loc: { protocol: string; host: string }): Promise<Client> {
     const { token } = await bridge.session();
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${location.host}/ws?t=${encodeURIComponent(token)}`;
+    const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+    return new Client(`${proto}//${loc.host}/ws?t=${encodeURIComponent(token)}`);
   }
 
   connect() {
@@ -123,15 +132,7 @@ export class Client {
         if (r) this.onRow(r);
         return;
       }
-      const e = JSON.parse(m.data as string);
-      if ((e.type === 'ack' || e.type === 'error') && typeof e.id === 'number' && this.pending.has(e.id)) {
-        const p = this.pending.get(e.id)!;
-        this.pending.delete(e.id);
-        if (e.type === 'ack') p.resolve(e);
-        else p.reject(Object.assign(new Error(e.msg ?? 'error'), { kind: e.kind as string | undefined }));
-        return;
-      }
-      this.onEvent(e);
+      onText(m.data as string, this.pending, this.onEvent);
     };
     this.ws = ws;
   }

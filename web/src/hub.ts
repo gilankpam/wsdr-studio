@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// One socket for the window, shared by both views. Rows and events tagged with a slot go to that
+// One connection for the window (the desktop app's WebSocket, or the web build's worker: transport.ts),
+// shared by both views. Rows and events tagged with a slot go to that
 // view (rows also reach the other view, for its overlay); untagged events go to everyone. The latest
 // state events are kept, so a view that appears later (entering a two-adapter mode) starts current.
-import { Client, type Row } from './protocol';
+import type { Row } from './protocol';
+import { openTransport, type Transport } from './transport';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export type Sub = {
@@ -18,7 +20,8 @@ export type Sub = {
 const KEPT = new Set(['hello', 'devices', 'caps', 'settings', 'status']);
 
 export class Hub {
-  private client: Client | null = null;
+  private client: Transport | null = null;
+  kind: Transport['kind'] | null = null; // which backend (desktop app or this page's own), once started
   private subs = new Set<Sub>();
   private kept = new Map<string, any>(); // `${slot}:${type}` -> the latest event
   private gen = 0;
@@ -27,10 +30,11 @@ export class Hub {
 
   start() {
     const gen = ++this.gen;
-    Client.fromLocation()
+    openTransport()
       .then((c) => {
         if (gen !== this.gen) return; // stopped meanwhile
         this.client = c;
+        this.kind = c.kind;
         c.onRow = (r) => {
           if (gen !== this.gen) return; // a stopped client's late callbacks
           for (const s of this.subs) {

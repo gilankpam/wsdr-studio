@@ -123,7 +123,13 @@ The window needs at least 1280 × 720.
   keyboards, ...), and a microwave oven is recognised by the span switching on and off with the mains.
   BLE advertising on the channels inside the span (2402, 2426, 2480 MHz; a 40 MHz span holds at most
   two) is decoded: the hover shows the advertiser's address (most are random and change) and its name
-  when it sends one. These are cheap rules, close enough to tag what the waterfall shows; signals at the very
+  when it sends one.
+  A narrow line that stays on is a "steady carrier"; when evenly spaced lines around it repeat at a
+  video line rate (67.5 kHz for 1080p60, ...) the hover says it is most likely a display's clock
+  harmonic (an HDMI/DisplayPort cable, a monitor or a GPU nearby: they show up as a ladder of such
+  lines across 5 GHz).
+- **Adapter spurs**: the dongle's own 40 MHz crystal leaves weak steady lines at every multiple of
+  40 MHz; the spectrum marks them "spur" (and the hover says so) so they are not taken for signals. These are cheap rules, close enough to tag what the waterfall shows; signals at the very
   edge of the span are missed.
 - **Keyboard** (? shows the list): ←/→ tune 5 MHz (Shift 20), [ ] span, digits or Enter type a
   frequency, A / B select the view, Space Start/Stop, Ctrl+R record.

@@ -16,6 +16,7 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr int kNarrow = 4;      // bins (2.5 MHz) within 10 dB of a run's peak: wider is not narrowband
 constexpr int kAround = 8;      // bins (5 MHz) either side that must stay 10 dB under it (not a shoulder)
 constexpr uint64_t kWarm = 2000; // columns (~13 ms) before anything is reported: the floors settle
+constexpr int kFine = 8192;     // the fine spectrum for steady carriers (4.9 kHz bins at 40 MS/s)
 constexpr float kOcc = 45;      // occupied: 45x the bin's 20% quantile (~10 dB over its mean noise)
 constexpr int kMsCols = 156;    // columns per "ms" (6.4 us each: 0.998 ms)
 constexpr int kWinMs = 200;     // the oven is judged over 200 ms
@@ -27,10 +28,14 @@ void Finder::release() {
   std::lock_guard<std::mutex> l(studio::fftw_plan_mutex());
   if (_plan)
     fftwf_destroy_plan(_plan);
+  if (_fplan)
+    fftwf_destroy_plan(_fplan);
   fftwf_free(_in);
   fftwf_free(_out);
-  _plan = nullptr;
-  _in = _out = nullptr;
+  fftwf_free(_fin);
+  fftwf_free(_fout);
+  _plan = _fplan = nullptr;
+  _in = _out = _fin = _fout = nullptr;
 }
 
 void Finder::reset(double fs, double centre_hz) {
@@ -63,7 +68,15 @@ void Finder::reset(double fs, double centre_hz) {
     _out = reinterpret_cast<cf *>(fftwf_alloc_complex(static_cast<size_t>(_nf)));
     _plan = fftwf_plan_dft_1d(_nf, reinterpret_cast<fftwf_complex *>(_in), reinterpret_cast<fftwf_complex *>(_out), FFTW_FORWARD,
                               FFTW_ESTIMATE);
+    _fin = reinterpret_cast<cf *>(fftwf_alloc_complex(kFine));
+    _fout = reinterpret_cast<cf *>(fftwf_alloc_complex(kFine));
+    _fplan = fftwf_plan_dft_1d(kFine, reinterpret_cast<fftwf_complex *>(_fin), reinterpret_cast<fftwf_complex *>(_fout), FFTW_FORWARD,
+                               FFTW_ESTIMATE);
   }
+  _fwin.resize(kFine);
+  for (int k = 0; k < kFine; k++)
+    _fwin[k] = static_cast<float>(0.5 - 0.5 * std::cos(2 * kPi * k / kFine));
+  _steady.clear();
   _p.assign(_nf, 0);
   _floor.assign(_nf, 0);
   _occ.assign(_nf, 0);
@@ -179,8 +192,10 @@ void Finder::column(const cf *x, std::vector<Burst> &out) {
   if (++_ms_cols == kMsCols) {
     _busy.push_back(static_cast<float>(_ms_loud) / kMsCols);
     _ms_cols = _ms_loud = 0;
-    if (static_cast<int>(_busy.size()) == kWinMs)
+    if (static_cast<int>(_busy.size()) == kWinMs) {
+      carriers(out);
       oven(out);
+    }
   }
 
   // the advertising channels: active while their three bins hold 6x their noise (gaps up to 10
@@ -430,6 +445,95 @@ bool Finder::ble(uint64_t s0, uint64_t s1, const AdvChan &a, Burst &b) const {
     }
   }
   return false;
+}
+
+// Steady carriers: a fine spectrum (the last ~0.8 ms, 8192-point FFTs averaged) every 200 ms; a narrow
+// line 10 dB over its 1.25 MHz block's median that is there in 3 of the last 4 windows is reported,
+// with the spacing of evenly spaced lines around it (a carrier switched at a steady rate: a display's
+// pixel clock harmonics carry its line rate). Not the DC at the centre, nor n x 40 MHz (the adapter's
+// own crystal: the display labels those).
+void Finder::carriers(std::vector<Burst> &out) {
+  const int K = static_cast<int>(_fs * 0.8e-3 / kFine); // 4 at 40 MS/s, 2 at 20
+  if (K < 1 || _carry.size() < static_cast<size_t>(K * kFine))
+    return;
+  std::vector<float> P(kFine, 0.f);
+  const cf *x = &_carry[_carry.size() - static_cast<size_t>(K * kFine)];
+  for (int r = 0; r < K; r++) {
+    for (int k = 0; k < kFine; k++)
+      _fin[k] = x[r * kFine + k] * _fwin[k];
+    fftwf_execute(_fplan);
+    for (int k = 0; k < kFine; k++)
+      P[k] += std::norm(_fout[(k + kFine / 2) % kFine]);
+  }
+  constexpr int kBlk = 256;
+  std::vector<float> med(kFine / kBlk), tmp(kBlk);
+  for (size_t b = 0; b < med.size(); b++) {
+    std::copy(P.begin() + static_cast<long>(b * kBlk), P.begin() + static_cast<long>((b + 1) * kBlk), tmp.begin());
+    std::nth_element(tmp.begin(), tmp.begin() + kBlk / 2, tmp.end());
+    med[b] = tmp[kBlk / 2];
+  }
+  const double bin = _fs / kFine;
+  const auto hz = [&](int k) { return _centre + (k - kFine / 2) * bin; };
+  const auto over = [&](int k) { return P[k] / (med[static_cast<size_t>(k / kBlk)] + 1e-30f); };
+  std::vector<int> hits;
+  for (int k = 10; k < kFine - 10; k++) {
+    const double off = hz(k) - _centre, h40 = hz(k) - std::round(hz(k) / 40e6) * 40e6;
+    if (over(k) < 10 || std::abs(off) < 200e3 || std::abs(off) > 0.45 * _fs || std::abs(h40) < 60e3)
+      continue;
+    bool peak = true;
+    for (int j = k - 10; peak && j <= k + 10; j++)
+      peak = j == k || P[j] < P[k] || (P[j] == P[k] && j > k);
+    if (peak)
+      hits.push_back(k);
+  }
+  // one line per 1.2 MHz (a comb's teeth are lines too): the strongest
+  std::sort(hits.begin(), hits.end(), [&](int a, int b) { return P[a] > P[b]; });
+  std::vector<int> kept;
+  for (int k : hits)
+    if (std::none_of(kept.begin(), kept.end(), [&](int j) { return std::abs(j - k) * bin < 600e3; }))
+      kept.push_back(k);
+  hits.swap(kept);
+  // each line's history over the last 4 windows (it may wander a bin or two)
+  for (auto &[k, h] : _steady)
+    h = (h << 1) & 0xF;
+  for (int k : hits) {
+    auto it = std::find_if(_steady.begin(), _steady.end(), [&](const auto &e) { return std::abs(e.first - k) <= 2; });
+    if (it == _steady.end())
+      _steady.emplace_back(k, 1u);
+    else
+      *it = {k, it->second | 1u};
+  }
+  _steady.erase(std::remove_if(_steady.begin(), _steady.end(), [](const auto &e) { return e.second == 0; }), _steady.end());
+  for (const auto &[k, h] : _steady) {
+    if (!(h & 1) || __builtin_popcount(h) < 3)
+      continue;
+    Burst b;
+    b.t = _win_t0;
+    b.mhz = hz(k) / 1e6;
+    b.dur_us = kWinMs * 1e3;
+    b.kind = 'C';
+    // the comb: local maxima 6 dB over their block within +-600 kHz, evenly spaced
+    std::vector<double> at;
+    const int span = static_cast<int>(600e3 / bin);
+    for (int j = std::max(3, k - span); j <= std::min(kFine - 4, k + span); j++)
+      if (over(j) > 4 && P[j] >= P[j - 1] && P[j] >= P[j + 1] && P[j] >= P[j - 2] && P[j] >= P[j + 2])
+        at.push_back(hz(j));
+    if (at.size() >= 5) {
+      std::vector<double> d;
+      for (size_t i = 1; i < at.size(); i++)
+        d.push_back(at[i] - at[i - 1]);
+      std::vector<double> s = d;
+      std::nth_element(s.begin(), s.begin() + static_cast<long>(s.size() / 2), s.end());
+      const double m = s[s.size() / 2];
+      int near = 0;
+      for (double v : d)
+        near += std::abs(v - m) < 0.1 * m;
+      if (near >= 4 && m > 3 * bin) // (averaged over the comb's span: finer than a bin)
+        b.comb_khz = (at.back() - at.front()) / std::round((at.back() - at.front()) / m) / 1e3;
+    }
+    b.bw_mhz = b.comb_khz > 0 ? 1.0 : 0.2;
+    out.push_back(b);
+  }
 }
 
 } // namespace sig

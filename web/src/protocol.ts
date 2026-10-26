@@ -26,9 +26,11 @@ export type WifiFrame = [
   ta?: string | null, bssid?: string | null, ssid?: string | null, ch?: number,
 ];
 // Another signal found in the samples (the "wifi" event's "other"): start (s), centre (MHz), width
-// (MHz), kind (T Bluetooth, N narrowband, M microwave oven, E BLE advertising), duration (us); a
-// decoded BLE advertisement adds its sender's address, whether it is random, and its name ("" none).
-export type OtherSignal = [t: number, mhz: number, bw: number, kind: 'T' | 'N' | 'M' | 'E', us: number, addr?: string, random?: boolean, name?: string];
+// (MHz), kind (T Bluetooth, N narrowband, M microwave oven, E BLE advertising, C steady carrier),
+// duration (us); a decoded BLE advertisement adds its sender's address, whether it is random, and its
+// name ("" none); a steady carrier the spacing of the comb around it (kHz, 0 none).
+export type OtherSignal = [t: number, mhz: number, bw: number, kind: 'T' | 'N' | 'M' | 'E' | 'C', us: number,
+  addr?: string | null, random?: boolean | null, name?: string | null, comb?: number];
 export type Status = {
   state: string; adapter: string; error: string; t: number; rows: number; ring_dropped: number; dsp_load: number;
   rx?: { state: string; banks: number; restarts: number; channel: number; width: number; centre: number; fs: number; gapped?: boolean; error: string;

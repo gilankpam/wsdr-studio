@@ -742,6 +742,24 @@ static void test_signals() {
     CHECK(c >= 3 && wrong == 0);
     if (c < 3 || wrong)
       std::printf("  (carrier: %d right, %d wrong of %zu)\n", c, wrong, got.size());
+    // the same carrier at 20 MS/s (half the samples a window: the comb must still come out right)
+    std::vector<std::complex<float>> h;
+    for (size_t i = 0; i < x.size(); i += 2)
+      h.push_back(x[i]);
+    sig::Finder f20;
+    f20.reset(20e6, 5770e6);
+    std::vector<sig::Burst> o20;
+    for (size_t i = 0; i < h.size(); i += 8192) {
+      const size_t n = std::min<size_t>(8192, h.size() - i);
+      f20.feed(&h[i], n, static_cast<double>(i + n) / 20e6, o20);
+    }
+    int c20 = 0, w20 = 0;
+    for (const auto &b : o20)
+      if (b.kind == 'C')
+        (std::abs(b.mhz - 5773.1) < 0.01 && std::abs(b.comb_khz - 67.5) < 1 ? c20 : w20)++;
+    CHECK(c20 >= 2 && w20 == 0); // (1 s: about three windows past the 3-of-4 rule)
+    if (c20 < 2 || w20)
+      std::printf("  (carrier at 20 MS/s: %d right, %d wrong)\n", c20, w20);
   }
   // Wi-Fi frames (6 Mb/s, ~1.5 ms each) back to back for 10 ms of every 20: loud and switching like
   // an oven, but 20 MHz wide: no oven, no narrow bursts

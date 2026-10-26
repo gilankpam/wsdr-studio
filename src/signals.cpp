@@ -45,6 +45,7 @@ void Finder::reset(double fs, double centre_hz) {
   _nf = std::abs(fs - 40e6) < 1e3 ? 64 : std::abs(fs - 20e6) < 1e3 ? 32 : 0;
   _hop = 4 * _nf;
   _abs_end = _col = _carry_at = 0;
+  _steady.clear();
   _oven = false;
   _adv.clear();
   _advch.clear();
@@ -76,7 +77,6 @@ void Finder::reset(double fs, double centre_hz) {
   _fwin.resize(kFine);
   for (int k = 0; k < kFine; k++)
     _fwin[k] = static_cast<float>(0.5 - 0.5 * std::cos(2 * kPi * k / kFine));
-  _steady.clear();
   _p.assign(_nf, 0);
   _floor.assign(_nf, 0);
   _occ.assign(_nf, 0);
@@ -453,7 +453,7 @@ bool Finder::ble(uint64_t s0, uint64_t s1, const AdvChan &a, Burst &b) const {
 // pixel clock harmonics carry its line rate). Not the DC at the centre, nor n x 40 MHz (the adapter's
 // own crystal: the display labels those).
 void Finder::carriers(std::vector<Burst> &out) {
-  const int K = static_cast<int>(_fs * 0.8e-3 / kFine); // 4 at 40 MS/s, 2 at 20
+  const int K = static_cast<int>(_fs * 1e-3 / kFine); // 4 at 40 MS/s, 2 at 20 (~0.82 ms)
   if (K < 1 || _carry.size() < static_cast<size_t>(K * kFine))
     return;
   std::vector<float> P(kFine, 0.f);
@@ -528,10 +528,20 @@ void Finder::carriers(std::vector<Burst> &out) {
       int near = 0;
       for (double v : d)
         near += std::abs(v - m) < 0.1 * m;
-      if (near >= 4 && m > 3 * bin) // (averaged over the comb's span: finer than a bin)
-        b.comb_khz = (at.back() - at.front()) / std::round((at.back() - at.front()) / m) / 1e3;
+      if (near >= 4 && m > 3 * bin) { // fitted to the teeth on its grid around the carrier (finer than a bin)
+        double num = 0, den = 0;
+        for (double f : at) {
+          const double n = std::round((f - hz(k)) / m);
+          if (n != 0 && std::abs(f - hz(k) - n * m) < 0.2 * m) {
+            num += n * (f - hz(k));
+            den += n * n;
+          }
+        }
+        if (den > 0)
+          b.comb_khz = num / den / 1e3;
+      }
     }
-    b.bw_mhz = b.comb_khz > 0 ? 1.0 : 0.2;
+    b.bw_mhz = 0.5;
     out.push_back(b);
   }
 }

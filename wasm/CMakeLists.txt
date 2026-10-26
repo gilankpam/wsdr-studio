@@ -63,8 +63,9 @@ if(WSDR_ASYNC STREQUAL "jspi")
   target_include_directories(wsdr-test-core PRIVATE ../src ../external/pocketfft ${NLOHMANN_INCLUDE})
   target_link_libraries(wsdr-test-core wsdrcore iqdsp)
   target_link_directories(wsdr-test-core PRIVATE ${LIBUSB_PREFIX}/lib)
+  # 1.5 GB: the tests synthesise long captures (natively they peak at ~600 MB); the engine needs far less
   target_link_options(wsdr-test-core PRIVATE ${WSDR_EXC_FLAGS} ${WSDR_ASYNC_LINK} -lembind -sENVIRONMENT=node,worker
-    -sINITIAL_MEMORY=512MB -sSTACK_SIZE=1MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB -sPTHREAD_POOL_SIZE=16 -sWASMFS
+    -sINITIAL_MEMORY=1536MB -sSTACK_SIZE=1MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB -sPTHREAD_POOL_SIZE=16 -sWASMFS
     -sPROXY_TO_PTHREAD -sEXIT_RUNTIME -sNODERAWFS=0
     -Wl,--wrap=libusb_cancel_transfer -Wl,--wrap=libusb_submit_transfer)
   set_target_properties(wsdr-test-core PROPERTIES SUFFIX ".js")

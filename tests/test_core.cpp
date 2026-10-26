@@ -592,6 +592,7 @@ static void test_dsss_beacon() {
       {1, 0, 0, 50e3, 0, 0.2f, 0, false, false},       // weak (~4 dB over the noise in 40 MHz)
       {1, 0, 0, 50e3, 0, 0.05f, 0.05f, false, false},  // the adapter's DC offset
       {1, 0, 0, 50e3, 0, 0.05f, 0, false, true},       // its ACK a SIFS later (two frames)
+      {1, 0, 0, 50e3, 300, 0.05f, 0, false, true},     // both under a tone that holds the detector on
   };
   for (const auto &cs : cases) {
     size_t at = 0, nbytes = 0;

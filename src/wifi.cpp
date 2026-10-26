@@ -481,6 +481,8 @@ void Decoder::reset(double fs, double centre_hz) {
   _bjobs.clear();
   _din = false;
   _dloud = _dseg = _bdone = 0;
+  _bchan = 0;
+  _bempty = _bpart = 0;
   _dc = 0;
   _dsss = centre_hz < 3e9;
   _abs0 = _scan = _abs_end = 0;
@@ -513,27 +515,23 @@ void Decoder::reset(double fs, double centre_hz) {
 void Decoder::feed(const cf *x, size_t n, double t_end, std::vector<Frame> &out) {
   if (!_dec || _cands.empty())
     return;
-  // the adapters' DC offset (coherent to both detectors) taken out as the samples arrive: each
-  // chunk's mean (from every 32nd sample) moves the estimate (time constant ~100 us at 40 MS/s), which
-  // is subtracted on a ramp from the old value to the new one
+  // the adapters' DC offset (coherent to both detectors) taken out as the samples arrive: the
+  // estimate so far is subtracted while the chunk's mean (all of it: a strided mean aliases signals
+  // on a multiple of fs / stride) moves it, by n / (n + 4096) (~300 us at 40 MS/s in 8192-sample chunks)
   const size_t b0 = _buf.size();
   _buf.insert(_buf.end(), x, x + n);
   if (n) {
-    float sr = 0, si = 0;
-    size_t m = 0;
-    for (size_t k = 0; k < n; k += 32, m++) {
-      sr += x[k].real();
-      si += x[k].imag();
-    }
-    const float w = static_cast<float>(static_cast<double>(n) / (static_cast<double>(n) + 4096)), fn = static_cast<float>(n);
-    const cf dc0 = _dc, dc1 = _dc + (cf(sr, si) / static_cast<float>(m) - _dc) * w;
-    const float r0 = dc0.real(), i0 = dc0.imag(), dr = (dc1.real() - r0) / fn, di = (dc1.imag() - i0) / fn;
     float *b = reinterpret_cast<float *>(_buf.data() + b0); // (on the floats, so the loop vectorises)
+    const float r0 = _dc.real(), i0 = _dc.imag();
+    float sr = 0, si = 0;
     for (size_t k = 0; k < n; k++) {
-      b[2 * k] -= r0 + dr * static_cast<float>(k);
-      b[2 * k + 1] -= i0 + di * static_cast<float>(k);
+      sr += b[2 * k];
+      si += b[2 * k + 1];
+      b[2 * k] -= r0;
+      b[2 * k + 1] -= i0;
     }
-    _dc = dc1;
+    const float fn = static_cast<float>(n), w = fn / (fn + 4096);
+    _dc += (cf(sr / fn, si / fn) - _dc) * w;
   }
   _abs_end += n;
   _t_end = t_end;
@@ -570,10 +568,11 @@ void Decoder::scan(std::vector<Frame> &out) {
       im += p[j].imag() * q[j].real() - p[j].real() * q[j].imag();
     }
     const float a = re * re + im * im;
-    if (!(a > 0))
+    if (!(a > 1e-30f))
       return cf(0);
-    const float r2 = re * re - im * im, i2 = 2 * re * im, inv = 1 / (a * a); // z^2, then (z^2)^2 / |z|^4
-    return cf((r2 * r2 - i2 * i2) * inv, 2 * r2 * i2 * inv);
+    // z^2 / |z|^2, squared (scaled before squaring: tiny samples would underflow |z|^4)
+    const float u = (re * re - im * im) / a, v = 2 * re * im / a;
+    return cf(u * u - v * v, 2 * u * v);
   };
   uint64_t tick = 0, slot = 0; // samples to the next term; the ring's oldest term
   if (_dsss) {
@@ -616,17 +615,21 @@ void Decoder::scan(std::vector<Frame> &out) {
       if (!_din && m2 > 0.3 * 0.3 && loud) {
         _din = true;
         _dstart = _dseg = i;
+        _ndet++;
+        _bempty = _bpart = 0;
       } else if (_din && i - _dseg >= 800 * us && m2 >= 0.12 * 0.12 && i - _dloud <= 2 * us) {
         // still on after 800 us (a tone or spur is coherent too and can hold it on): this part is
         // probed now (its first ms, so the parts overlap), the next part starts here
-        _bjobs.emplace_back(_dseg > _abs0 + 10 * us ? _dseg - 10 * us : _abs0, i + 330 * us);
+        // (after two parts in vain, only every 4th: a microwave oven can hold it on for minutes)
+        if (_bempty < 2 || (++_bpart & 3) == 0)
+          _bjobs.push_back({_dseg > _abs0 + 10 * us ? _dseg - 10 * us : _abs0, i + 120 * us, i, _ndet});
         _dseg = i;
       } else if (_din && (m2 < 0.12 * 0.12 || i - _dloud > 2 * us)) {
         _din = false;
         // (shorter than the long preamble and header, 192 us: nothing to decode; the window trails
         // the frame's end by 10 us)
         if (i - _dstart >= 190 * us)
-          _bjobs.emplace_back(_dseg > _abs0 + 10 * us ? _dseg - 10 * us : _abs0, i + 10 * us); // (its length
+          _bjobs.push_back({_dseg > _abs0 + 10 * us ? _dseg - 10 * us : _abs0, i + 10 * us, i, _ndet}); // (its length
           // comes from its header: the detector may end early, a collision mid-frame)
       }
       const cf z4 = term(i + W2); // the term at i leaves, the one at i + W2 takes its place
@@ -659,7 +662,7 @@ void Decoder::scan(std::vector<Frame> &out) {
   if (_din) // a frame still going on, and ended ones not yet decoded
     from = std::min(from, _dseg > margin ? _dseg - margin + pre : pre);
   for (const auto &b : _bjobs)
-    from = std::min(from, b.first + pre);
+    from = std::min(from, b.start + pre);
   const uint64_t keep = from > pre ? from - pre : 0;
   if (keep > _abs0) {
     _buf.erase(_buf.begin(), _buf.begin() + static_cast<long>(keep - _abs0));
@@ -764,12 +767,18 @@ std::vector<cf> Decoder::snippet(uint64_t from, uint64_t len, double off) const 
 
 void Decoder::finish(std::vector<Frame> &out) {
   // (in order: a job starts after the frame the one before it decoded, so none is reported twice)
-  while (!_bjobs.empty() && _bjobs.front().second + _lp.size() <= _abs_end) {
-    uint64_t need = 0;
-    if (!dsss_at(_bjobs.front().first, _abs_end - _lp.size(), need, out) && need > _bjobs.front().second) {
-      _bjobs.front().second = need; // the rest of the frame is still arriving
-      break;
+  while (!_bjobs.empty() && _bjobs.front().need + _lp.size() <= _abs_end) {
+    Job &j = _bjobs.front();
+    const uint64_t done = _bdone;
+    const bool fresh = std::max(j.start, _bdone) < j.stop; // (a part an earlier frame covered is not probed)
+    if (!dsss_at(j, _abs_end - _lp.size(), out))
+      continue; // (j.need moved on: the rest of the frame is still arriving)
+    if (_bdone != done && _bdone < j.stop) { // a frame decoded: the rest of the part may hold another
+      j.start = _bdone;
+      continue;
     }
+    if (j.det == _ndet) // parts of this detection probed in vain: later ones less often
+      _bempty = j.hit ? 0 : _bempty + (fresh ? 1 : 0);
     _bjobs.erase(_bjobs.begin());
   }
   for (size_t i = 0; i < _pend.size();) {
@@ -804,15 +813,12 @@ void Decoder::finish(std::vector<Frame> &out) {
 // descrambler (x^7 + x^4 + 1), the long preamble's SFD, the PLCP header (CRC-16), the PSDU at 1 Mb/s
 // (DBPSK) or 2 Mb/s (DQPSK), CRC-32, the MAC header. Short preambles and CCK (5.5, 11 Mb/s) payloads
 // are not decoded (a CCK frame is reported from its header).
-bool Decoder::dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<Frame> &out) {
+bool Decoder::dsss_at(Job &j, uint64_t end, std::vector<Frame> &out) {
   static const float barker[11] = {1, -1, 1, 1, -1, 1, 1, 1, -1, -1, -1};
   float tmpl[20];
   for (int n = 0; n < 20; n++)
     tmpl[n] = barker[std::min(10, n * 11 / 20)];
-  start = std::max(start, _bdone);
-  if (start + 200 * static_cast<uint64_t>(_fs / 1e6) > end)
-    return true;
-  const uint64_t len = end - start;
+  const uint64_t us = static_cast<uint64_t>(_fs / 1e6), probe = 60 * us + _lp.size();
   const auto mf = [&](const std::vector<cf> &z, size_t m) { // the matched filter at m
     cf acc = 0;
     if (m + 20 <= z.size())
@@ -837,88 +843,129 @@ bool Decoder::dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<
     }
     return sum > 0 ? mx / (sum / 20) : 0.f;
   };
-  // the channel and where the frame starts: the first 100 us block (within 1 ms) whose matched filter
-  // shows the rhythm on some channel (the detector may have come on early: a steady tone is periodic too)
-  double best = 0, c = 0;
-  const uint64_t us = static_cast<uint64_t>(_fs / 1e6), probe = 110 * us + _lp.size();
-  uint64_t from = start;
-  for (uint64_t b = 0; b + probe <= len && b <= 1000 * us && best < 2.5; b += 100 * us)
-    for (double cand : _cands) {
-      if (cand > 3e9)
-        continue;
+  // the part, a 100 us block at a time: the first whose matched filter shows the rhythm (on the best
+  // channel) is where a frame may start; a block whose SFD does not
+  // follow (the tail of an earlier frame) moves the probe on
+  for (uint64_t b = std::max(j.start, _bdone); b < j.stop + 10 * us && b + 200 * us <= end; b += 100 * us) {
+    double best = 0, c = 0;
+    const auto try_chan = [&](double cand) {
       int ph;
-      const double r = rhythm(snippet(start + b, probe, cand - _centre), 100, ph);
+      const double r = rhythm(snippet(b, probe, cand - _centre), 50, ph);
       if (r > best) {
         best = r;
         c = cand;
-        from = start + (b > 10 * us ? b - 10 * us : 0);
       }
-    }
-  if (best < 2.5)
-    return true; // no Barker rhythm after all
-  start = from;
-  const uint64_t len2 = end - start;
-  const auto z = snippet(start, len2, c - _centre);
-  int ph;
-  rhythm(z, 100, ph);
-  // the symbols, on the peak: early and late compared every 16 symbols, the timing moved a sample
-  std::vector<cf> sym;
-  double early = 0, late = 0;
-  for (size_t m = static_cast<size_t>(ph), k = 0; m + 21 < z.size(); m += 20, k++) {
-    sym.push_back(mf(z, m));
-    if (m > 0) {
-      early += std::norm(mf(z, m - 1));
-      late += std::norm(mf(z, m + 1));
-    }
-    if (k % 16 == 15) {
-      if (late > 1.25 * early)
-        m++;
-      else if (early > 1.25 * late && m > 0)
-        m--;
-      early = late = 0;
+    };
+    // (a channel 5 MHz off shows the rhythm too, weaker: the best one is taken; when the channel last
+    // found shows it, only its neighbours are compared)
+    if (_bchan > 0)
+      try_chan(_bchan);
+    const bool near = best >= 2.5;
+    for (double cand : _cands)
+      if (cand < 3e9 && cand != _bchan && (!near || std::abs(cand - _bchan) < 6e6))
+        try_chan(cand);
+    if (best < 2.5)
+      continue;
+    const uint64_t from = b > j.start + 10 * us ? b - 10 * us : std::max(j.start, _bdone);
+    const int r = dsss_frame(from, end, c, j, out);
+    if (r < 0)
+      return false; // the rest of the frame is still arriving
+    if (r > 0) {
+      _bchan = c;
+      j.hit = true;
+      return true;
     }
   }
-  if (sym.size() < 200)
-    return true;
-  // phase steps; the frequency offset from the DBPSK preamble (squared: the +-1 goes) taken out
-  std::vector<cf> d(sym.size(), cf(0));
-  std::complex<double> sq = 0;
-  for (size_t k = 1; k < sym.size(); k++) {
-    d[k] = sym[k] * std::conj(sym[k - 1]);
-    if (k < 150)
-      sq += std::complex<double>(d[k]) * std::complex<double>(d[k]);
-  }
-  const cf derot = std::polar(1.f, static_cast<float>(-std::arg(sq) / 2));
-  for (auto &v : d)
-    v *= derot;
-  std::vector<uint8_t> raw(sym.size(), 0), bits;
-  for (size_t k = 1; k < sym.size(); k++)
-    raw[k] = d[k].real() < 0;
+  return true;
+}
+
+// The frame whose SYNC runs from `from` on channel c: 1 decoded (or its header), 0 none (no SFD or a
+// bad header), -1 its samples up to j.need are needed first (j.start is then `from`).
+int Decoder::dsss_frame(uint64_t from, uint64_t end, double c, Job &j, std::vector<Frame> &out) {
+  static const float barker[11] = {1, -1, 1, 1, -1, 1, 1, 1, -1, -1, -1};
+  float tmpl[20];
+  for (int n = 0; n < 20; n++)
+    tmpl[n] = barker[std::min(10, n * 11 / 20)];
+  const uint64_t us = static_cast<uint64_t>(_fs / 1e6);
+  const auto mf = [&](const std::vector<cf> &z, size_t m) {
+    cf acc = 0;
+    if (m + 20 <= z.size())
+      for (int k = 0; k < 20; k++)
+        acc += z[m + k] * tmpl[k];
+    return acc;
+  };
+  int ph = 0;
+  std::vector<cf> sym, d;
+  std::vector<uint8_t> raw, bits;
   const auto descr = [](const std::vector<uint8_t> &in, std::vector<uint8_t> &o) {
     o.assign(in.size(), 0);
     for (size_t i = 0; i < in.size(); i++)
       o[i] = in[i] ^ (i >= 4 ? in[i - 4] : 0) ^ (i >= 7 ? in[i - 7] : 0);
   };
-  descr(raw, bits);
+  // demodulates n samples from `from`: symbol timing from the rhythm, kept on the peak through the
+  // frame (early/late every 16 symbols: the clocks differ by tens of ppm), the frequency offset from
+  // the DBPSK preamble (squared: the +-1 goes) taken out, DBPSK bits descrambled
+  const auto demod = [&](uint64_t n) {
+    const auto z = snippet(from, n, c - _centre);
+    float fold[20] = {};
+    for (size_t k = 0; k < 100 && 20 * k + 40 <= z.size(); k++)
+      for (int p = 0; p < 20; p++)
+        fold[p] += std::norm(mf(z, 20 * k + static_cast<size_t>(p)));
+    ph = static_cast<int>(std::max_element(fold, fold + 20) - fold);
+    sym.clear();
+    double early = 0, late = 0;
+    for (size_t m = static_cast<size_t>(ph), k = 0; m + 21 < z.size(); m += 20, k++) {
+      sym.push_back(mf(z, m));
+      if (m > 0) {
+        early += std::norm(mf(z, m - 1));
+        late += std::norm(mf(z, m + 1));
+      }
+      if (k % 16 == 15) {
+        if (late > 1.25 * early)
+          m++;
+        else if (early > 1.25 * late && m > 0)
+          m--;
+        early = late = 0;
+      }
+    }
+    d.assign(sym.size(), cf(0));
+    std::complex<double> sq = 0;
+    for (size_t k = 1; k < sym.size(); k++) {
+      d[k] = sym[k] * std::conj(sym[k - 1]);
+      if (k < 150)
+        sq += std::complex<double>(d[k]) * std::complex<double>(d[k]);
+    }
+    const cf derot = std::polar(1.f, static_cast<float>(-std::arg(sq) / 2));
+    for (auto &v : d)
+      v *= derot;
+    raw.assign(sym.size(), 0);
+    for (size_t k = 1; k < sym.size(); k++)
+      raw[k] = d[k].real() < 0;
+    descr(raw, bits);
+  };
+  // the header first: SYNC (up to 128 symbols), SFD, 48 header bits within ~360 us
+  demod(std::min<uint64_t>(end - from, 360 * us + _lp.size()));
+  if (sym.size() < 200)
+    return 0;
   // the long preamble's SFD, 0xF3A0 sent LSB first
   size_t sfd = 0;
   bool found = false;
-  for (size_t k = 0; k + 16 + 48 <= bits.size() && k < 220 && !found; k++) {
+  for (size_t k = 0; k + 16 + 48 <= bits.size() && k < 280 && !found; k++) {
     uint16_t v = 0;
-    for (int j = 0; j < 16; j++)
-      v |= static_cast<uint16_t>(bits[k + j] << j);
+    for (int b = 0; b < 16; b++)
+      v |= static_cast<uint16_t>(bits[k + b] << b);
     if (v == 0xF3A0) {
       sfd = k;
       found = true;
     }
   }
   if (!found)
-    return true;
+    return 0;
   const size_t h0 = sfd + 16;
   auto field = [&](size_t at, int n) {
     unsigned v = 0;
-    for (int j = 0; j < n; j++)
-      v |= static_cast<unsigned>(bits[at + j]) << j;
+    for (int b = 0; b < n; b++)
+      v |= static_cast<unsigned>(bits[at + b]) << b;
     return v;
   };
   // CRC-16 (CCITT, preset ones, ones' complement) over SIGNAL, SERVICE, LENGTH; sent MSB first
@@ -933,20 +980,23 @@ bool Decoder::dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<
   for (int j = 0; j < 16; j++)
     crc |= static_cast<unsigned>(bits[h0 + 32 + j]) << (15 - j);
   if ((reg ^ 0xFFFF) != crc)
-    return true;
+    return 0;
   const unsigned sig = field(h0, 8), service = field(h0 + 8, 8), length_us = field(h0 + 16, 16);
   Frame f;
   f.fmt = 'B';
   f.rate_mbps = sig == 0x0A ? 1 : sig == 0x14 ? 2 : sig == 0x37 ? 5 : sig == 0x6E ? 11 : 0;
   if (!f.rate_mbps || length_us == 0)
-    return true;
+    return 0;
   // the samples the whole frame needs (1 and 2 Mb/s payloads are decoded; CCK: the header is enough)
   const uint64_t psym = sig == 0x0A ? 8 * static_cast<uint64_t>(length_us / 8) : sig == 0x14 ? 4 * static_cast<uint64_t>(length_us / 4) : 0;
-  const uint64_t want = start + (static_cast<uint64_t>(ph) + 20 * (h0 + 48 + psym + 2)) * static_cast<uint64_t>(_dec) + _lp.size();
-  if (want > end && want - start < 20000 * us) { // (the longest 1 Mb/s frame: ~19 ms)
-    need = want;
-    return false;
+  const uint64_t want = from + (static_cast<uint64_t>(ph) + 20 * (h0 + 48 + psym + 2)) * static_cast<uint64_t>(_dec) + _lp.size();
+  if (want > end && want - from < 20000 * us) { // (the longest 1 Mb/s frame: ~19 ms)
+    j.need = want;
+    j.start = from;
+    return -1;
   }
+  if (psym && want - from > 360 * us + _lp.size()) // the whole frame (the same start, so the same timing)
+    demod(std::min(end, want) - from);
   f.dur_us = 192 + length_us;
   f.length = static_cast<int>(sig == 0x0A   ? length_us / 8
                               : sig == 0x14 ? length_us / 4
@@ -969,7 +1019,7 @@ bool Decoder::dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<
   f.snr_db = static_cast<float>(10 * std::log10(2 * std::norm(mean) / (var + 1e-30)));
   // the frame starts 144 symbols (SYNC 128 + SFD 16) before its header
   const double sync = static_cast<double>(ph) + 20.0 * (static_cast<double>(h0) - 144);
-  f.t = _t_end - static_cast<double>(_abs_end - start) / _fs + sync / 20e6 + (_dec == 2 ? 10 / 20e6 : 0);
+  f.t = _t_end - static_cast<double>(_abs_end - from) / _fs + sync / 20e6 + (_dec == 2 ? 10 / 20e6 : 0);
   const size_t p0 = h0 + 48, nb = static_cast<size_t>(f.length);
   std::vector<uint8_t> pb;
   if (sig == 0x0A && p0 + 8 * nb <= bits.size()) {
@@ -999,8 +1049,9 @@ bool Decoder::dsss_at(uint64_t start, uint64_t end, uint64_t &need, std::vector<
       parse_mac(by, f);
   }
   out.push_back(f);
-  _bdone = start + static_cast<uint64_t>(std::max(0.0, sync)) * static_cast<uint64_t>(_dec) + static_cast<uint64_t>(f.dur_us) * us;
-  return true;
+  // (sync may be a little negative when the SYNC was cut short)
+  _bdone = static_cast<uint64_t>(static_cast<int64_t>(from) + static_cast<int64_t>(std::lround(sync)) * _dec) + static_cast<uint64_t>(f.dur_us) * us;
+  return 1;
 }
 
 } // namespace wifi

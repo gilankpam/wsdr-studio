@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // The web version end to end on the 8812CU: the built app (web/dist-web, `npm run build:web`) in Chrome,
 // driven through its own Hub (window.__hub, present with ?e2e). Single view streaming, the Wi-Fi switch,
-// a Spectral-Map-style sweep of retunes, close. Needs WSDR_CHROME_PROFILE (tests/lib/chrome.mjs).
+// a Spectral-Map-style sweep of retunes, a 10 s recording into a "picked" folder (an OPFS subdirectory
+// stands in for the user's: the picker cannot be automated), close. Needs WSDR_CHROME_PROFILE
+// (tests/lib/chrome.mjs).
 //   WSDR_CHROME_PROFILE=... node tests/web-e2e.mjs
 import { startChrome } from './lib/chrome.mjs';
 
@@ -57,6 +59,34 @@ try {
   check(!(await c.ev(`__e2e.events.slice(${a0}).some((e) => e.type === 'alert' && e.kind === 'failed')`)), 'no failure alert during the sweep');
   st = await lastStatus();
   check(st?.rx?.restarts === 0 && st?.state === 'open', `still streaming after the sweep (restarts ${st?.rx?.restarts}, ${st?.state})`);
+
+  // recording: 10 s at 5 MS/s (20 MB/s) into the folder, via the page's storage
+  await c.ev(`(async () => {
+    const root = await navigator.storage.getDirectory();
+    await root.removeEntry('e2e-picked', { recursive: true }).catch(() => {});
+    window.__picked = await root.getDirectoryHandle('e2e-picked', { create: true });
+    __hub.setRecordFolder(__picked);
+  })()`);
+  const r0n = await c.ev(`__e2e.events.length`);
+  const rs = await req('record', { action: 'start' });
+  check(rs.type === 'ack', `record start ${rs.file ?? rs.msg ?? ''}`);
+  await c.sleep(10000);
+  check((await req('record', { action: 'stop' })).type === 'ack', 'record stop');
+  const rec = await c.until(`__e2e.events.slice(${r0n}).find((e) => e.type === 'recorded')`, 60000, 'recorded event');
+  check(!rec.error, `recorded without error ${rec.error ?? ''}`);
+  check(String(rec.file).startsWith('e2e-picked/'), `the event names the picked folder (${rec.file})`);
+  const base = String(rec.file).replace(/^.*\//, '').replace(/\.sigmf-data$/, '');
+  const got = await c.ev(`(async () => {
+    const size = async (d, n) => (await (await d.getFileHandle(n)).getFile()).size;
+    const meta = JSON.parse(await (await (await __picked.getFileHandle('${base}.sigmf-meta')).getFile()).text());
+    const left = [];
+    for await (const [n] of (await navigator.storage.getDirectory()).entries()) if (/\.sigmf-/.test(n)) left.push(n);
+    return { data: await size(__picked, '${base}.sigmf-data'), rate: meta.global['core:sample_rate'], left };
+  })()`);
+  summary.recording_mb = got.data / 1e6;
+  check(Math.abs(got.data - 200e6) <= 0.02 * 200e6, `data file ${(got.data / 1e6).toFixed(1)} MB (200 MB +- 2 %)`);
+  check(got.rate === 5000000, `meta core:sample_rate ${got.rate}`);
+  check(got.left.length === 0, `the recording left the page storage (${got.left.join(', ')})`);
 
   check((await req('close')).type === 'ack', 'close acked');
   await c.sleep(1000);

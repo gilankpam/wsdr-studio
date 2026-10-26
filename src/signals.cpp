@@ -68,10 +68,33 @@ void Finder::reset(double fs, double centre_hz) {
   _floor.assign(_nf, 0);
   _occ.assign(_nf, 0);
   _loudsum.assign(_nf, 0);
+  // BLE: a windowed sinc (cutoff 600 kHz, 8 bits long) to 4 MS/s, mixed per channel into its taps
+  _bdec = static_cast<int>(std::lround(_fs / 4e6));
+  const int nt = 8 * _bdec + 1;
+  std::vector<double> lp(nt);
+  double sum = 0;
+  for (int i = 0; i < nt; i++) {
+    const double m = i - (nt - 1) / 2.0, fc = 0.6e6 / _fs;
+    lp[i] = (m == 0 ? 2 * fc : std::sin(2 * kPi * fc * m) / (kPi * m)) * (0.54 - 0.46 * std::cos(2 * kPi * i / (nt - 1)));
+    sum += lp[i];
+  }
   for (const auto &[mhz, chan] : {std::pair{2402.0, 37}, {2426.0, 38}, {2480.0, 39}}) {
     const int k = static_cast<int>(std::lround((mhz * 1e6 - _centre) / (_fs / _nf) + 0.5 * _nf));
-    if (k >= 2 && k <= _nf - 3)
-      _advch.push_back({chan, k, mhz, false, 0, 0});
+    if (k < 2 || k > _nf - 3)
+      continue;
+    AdvChan a;
+    a.chan = chan;
+    a.bin = k;
+    a.mhz = mhz;
+    a.step = -2 * kPi * (mhz * 1e6 - _centre) / _fs;
+    for (int i = 0; i < nt; i++)
+      a.taps.push_back(std::polar(static_cast<float>(lp[i] / sum), static_cast<float>(a.step * i)));
+    a.white.resize(8 * 260);
+    for (unsigned i = 0, reg = (static_cast<unsigned>(chan) & 0x3F) | 0x40; i < a.white.size(); i++) {
+      a.white[i] = reg & 1;
+      reg = (reg >> 1) ^ ((reg & 1) ? 0x44 : 0);
+    }
+    _advch.push_back(std::move(a));
   }
 }
 
@@ -93,10 +116,10 @@ void Finder::feed(const cf *x, size_t n, double t_end, std::vector<Burst> &out) 
   while (!_adv.empty() && _adv.front().s0 + span <= _abs_end) {
     Adv a = _adv.front();
     _adv.erase(_adv.begin());
-    if (ble(a.s0 > _carry_at + m ? a.s0 - m : _carry_at, a.s0 + span, a.mhz, a.chan, a.b)) {
+    if (a.s0 >= _carry_at + m && ble(a.s0 - m, a.s0 + span, _advch[a.ch], a.b)) { // (the samples are kept 1 ms)
       a.b.kind = 'E';
       out.push_back(a.b);
-      _decoded.emplace_back(a.b.t - 30e-6, a.b.t + 420e-6);
+      _decoded.emplace_back(a.b.t, a.b.t + a.b.dur_us * 1e-6);
     }
   }
   // the narrow bursts held there: dropped when a decoded packet covers them, once its decode is done
@@ -161,8 +184,9 @@ void Finder::column(const cf *x, std::vector<Burst> &out) {
   }
 
   // the advertising channels: active while their three bins hold 6x their noise (gaps up to 10
-  // columns bridged); an active stretch of 50 us or more is decoded (below)
-  for (auto &a : _advch) {
+  // columns bridged); an active stretch of 50-512 us is decoded (below; longer is not a packet)
+  for (size_t ci = 0; ci < _advch.size(); ci++) {
+    AdvChan &a = _advch[ci];
     float p = 0, fl = 0;
     for (int k = a.bin - 1; k <= a.bin + 1; k++) {
       p += _p[k];
@@ -175,13 +199,11 @@ void Finder::column(const cf *x, std::vector<Burst> &out) {
       a.c1 = _col;
     } else if (a.on && _col > a.c1 + 10) {
       a.on = false;
-      if (a.c1 - a.c0 + 1 >= 8 && !_oven) {
+      if (a.c1 - a.c0 + 1 >= 8 && a.c1 - a.c0 + 1 <= 80 && !_oven) {
         Burst b;
-        b.t = time_of(a.c0 * static_cast<uint64_t>(_hop));
         b.mhz = a.mhz;
         b.bw_mhz = 2;
-        b.dur_us = static_cast<double>((a.c1 - a.c0 + 1) * static_cast<uint64_t>(_hop)) / _fs * 1e6;
-        _adv.push_back({a.c0 * static_cast<uint64_t>(_hop), a.mhz, a.chan, b});
+        _adv.push_back({a.c0 * static_cast<uint64_t>(_hop), ci, b});
       }
     }
   }
@@ -250,11 +272,6 @@ void Finder::end_track(size_t i, std::vector<Burst> &out) {
   b.dur_us = static_cast<double>(cols * static_cast<uint64_t>(_hop)) / _fs * 1e6;
   // Bluetooth hops: at 2.4 GHz, bursts of at most 3 ms, at least 4 within 100 ms on 3 frequencies
   b.kind = 'N';
-  for (const auto &a : _advch) // (held until that channel's decodes are in: it may be one of them)
-    if (std::abs(b.mhz - a.mhz) < 1.2) {
-      _held.push_back(b);
-      return;
-    }
   if (b.mhz > 2400 && b.mhz < 2484 && b.dur_us <= 3000) {
     _narrow.push_back({b.t, b.mhz});
     while (!_narrow.empty() && _narrow.front().t < b.t - 0.1)
@@ -266,6 +283,11 @@ void Finder::end_track(size_t i, std::vector<Burst> &out) {
     if (_narrow.size() >= 4 && std::unique(f.begin(), f.end()) - f.begin() >= 3)
       b.kind = 'T';
   }
+  for (const auto &a : _advch) // (held until that channel's decodes are in: it may be one of them)
+    if (std::abs(b.mhz - a.mhz) < 1.2) {
+      _held.push_back(b);
+      return;
+    }
   out.push_back(b);
 }
 
@@ -325,101 +347,83 @@ void Finder::oven(std::vector<Burst> &out) {
 // offset: it has 18 ones and 14 zeros); then the bits dewhitened
 // (x^7 + x^4 + 1 seeded from the channel), the PDU header's length, CRC-24 (0x00065B from 0x555555, sent
 // MSB first). A good CRC gives the advertiser's address and its name (AD types 0x08, 0x09).
-bool Finder::ble(uint64_t s0, uint64_t s1, double mhz, int chan, Burst &b) const {
-  const int dec = static_cast<int>(std::lround(_fs / 4e6)); // 10 or 5
-  static std::vector<float> lp;
-  static int lp_dec = 0;
-  if (lp_dec != dec) { // windowed sinc, cutoff 600 kHz, 8 bits' span
-    const int nt = 8 * dec + 1;
-    lp.assign(nt, 0);
-    double sum = 0;
-    for (int i = 0; i < nt; i++) {
-      const double m = i - (nt - 1) / 2.0, fc = 0.6e6 / _fs;
-      lp[i] = static_cast<float>((m == 0 ? 2 * fc : std::sin(2 * kPi * fc * m) / (kPi * m)) * (0.54 - 0.46 * std::cos(2 * kPi * i / (nt - 1))));
-      sum += lp[i];
-    }
-    for (auto &v : lp)
-      v = static_cast<float>(v / sum);
-    lp_dec = dec;
-  }
+bool Finder::ble(uint64_t s0, uint64_t s1, const AdvChan &a, Burst &b) const {
   const cf *x = &_carry[s0 - _carry_at];
-  const size_t n = s1 - s0, nt = lp.size();
-  const double step = -2 * kPi * (mhz * 1e6 - _centre) / _fs;
-  std::vector<cf> z;
-  for (size_t o = 0; o + nt <= n; o += static_cast<size_t>(dec)) {
+  const size_t n = s1 - s0, nt = a.taps.size(), dec = static_cast<size_t>(_bdec);
+  std::vector<cf> z; // (the taps mix relative to each output's first sample: a rotator per output)
+  for (size_t o = 0; o + nt <= n; o += dec) {
     cf acc = 0;
     for (size_t k = 0; k < nt; k++)
-      acc += x[o + k] * std::polar(lp[k], static_cast<float>(step * static_cast<double>(o + k)));
-    z.push_back(acc);
+      acc += x[o + k] * a.taps[k];
+    z.push_back(acc * std::polar(1.f, static_cast<float>(std::remainder(a.step * static_cast<double>(o), 2 * kPi))));
   }
-  if (z.size() < 4 * 80)
-    return false;
   std::vector<float> d(z.size() - 1);
   for (size_t i = 0; i + 1 < z.size(); i++)
     d[i] = std::arg(z[i + 1] * std::conj(z[i]));
   static const uint32_t kAA = 0x8E89BED6;
-  // the whitening sequence for this channel (bit 6 set, bits 5..0 the channel index)
-  std::vector<uint8_t> wseq(8 * 260);
-  for (unsigned i = 0, reg = (static_cast<unsigned>(chan) & 0x3F) | 0x40; i < wseq.size(); i++) {
-    wseq[i] = reg & 1;
-    reg = (reg >> 1) ^ ((reg & 1) ? 0x44 : 0);
-  }
   for (int ph = 0; ph < 4; ph++) {
     std::vector<float> s; // one soft value per bit
     for (size_t i = static_cast<size_t>(ph); i + 4 <= d.size(); i += 4)
       s.push_back(d[i] + d[i + 1] + d[i + 2] + d[i + 3]);
-    for (size_t k = 0; k + 32 + 16 <= s.size(); k++) {
+    // (the access address within the first 80 bits: the activity started there, not a later packet)
+    for (size_t k = 0; k + 32 + 16 <= s.size() && k < 80; k++) {
       float m1 = 0, m0 = 0;
       for (int i = 0; i < 32; i++)
         (((kAA >> i) & 1) ? m1 : m0) += s[k + i];
       // the threshold: 0, or (a carrier offset) midway between the address's ones and zeros; the
       // address may have one bit wrong, the CRC decides
       for (const float mean : {0.f, (m1 / 18 + m0 / 14) / 2}) {
-      int wrong = 0;
-      for (int i = 0; i < 32; i++)
-        wrong += (s[k + i] > mean) != (((kAA >> i) & 1) != 0);
-      if (wrong > 1)
-        continue;
-      const size_t p = k + 32;
-      auto bit = [&](size_t i) { return static_cast<uint8_t>((s[p + i] > mean ? 1 : 0) ^ wseq[i]); };
-      int len = 0;
-      for (int j = 0; j < 8; j++)
-        len |= bit(8 + static_cast<size_t>(j)) << j;
-      const size_t nb = 16 + 8 * static_cast<size_t>(len);
-      if (len < 6 || len > 37 || p + nb + 24 > s.size())
-        continue;
-      unsigned reg = 0x555555;
-      for (size_t i = 0; i < nb; i++) {
-        const unsigned fb = ((reg >> 23) & 1) ^ bit(i);
-        reg = (reg << 1) & 0xFFFFFF;
-        if (fb)
-          reg ^= 0x00065B;
-      }
-      bool ok = true;
-      for (int i = 0; i < 24 && ok; i++)
-        ok = bit(nb + static_cast<size_t>(i)) == ((reg >> (23 - i)) & 1);
-      if (!ok)
-        continue;
-      std::vector<uint8_t> by(nb / 8);
-      for (size_t i = 0; i < nb; i++)
-        by[i / 8] |= static_cast<uint8_t>(bit(i) << (i % 8));
-      // ADV_IND, ADV_DIRECT_IND, ADV_NONCONN_IND, SCAN_RSP, ADV_SCAN_IND carry AdvA first; others not
-      const int type = by[0] & 0x0F;
-      if (type != 0 && type != 1 && type != 2 && type != 4 && type != 6)
-        return false;
-      char a[18];
-      std::snprintf(a, sizeof a, "%02x:%02x:%02x:%02x:%02x:%02x", by[7], by[6], by[5], by[4], by[3], by[2]);
-      b.addr = a;
-      b.random = (by[0] >> 6) & 1; // TxAdd
-      for (size_t i = 8; type != 1 && i + 1 < by.size();) { // the AD structures
-        const size_t l = by[i];
-        if (l == 0 || i + 1 + l > by.size())
-          break;
-        if (by[i + 1] == 0x08 || by[i + 1] == 0x09)
-          b.name = wifi::ssid_text(&by[i + 2], l - 1);
-        i += 1 + l;
-      }
-      return true;
+        int wrong = 0;
+        for (int i = 0; i < 32; i++)
+          wrong += (s[k + i] > mean) != (((kAA >> i) & 1) != 0);
+        if (wrong > 1)
+          continue;
+        const size_t p = k + 32;
+        auto bit = [&](size_t i) { return static_cast<uint8_t>((s[p + i] > mean ? 1 : 0) ^ a.white[i]); };
+        int len = 0;
+        for (int j = 0; j < 8; j++)
+          len |= bit(8 + static_cast<size_t>(j)) << j;
+        const size_t nb = 16 + 8 * static_cast<size_t>(len);
+        if (len < 6 || len > 37 || p + nb + 24 > s.size())
+          continue;
+        unsigned reg = 0x555555;
+        for (size_t i = 0; i < nb; i++) {
+          const unsigned fb = ((reg >> 23) & 1) ^ bit(i);
+          reg = (reg << 1) & 0xFFFFFF;
+          if (fb)
+            reg ^= 0x00065B;
+        }
+        bool ok = true;
+        for (int i = 0; i < 24 && ok; i++)
+          ok = bit(nb + static_cast<size_t>(i)) == ((reg >> (23 - i)) & 1);
+        if (!ok)
+          continue;
+        std::vector<uint8_t> by(nb / 8);
+        for (size_t i = 0; i < nb; i++)
+          by[i / 8] |= static_cast<uint8_t>(bit(i) << (i % 8));
+        // ADV_IND, ADV_DIRECT_IND, ADV_NONCONN_IND, SCAN_RSP, ADV_SCAN_IND carry AdvA first; others not
+        const int type = by[0] & 0x0F;
+        if (type != 0 && type != 1 && type != 2 && type != 4 && type != 6)
+          return false;
+        char addr[18];
+        std::snprintf(addr, sizeof addr, "%02x:%02x:%02x:%02x:%02x:%02x", by[7], by[6], by[5], by[4], by[3], by[2]);
+        b.addr = addr;
+        b.random = (by[0] >> 6) & 1; // TxAdd
+        // the packet: from its preamble (8 bits before the address; the filter delays by half its
+        // length) for 8 us a byte (preamble, address, header, payload, CRC)
+        const int64_t sym = ph + 4 * (static_cast<int64_t>(k) - 8);
+        const uint64_t at = s0 + static_cast<uint64_t>(std::max<int64_t>(0, sym)) * dec + nt / 2;
+        b.t = time_of(at);
+        b.dur_us = 8.0 * (len + 10);
+        for (size_t i = 8; type != 1 && i + 1 < by.size();) { // the AD structures
+          const size_t l = by[i];
+          if (l == 0 || i + 1 + l > by.size())
+            break;
+          if (by[i + 1] == 0x08 || by[i + 1] == 0x09)
+            b.name = wifi::ssid_text(&by[i + 2], l - 1);
+          i += 1 + l;
+        }
+        return true;
       }
     }
   }

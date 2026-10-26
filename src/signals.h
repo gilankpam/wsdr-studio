@@ -45,22 +45,25 @@ private:
   void release();
   void column(const cf *x, std::vector<Burst> &out);
   void end_track(size_t i, std::vector<Burst> &out);
-  bool ble(uint64_t s0, uint64_t s1, double mhz, int chan, Burst &b) const; // decode samples [s0, s1)
-  struct Adv {
-    uint64_t s0;                     // its burst's start (its packet may outlast the burst's track)
-    double mhz;
-    int chan;
-    Burst b;
-  };
-  std::vector<Adv> _adv;             // on an advertising channel, waiting for the packet's samples
   // the advertising channels inside the span: activity in their three bins, gaps up to 64 us bridged
   struct AdvChan {
     int chan, bin;                   // 37..39; the bin at its centre
     double mhz;
-    bool on;
-    uint64_t c0, c1;                 // first and last active column
+    bool on = false;
+    uint64_t c0 = 0, c1 = 0;         // first and last active column
+    std::vector<cf> taps;            // the channel to 0 Hz and ~600 kHz wide (mixer and filter in one)
+    double step = 0;                 // the mixer's phase step per sample
+    std::vector<uint8_t> white;      // its whitening sequence
   };
   std::vector<AdvChan> _advch;
+  int _bdec = 0;                     // to 4 MS/s: 10 or 5
+  struct Adv {
+    uint64_t s0;                     // where the activity started
+    size_t ch;                       // its channel (_advch)
+    Burst b;
+  };
+  std::vector<Adv> _adv;             // activity on an advertising channel, waiting for its samples
+  bool ble(uint64_t s0, uint64_t s1, const AdvChan &a, Burst &b) const; // decode samples [s0, s1)
   std::vector<Burst> _held;          // narrow bursts on an advertising channel, until its decodes are in
   std::vector<std::pair<double, double>> _decoded; // decoded packets' times (s): a burst over one is it
   void oven(std::vector<Burst> &out); // every 200 ms

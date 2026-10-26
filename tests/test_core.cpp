@@ -808,7 +808,22 @@ static void test_ble() {
     }
   CHECK(e == 1 && out.size() == 1);
   if (e != 1 || out.size() != 1)
-    std::printf("  (BLE: %zu reported, %d decoded)\n", out.size(), e);
+    std::printf("  (BLE: %zu reported, %d decoded)\n", out.size(), e);  // 10 ms of a carrier on that channel (longer than the samples kept): no packet, no crash
+  std::vector<std::complex<float>> y;
+  for (int i = 0; i < 800000; i++)
+    y.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  for (int i = 0; i < 400000; i++)
+    y.push_back(std::polar(0.3f, static_cast<float>(std::remainder(2 * M_PI * 4e6 * i / fs, 2 * M_PI))) + std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+  for (int i = 0; i < 80000; i++)
+    y.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  f.reset(fs, 2422e6);
+  out.clear();
+  for (size_t i = 0; i < y.size(); i += 8192) {
+    const size_t n = std::min<size_t>(8192, y.size() - i);
+    f.feed(&y[i], n, static_cast<double>(i + n) / fs, out);
+  }
+  for (const auto &b : out)
+    CHECK(b.kind != 'E');
 }
 
 // Network names: whatever bytes a beacon carries, the text is valid UTF-8 the JSON writer accepts.

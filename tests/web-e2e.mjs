@@ -80,7 +80,7 @@ try {
     const size = async (d, n) => (await (await d.getFileHandle(n)).getFile()).size;
     const meta = JSON.parse(await (await (await __picked.getFileHandle('${base}.sigmf-meta')).getFile()).text());
     const left = [];
-    for await (const [n] of (await navigator.storage.getDirectory()).entries()) if (/\.sigmf-/.test(n)) left.push(n);
+    for await (const [n] of (await navigator.storage.getDirectory()).entries()) if (n.startsWith('${base}')) left.push(n);
     return { data: await size(__picked, '${base}.sigmf-data'), rate: meta.global['core:sample_rate'], left };
   })()`);
   summary.recording_mb = got.data / 1e6;

@@ -299,6 +299,9 @@ export function Station(p: {
           case 'notice': // backend news for the user (e.g. the USB 3 switch)
             addBanner(String(e.text ?? ''));
             break;
+          case 'wifi':
+            d.addWifi(e.frames);
+            break;
           case 'recorded':
             setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error });
             break;
@@ -398,11 +401,17 @@ export function Station(p: {
         ...scale, wfMode: prefs.wfMode, smooth: prefs.smooth, overlay, dim: !open,
         wfPath: dsp.paths === 'b' ? 1 : 0, marker, markerLabel, chipNotch, notchWide,
         colour: VIEW_COLOUR[slot], pathColours: twoPaths ? ANT_COLOUR : null, ghostColour: VIEW_COLOUR[slot ^ 1],
-        showAvg: prefs.showAvg, showPeak: prefs.showPeak,
+        showAvg: prefs.showAvg, showPeak: prefs.showPeak, wifi: prefs.wifiMarks,
         staleText: rxState === 'starting' ? 'Applying settings…' : 'No data from the adapter',
       }),
-    [scale, prefs.wfMode, prefs.smooth, prefs.showAvg, prefs.showPeak, overlay, open, dsp.paths, marker, markerLabel, chipNotch, notchWide, rxState, slot, twoPaths],
+    [scale, prefs.wfMode, prefs.smooth, prefs.showAvg, prefs.showPeak, prefs.wifiMarks, overlay, open, dsp.paths, marker, markerLabel, chipNotch, notchWide, rxState, slot, twoPaths],
   );
+  // Wi-Fi frames are found in the backend only while this view shows them (its own waterfall: not in
+  // Panorama's stitched plot or the map)
+  const wantWifi = prefs.wifiMarks && mode !== 'panorama' && mode !== 'map';
+  useEffect(() => {
+    if (connected && open && !!dsp.wifi !== wantWifi) req('dsp', { wifi: wantWifi }).catch(() => {});
+  }, [wantWifi, dsp.wifi, connected, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A settings change: sent now when streaming, kept as a draft until Start otherwise.
   const set = (a: Partial<RxSettings>) => {

@@ -302,3 +302,7 @@ button.rtab.s1 { background: var(--view-b); }
   background: rgba(20, 26, 34, 0.94); color: #e0e6ee;
 }
 .views.map { display: flex; flex-direction: column; }
+
+/* Mark Wi-Fi frames: the marks' colours in the switch's caption */
+.toggle .wkey { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin: 0 2px 0 4px; vertical-align: baseline; }
+.toggle .wkey:first-child { margin-left: 0; }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "engine.h"
 #include "usbmode.h"
+#include "wifi.h"
 
 #include <set>
 
@@ -72,6 +73,7 @@ Engine::Engine(Callbacks cb, std::string record_dir, int slot, std::shared_ptr<C
       _rec(std::move(record_dir)) {
   _cmd = std::thread([this] { cmd_loop(); });
   _dsp = std::thread([this] { dsp_loop(); });
+  _wifi = std::thread([this] { wifi_loop(); });
   // free disk space every 2 s, on a thread of its own: a slow or hung file system must stall neither
   // the I/O thread (status) nor the DSP thread (the recording)
   _disk = std::thread([this] {
@@ -101,6 +103,13 @@ Engine::~Engine() {
   _ring.wake();
   if (_dsp.joinable())
     _dsp.join();
+  {
+    std::lock_guard<std::mutex> l(_wm);
+    _wquit = true;
+  }
+  _wcv.notify_all();
+  if (_wifi.joinable())
+    _wifi.join();
 }
 
 void Engine::submit(json cmd, std::function<void(const json &)> reply) {
@@ -230,11 +239,14 @@ json Engine::run(const json &c) {
     }
     if (c.contains("dc_remove"))
       n.dc_remove = flag(c, "dc_remove");
+    if (c.contains("wifi"))
+      n.wifi = flag(c, "wifi");
     {
       std::lock_guard<std::mutex> l(_dm);
       _dsp_cfg = n;
       _dsp_dirty = true;
     }
+    _wifi_on = n.wifi;
     _cb.event(settings());
     return {};
   }
@@ -552,7 +564,7 @@ json Engine::settings() const {
   }
   std::lock_guard<std::mutex> l(_dm);
   j["dsp"] = {{"fft", _dsp_cfg.fft}, {"rows_per_s", _dsp_cfg.rows_per_s}, {"paths", paths_name(_dsp_cfg.paths)},
-              {"dc_remove", _dsp_cfg.dc_remove}};
+              {"dc_remove", _dsp_cfg.dc_remove}, {"wifi", _dsp_cfg.wifi}};
   return j;
 }
 
@@ -640,6 +652,54 @@ json Engine::devices_json(const std::vector<DeviceInfo> &d) {
   return {{"type", "devices"}, {"devices", arr}};
 }
 
+// Wi-Fi frames from the samples the DSP thread hands over: found frames go out in batches as
+// {"type":"wifi","frames":[[t, centre MHz, width MHz, format, rate Mb/s, length, airtime us, SNR dB]...],
+// "dropped": banks skipped because this thread fell behind}.
+void Engine::wifi_loop() {
+  wifi::Decoder dec;
+  uint32_t gen = ~0u;
+  double fs = 0, centre = 0, sent = 0;
+  std::vector<wifi::Frame> found;
+  uint64_t dropped = 0;
+  for (;;) {
+    WifiChunk w;
+    {
+      std::unique_lock<std::mutex> l(_wm);
+      _wcv.wait_for(l, std::chrono::milliseconds(100), [&] { return _wquit || !_wq.empty(); });
+      if (_wquit)
+        return;
+      if (!_wq.empty()) {
+        w = std::move(_wq.front());
+        _wq.pop_front();
+      }
+    }
+    if (!w.x.empty()) {
+      if (w.gen != gen || w.fs != fs || w.centre != centre) { // a new run: no frame spans it
+        gen = w.gen;
+        fs = w.fs;
+        centre = w.centre;
+        dec.reset(fs, centre);
+      }
+      dec.feed(w.x.data(), w.x.size(), w.t_end, found);
+      std::lock_guard<std::mutex> l(_wm);
+      if (_wpool.size() < 8)
+        _wpool.push_back(std::move(w.x));
+    }
+    const double now = now_s();
+    const uint64_t d = _wifi_dropped.load();
+    if ((!found.empty() || d != dropped) && (now - sent > 0.2 || found.size() > 400)) {
+      json arr = json::array();
+      for (const auto &f : found)
+        arr.push_back({std::round(f.t * 1e6) / 1e6, f.centre_hz / 1e6, f.bw_mhz, std::string(1, f.fmt), f.rate_mbps, f.length,
+                       std::round(f.dur_us), std::round(f.snr_db * 10) / 10});
+      _cb.event({{"type", "wifi"}, {"frames", arr}, {"dropped", d}});
+      found.clear();
+      dropped = d;
+      sent = now;
+    }
+  }
+}
+
 void Engine::dsp_loop() {
   Spectrum sp;
   uint32_t gen = ~0u, cfg = ~0u;
@@ -684,6 +744,31 @@ void Engine::dsp_loop() {
         _rows++;
         _cb.row(encode_row(r, now_s()));
       });
+      // Wi-Fi frames: a copy of path A, stamped on the rows' clock (a row is stamped when its last
+      // samples are processed, here, so a frame lands in the row that holds it)
+      if (_wifi_on && !b->meta.gapped && (std::abs(b->meta.fs - 40e6) < 1e3 || std::abs(b->meta.fs - 20e6) < 1e3)) {
+        WifiChunk w;
+        {
+          std::lock_guard<std::mutex> l(_wm);
+          if (!_wpool.empty()) {
+            w.x = std::move(_wpool.back());
+            _wpool.pop_back();
+          }
+        }
+        w.x.resize(b->bytes / 8);
+        Spectrum::unpack(b->data.data(), w.x.size(), 0, w.x.data());
+        w.t_end = now_s();
+        w.fs = b->meta.fs;
+        w.centre = b->meta.centre_hz;
+        w.gen = b->meta.gen;
+        std::lock_guard<std::mutex> l(_wm);
+        if (_wq.size() < 64) {
+          _wq.push_back(std::move(w));
+          _wcv.notify_one();
+        } else {
+          _wifi_dropped++;
+        }
+      }
       // Every file has one centre, one rate and no gaps. Banks of the run the recording belongs to go
       // in; older ones (still queued from before a retune) are skipped; a newer run, or a gap in the
       // bank sequence (the DSP fell behind and the ring dropped banks), ends the file.

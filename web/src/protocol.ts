@@ -15,7 +15,11 @@ export type Caps = {
 };
 // allow_gapped: a gapped span may be used (only ever because the user picked one)
 export type RxSettings = { freq: number; rate_sel: number; wide: boolean; agc: boolean; gain_db: number; allow_gapped?: boolean };
-export type DspSettings = { fft: number; rows_per_s: number; paths: 'a' | 'b' | 'ab'; dc_remove: boolean };
+export type DspSettings = { fft: number; rows_per_s: number; paths: 'a' | 'b' | 'ab'; dc_remove: boolean; wifi?: boolean };
+// A Wi-Fi frame found in the samples (the "wifi" event): start (s, the rows' clock), channel centre
+// (MHz), width (MHz), format (L legacy, H 802.11n, V 802.11ac), L-SIG rate (Mb/s), length (bytes),
+// airtime (us), SNR (dB)
+export type WifiFrame = [t: number, mhz: number, bw: number, fmt: 'L' | 'H' | 'V', rate: number, len: number, us: number, snr: number];
 export type Status = {
   state: string; adapter: string; error: string; t: number; rows: number; ring_dropped: number; dsp_load: number;
   rx?: { state: string; banks: number; restarts: number; channel: number; width: number; centre: number; fs: number; gapped?: boolean; error: string;

@@ -5,7 +5,7 @@
 // frequencies are; the waterfall's lines are made of each view's newest row.
 import { channelsIn } from './channels';
 import { TURBO } from './colormap';
-import type { Row } from './protocol';
+import type { Row, WifiFrame } from './protocol';
 
 export type DisplayOpts = {
   dbMin: number; dbMax: number; // spectrum scale (dBFS)
@@ -25,7 +25,11 @@ export type DisplayOpts = {
   staleText: string;            // shown when rows stop arriving
   dim: boolean;                 // stopped: the last picture stays, faded
   stitch: Source[] | null;      // Panorama: the views on this axis (index = slot); null: one view
+  wifi: boolean;                // mark the Wi-Fi frames found in the samples on the waterfall
 };
+// The marks' colours by frame format (amber, green, pink: told apart by lightness too)
+export const WIFI_COLOUR = { L: '#ffb74d', H: '#81c784', V: '#f48fb1' } as const;
+const WIFI_NAME = { L: 'legacy', H: '11n', V: '11ac' } as const;
 // A view on a stitched axis.
 export type Source = {
   lo: number; hi: number;       // the span it shows (Hz)
@@ -72,6 +76,12 @@ export class Display {
   private seen = 0;
   private dirty = true;
   private raf = 0;
+  // Wi-Fi marks: each drawn row's time (newest first; one row per device pixel), rows drawn so far,
+  // frames newer than the newest row (drawn when it comes) and the frames kept for the hover readout
+  private rowT: number[] = [];
+  private rowNo = 0;
+  private wifiPending: WifiFrame[] = [];
+  private wifiKept: { f: WifiFrame; row: number }[] = [];
   private hover: number | null = null; // CSS x
   private hoverWfY = -1;               // CSS y over the waterfall (-1: over the spectrum)
   private sepRows = -1;                // rows since the newest span separator (older rows: another span)
@@ -91,7 +101,7 @@ export class Display {
   private off: (() => void)[] = [];
   opts: DisplayOpts = {
     dbMin: -110, dbMax: -20, wfFloor: -100, wfMode: 'max', wfPath: 0, smooth: 0.7, marker: null, markerLabel: 'requested', chipNotch: false, notchWide: false, colour: '#4fc3f7', pathColours: null, ghostColour: '#c792ea', showAvg: true, showPeak: true,
-    overlay: null, staleText: 'No data from the adapter', dim: false, stitch: null,
+    overlay: null, staleText: 'No data from the adapter', dim: false, stitch: null, wifi: false,
   };
   onRetune: (freq: number) => void = () => {};
 
@@ -526,6 +536,9 @@ export class Display {
     const w = W - L;
     if (w <= 0) return;
     c.drawImage(this.wf, L, 0, w, H - 1, L, 1, w, H - 1);
+    this.rowNo++;
+    this.rowT.unshift(r.t);
+    if (this.rowT.length > H) this.rowT.length = H;
     if (this.sepRows >= 0) this.sepRows++;
     if (this.seps.length) {
       for (const s of this.seps) s.row++;
@@ -566,6 +579,7 @@ export class Display {
       this.seps.unshift({ row: 0, n, label: n > 1 ? `▼ before: ${n} changes (older rows not on this axis)` : label });
       this.drawSeps();
       this.wfSpan = span;
+      this.wifiPending = []; // frames of the old tuning
       return;
     }
     this.wfSpan = span;
@@ -596,6 +610,66 @@ export class Display {
       px[x] = this.colour(v);
     }
     c.putImageData(img, L, 0);
+    if (!this.opts.stitch) {
+      this.wfRange = { lo: rows[0].lo, hi: rows[0].hi };
+      const due = this.wifiPending.filter((f) => f[0] <= r.t);
+      this.wifiPending = this.wifiPending.filter((f) => f[0] > r.t);
+      for (const f of due) this.wifiMark(f, 0);
+    }
+  }
+
+  private wfRange: { lo: number; hi: number } | null = null;
+  // Wi-Fi frames found in this view's samples: each on the row whose time covers its start (frames come
+  // a little after their rows, so most land a few rows down)
+  addWifi(frames: WifiFrame[]) {
+    if (!this.opts.wifi || this.opts.stitch) return;
+    for (const f of frames) {
+      if (!this.rowT.length || f[0] > this.rowT[0]) {
+        this.wifiPending.push(f);
+        continue;
+      }
+      let j = 0; // rowT[j] >= t > rowT[j + 1]
+      while (j + 1 < this.rowT.length && this.rowT[j + 1] >= f[0]) j++;
+      if (j + 1 >= this.rowT.length) continue; // older than the picture
+      this.wifiMark(f, j);
+    }
+    if (this.wifiPending.length > 2000) this.wifiPending.splice(0, this.wifiPending.length - 2000);
+  }
+
+  // A tick at both edges of the frame's channel on its row: rows of ticks outline the Wi-Fi activity
+  private wifiMark(f: WifiFrame, y: number) {
+    const rg = this.wfRange;
+    if (!rg) return;
+    const lo = (f[1] - f[2] / 2) * 1e6, hi = (f[1] + f[2] / 2) * 1e6;
+    if (hi <= rg.lo || lo >= rg.hi) return;
+    const L = this.plotLeft(), w = this.wf.width - L, d = Math.max(1, Math.round(this.dpr));
+    const xOf = (hz: number) => L + Math.round(((hz - rg.lo) / (rg.hi - rg.lo)) * w);
+    const c = this.wfCtx, col = WIFI_COLOUR[f[3]] ?? WIFI_COLOUR.L;
+    // the colour inside the channel, a dark pixel just outside it: visible on any waterfall colour
+    const tick = (x: number, inward: number) => {
+      c.fillStyle = '#0b0e13';
+      c.fillRect(inward > 0 ? x - d : x + 2 * d, y, d, 1);
+      c.fillStyle = col;
+      c.fillRect(x, y, 2 * d, 1);
+    };
+    if (lo > rg.lo) tick(xOf(lo), 1);
+    if (hi < rg.hi) tick(xOf(hi) - 2 * d, -1);
+    this.wifiKept.push({ f, row: this.rowNo - y });
+    if (this.wifiKept.length > 8000) this.wifiKept.splice(0, 2000);
+  }
+
+  // The Wi-Fi frames under the pointer: on that row (+-2) and covering that frequency
+  private wifiAt(f: number, rowsAgo: number): string | null {
+    const row = this.rowNo - rowsAgo;
+    const hit = this.wifiKept.filter((k) => Math.abs(k.row - row) <= 2 && Math.abs(f - k.f[1] * 1e6) <= (k.f[2] / 2) * 1e6);
+    if (!hit.length) return null;
+    const by: Record<string, number> = {};
+    for (const k of hit) by[WIFI_NAME[k.f[3]]] = (by[WIFI_NAME[k.f[3]]] ?? 0) + 1;
+    const rates = hit.map((k) => k.f[4]), snr = hit.map((k) => k.f[7]).sort((a, b) => a - b);
+    const kinds = Object.entries(by).map(([k, n]) => `${k} ${n}`).join(', ');
+    const rate = Math.min(...rates) === Math.max(...rates) ? `${rates[0]}` : `${Math.min(...rates)}–${Math.max(...rates)}`;
+    const ch = hit[0].f;
+    return `Wi-Fi ${ch[1].toFixed(0)} MHz${ch[2] > 20 ? ` (${ch[2]} MHz)` : ''}: ${hit.length} frame${hit.length > 1 ? 's' : ''} (${kinds}) · ${rate} Mb/s · SNR ${snr[snr.length >> 1].toFixed(0)} dB`;
   }
 
   private drawSpectrum() {
@@ -893,10 +967,11 @@ export class Display {
           const wy = this.hoverWfY * d;
           const older = this.hoverWfY >= 0 && this.sepRows >= 0 && wy > this.sepRows;
           const beforeStop = this.hoverWfY >= 0 && (this.opts.dim || (this.stopRows >= 0 && wy > this.stopRows));
+          const wifi = this.hoverWfY >= 0 && !older && this.opts.wifi ? this.wifiAt(f, Math.round(wy)) : null;
           const txt = older
             ? 'older rows: another frequency/span (see the label at the line)'
             : this.hoverWfY >= 0
-              ? `${this.opts.stitch ? `${SLOT[r.slot]} · ` : ''}${(f / 1e6).toFixed(3)} MHz · ${beforeStop ? 'before Stop' : `${(wy / this.rowsPerS).toFixed(1)} s ago`}`
+              ? `${this.opts.stitch ? `${SLOT[r.slot]} · ` : ''}${(f / 1e6).toFixed(3)} MHz · ${beforeStop ? 'before Stop' : `${(wy / this.rowsPerS).toFixed(1)} s ago`}${wifi ? ` · ${wifi}` : ''}`
               : `${this.opts.stitch ? `${SLOT[r.slot]} · ` : ''}${(f / 1e6).toFixed(3)} MHz · avg ${sm[b].toFixed(1)} · peak ${pk[b].toFixed(1)} dBFS`;
           c.font = `${12 * d}px system-ui, sans-serif`;
           const tw = c.measureText(txt).width + 12 * d;

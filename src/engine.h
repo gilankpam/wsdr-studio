@@ -9,6 +9,7 @@
 #pragma once
 
 #include <atomic>
+#include <complex>
 #include <condition_variable>
 #include <deque>
 #include <map>
@@ -121,7 +122,23 @@ private:
   std::deque<std::pair<json, std::function<void(const json &)>>> _q;
   bool _quit = false;
   std::condition_variable _diskcv;
-  std::thread _cmd, _dsp, _disk;
+  std::thread _cmd, _dsp, _disk, _wifi;
+
+  // Wi-Fi frames: the DSP thread hands copies of path A's samples to their own thread (dropped when it
+  // falls behind), which sends what it finds as "wifi" events, a few times a second
+  struct WifiChunk {
+    std::vector<std::complex<float>> x;
+    double t_end = 0, fs = 0, centre = 0;
+    uint32_t gen = 0;
+  };
+  void wifi_loop();
+  std::mutex _wm;
+  std::condition_variable _wcv;
+  std::deque<WifiChunk> _wq;
+  std::vector<std::vector<std::complex<float>>> _wpool; // spare buffers
+  bool _wquit = false;
+  std::atomic<bool> _wifi_on{false};
+  std::atomic<uint64_t> _wifi_dropped{0};
 
   mutable std::mutex _dm; // DSP settings handoff (command thread -> DSP thread)
   DspConfig _dsp_cfg;

@@ -60,12 +60,13 @@ export type Prefs = {
   sidebar: boolean;                               // sidebar shown
   showAvg: boolean; showPeak: boolean;            // traces drawn
   mapRange: Range; mapDwell: number; mapGapped: boolean; // Spectral Map: what it sweeps, ms per step, gapped steps allowed
+  wifiMarks: boolean;                             // mark the Wi-Fi frames decoded from the samples
 };
 export function loadPrefs(): Prefs {
   const d: Prefs = {
     smooth: 0.7, wfMode: 'max', scale: null, retuned: false, fft: 8192, tuning: null, tuningB: null,
     mode: 'single', locks: { freq: true, span: true, gain: false }, ghost: true, offsetTuning: false,
-    sidebar: true, showAvg: true, showPeak: true, mapRange: 'u12', mapDwell: 250, mapGapped: false,
+    sidebar: true, showAvg: true, showPeak: true, mapRange: 'u12', mapDwell: 250, mapGapped: false, wifiMarks: false,
   };
   try {
     const p = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}');

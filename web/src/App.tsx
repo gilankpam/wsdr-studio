@@ -9,6 +9,7 @@ import type { Device, RxSettings } from './protocol';
 import { Station, type Link, type StationHandle, type ViewInfo } from './Station';
 import { RANGES, planId, sweepPlan, type Range } from './bands';
 import { BandRuler } from './BandRuler';
+import { WIFI_COLOUR } from './display';
 import { Panorama } from './Panorama';
 import { SpectralMap } from './SpectralMap';
 import { survey, type Survey } from './survey';
@@ -670,6 +671,26 @@ export default function App() {
                     <span className="muted">dBFS</span>
                   </span>
                 </div>
+                {!inMap && mode !== 'panorama' && (
+                  <button
+                    className={prefs.wifiMarks ? 'toggle on' : 'toggle'}
+                    role="switch"
+                    aria-checked={prefs.wifiMarks}
+                    onClick={() => updatePrefs({ wifiMarks: !prefs.wifiMarks })}
+                    title="Finds Wi-Fi frames in the samples themselves (20 and 40 MHz spans) and marks each on the waterfall at its channel's edges; hover the waterfall for what they were"
+                  >
+                    <span className="tlabel">
+                      Mark Wi-Fi frames
+                      <small>
+                        <i className="wkey" style={{ background: WIFI_COLOUR.L }} /> legacy <i className="wkey" style={{ background: WIFI_COLOUR.H }} /> 11n{' '}
+                        <i className="wkey" style={{ background: WIFI_COLOUR.V }} /> 11ac
+                      </small>
+                    </span>
+                    <span className="switch" aria-hidden="true">
+                      <i />
+                    </span>
+                  </button>
+                )}
                 <div className="kv">
                   <span>{inMap ? 'Map shows' : 'Waterfall'}</span>
                   <Seg

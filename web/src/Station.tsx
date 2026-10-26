@@ -12,7 +12,7 @@ import type { Caps, Device, DspSettings, Rate, RxSettings, Row, Status, WifiFram
 import { Seg } from './ui';
 import {
   ANT_COLOUR, LOCKED, SLOT_NAME, UDEV_CMD, isDual, VIEW_COLOUR, bandOf, baseName, bytes, chanShort, devKey, devLabel, devTitle, fmtClock,
-  fmtDur, gappedDuty, loadPrefs, mhz, ratesFor, snap, spanLabel, type Mode, type Prefs, type Scale, type Tuning,
+  diskWarning, fmtDur, gappedDuty, loadPrefs, mhz, ratesFor, snap, spanLabel, type Mode, type Prefs, type Scale, type Tuning,
 } from './util';
 
 type Banner = { id: number; text: string; kind: 'info' | 'error' };
@@ -658,6 +658,7 @@ export function Station(p: {
   const recRate = fsNow * 4; // bytes/s (int16 I + Q)
   const diskFree = status?.disk_free ?? 0;
   const secsLeft = diskFree / recRate;
+  const diskWarn = diskWarning(status?.disk_free, recRate);
   const lockTitle = locked ? LOCKED : undefined;
   const runGapped = !!run?.gapped;
   const recTitle = !recording && gapped
@@ -1002,7 +1003,7 @@ export function Station(p: {
         <canvas ref={wfRef} className="waterfall" />
       </main>
 
-      {(warn.length > 0 || (!prefs.retuned && open && !recording) || (recording && secsLeft < 60)) && (
+      {(warn.length > 0 || (!prefs.retuned && open && !recording) || (recording && diskWarn)) && (
         <footer className="vfoot">
           {warn.map((w) => (
             <span
@@ -1013,7 +1014,7 @@ export function Station(p: {
               {w}
             </span>
           ))}
-          {recording && secsLeft < 60 && <span className="warn">disk nearly full: {fmtDur(secsLeft)} left</span>}
+          {recording && diskWarn && <span className="warn">{diskWarn}</span>}
           {!prefs.retuned && open && !recording && <span className="hint">tip: double-click the spectrum to tune there</span>}
         </footer>
       )}

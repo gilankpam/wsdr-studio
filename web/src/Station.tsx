@@ -7,6 +7,7 @@ import { channelAt } from './channels';
 import { Display, type Source } from './display';
 import type { Hub } from './hub';
 import { Constellation } from './Constellation';
+import { PAIR_TITLE, pairAdapter, type UsbLike } from './pairing';
 import type { Caps, Device, DspSettings, FramePoints, Rate, RxSettings, Row, Status, WifiFrame } from './protocol';
 import { Seg } from './ui';
 import {
@@ -139,6 +140,12 @@ export function Station(p: {
     if (kind === 'info') window.setTimeout(() => setBanners((b) => b.filter((x) => x.id !== id)), 6000);
   };
   const dropBanner = (id: number) => setBanners((b) => b.filter((x) => x.id !== id));
+  const web = hub.kind === 'web';
+  const pair = () =>
+    pairAdapter((navigator as unknown as { usb: UsbLike }).usb).then(
+      (r) => r === 'paired' && req('scan').catch(() => {}),
+      (e: Error) => addBanner(`Pairing failed: ${e.message}`, 'error'),
+    );
   const req = (cmd: string, args: Record<string, unknown> = {}) =>
     hub.request(cmd, { ...args, slot }).catch((e: Error & { kind?: string }) => {
       addBanner(e.message, e.kind === 'busy' ? 'info' : 'error'); // "try again in a moment" is not a fault
@@ -737,9 +744,14 @@ export function Station(p: {
               ⟳
             </button>
           )}
+          {web && !open && (
+            <button disabled={opening} onClick={() => void pair()} title={PAIR_TITLE}>
+              Pair adapter…
+            </button>
+          )}
         </div>
         {twoPaths && <Seg wide value={dsp.paths} disabled={locked} options={[['a', 'Ant 1'], ['b', 'Ant 2'], ['ab', 'Both']]} onChange={setPaths} title="Antennas" />}
-        {sel && sel.driver && sel.driver !== 'usbfs' && !open && (
+        {!web && sel && sel.driver && sel.driver !== 'usbfs' && !open && (
           <span className="note">The kernel driver <code>{sel.driver}</code> is using this adapter; ▶ Start takes it over.</span>
         )}
         {sel && sel.pid === 0xb812 && !open && sel.speed_mbps < 5000 && (
@@ -1004,10 +1016,17 @@ export function Station(p: {
               <line x1="10" y1="21" x2="14" y2="21" />
             </svg>
             <h2>No adapter found</h2>
-            <p>Plug in an RTL8812BU, RTL8812CU or RTL8812EU. It appears here by itself; Rescan looks again now.</p>
+            {web ? (
+              <>
+                <p>Plug in an RTL8812BU, RTL8812CU or RTL8812EU, then let this page use it (Chrome asks once per adapter).</p>
+                <button onClick={() => void pair()} title={PAIR_TITLE}>Pair adapter…</button>
+              </>
+            ) : (
+              <p>Plug in an RTL8812BU, RTL8812CU or RTL8812EU. It appears here by itself; Rescan looks again now.</p>
+            )}
             <button onClick={() => req('scan').catch(() => {})}>⟳ Rescan</button>
           </div>
-        ) : sel && !sel.can_open ? (
+        ) : !web && sel && !sel.can_open ? (
           <div className="vcard" role="status">
             <svg aria-hidden="true" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#e0b46a" strokeWidth="1.6">
               <rect x="5" y="11" width="14" height="10" rx="2" />

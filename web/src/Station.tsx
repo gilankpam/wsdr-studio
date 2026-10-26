@@ -313,7 +313,7 @@ export function Station(p: {
             addBanner(String(e.text ?? ''));
             break;
           case 'wifi':
-            d.addWifi(e.frames);
+            d.addWifi(e.frames, e.other ?? []);
             link.wifi(e.frames);
             if (wifiDropped >= 0 && e.dropped > wifiDropped) setWifiSkipped(Date.now()); // the backend fell behind: some samples not searched
             wifiDropped = e.dropped;

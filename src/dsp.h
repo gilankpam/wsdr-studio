@@ -22,12 +22,16 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "iqdsp.h"
 #include "receiver.h"
 
 namespace studio {
+
+// FFTW's planner is not thread-safe: every plan is made and destroyed under this lock.
+std::mutex &fftw_plan_mutex();
 
 constexpr int kMaxBins = 4096;
 constexpr int kGappedMaxFft = 8192; // one LA bank (BankMeta::gapped)

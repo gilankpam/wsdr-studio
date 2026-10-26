@@ -5,7 +5,7 @@
 // frequencies are; the waterfall's lines are made of each view's newest row.
 import { channelsIn } from './channels';
 import { TURBO } from './colormap';
-import type { Row, WifiFrame } from './protocol';
+import type { OtherSignal, Row, WifiFrame } from './protocol';
 
 export type DisplayOpts = {
   dbMin: number; dbMax: number; // spectrum scale (dBFS)
@@ -32,6 +32,14 @@ export type DisplayOpts = {
 // keeps them visible on any colour)
 export const WIFI_COLOUR = { L: '#ffffff', H: '#ff4fd8', V: '#c4a7ff', B: '#fff59d' } as const;
 const WIFI_NAME = { L: 'legacy', H: '11n', V: '11ac', B: '11b' } as const;
+// other signals share one colour (aquamarine); the hover names their kind
+export const OTHER_COLOUR = '#7fffd4';
+const OTHER_NAME = { T: 'Bluetooth', N: 'narrowband', M: 'microwave oven' } as const;
+// a mark on the waterfall: a Wi-Fi frame, or another signal in the same shape (rate and length 0)
+type Mark = [t: number, mhz: number, bw: number, fmt: WifiFrame[3] | OtherSignal[3], rate: number, len: number, us: number, snr: number,
+  ta?: string | null, bssid?: string | null, ssid?: string | null, ch?: number];
+const isWifiFmt = (k: Mark[3]): k is WifiFrame[3] => k in WIFI_NAME;
+const isWifi = (m: Mark) => isWifiFmt(m[3]);
 // A view on a stitched axis.
 export type Source = {
   lo: number; hi: number;       // the span it shows (Hz)
@@ -83,8 +91,8 @@ export class Display {
   // frames kept for the hover readout
   private rowT: { t: number; lo: number; hi: number } [] = [];
   private rowNo = 0;
-  private wifiPending: WifiFrame[] = [];
-  private wifiKept: { f: WifiFrame; row: number }[] = [];
+  private wifiPending: Mark[] = [];
+  private wifiKept: { f: Mark; row: number }[] = [];
   private wifiNames = new Map<string, string>(); // BSSID -> network name, from the beacons seen here
   private hover: number | null = null; // CSS x
   private hoverWfY = -1;               // CSS y over the waterfall (-1: over the spectrum)
@@ -625,9 +633,10 @@ export class Display {
 
   // Wi-Fi frames found in this view's samples: each on the row whose time covers its start (frames come
   // a little after their rows, so most land a few rows down)
-  addWifi(frames: WifiFrame[]) {
+  addWifi(frames: WifiFrame[], other: OtherSignal[] = []) {
     if (!this.opts.wifi || this.opts.stitch || this.opts.dim) return; // (stopped: the picture is kept as it was)
-    for (const f of frames) {
+    const marks: Mark[] = [...frames, ...other.map((o): Mark => [o[0], o[1], o[2], o[3], 0, 0, o[4], 0])];
+    for (const f of marks) {
       if (f[9] && f[10] != null && (f[10] || !this.wifiNames.has(f[9]))) {
         if (!this.wifiNames.has(f[9]) && this.wifiNames.size >= 300) this.wifiNames.delete(this.wifiNames.keys().next().value!);
         this.wifiNames.set(f[9], f[10] || '(hidden)');
@@ -648,7 +657,7 @@ export class Display {
   // centre subcarrier empty, so there it hides none of the signal; an 802.11b mark does cover a little);
   // a dark pixel on each side keeps it visible on any waterfall colour. Rows of marks show the
   // channel's activity.
-  private wifiMark(f: WifiFrame, y: number) {
+  private wifiMark(f: Mark, y: number) {
     const rg = this.rowT[y];
     if (!rg || rg.hi <= rg.lo) return; // a separator line: no span
     const hz = f[1] * 1e6;
@@ -663,20 +672,26 @@ export class Display {
     };
     c.fillStyle = '#0b0e13';
     box(x - 5 * d, x + 5 * d);
-    c.fillStyle = WIFI_COLOUR[f[3]] ?? WIFI_COLOUR.L;
+    const fmt = f[3];
+    c.fillStyle = isWifiFmt(fmt) ? WIFI_COLOUR[fmt] : OTHER_COLOUR;
     box(x - 4 * d, x + 4 * d);
     this.wifiKept.push({ f, row: this.rowNo - y });
     if (this.wifiKept.length > 4000 && this.wifiKept[0].row < this.rowNo - this.wf.height)
       this.wifiKept = this.wifiKept.filter((k) => k.row >= this.rowNo - this.wf.height); // off the picture
   }
 
-  // The Wi-Fi frames under the pointer: on that row (+-2) and covering that frequency
+  // The Wi-Fi frames and other signals under the pointer: on that row (+-2) and covering that frequency
   private wifiAt(f: number, rowsAgo: number): string | null {
     const row = this.rowNo - rowsAgo;
-    const hit = this.wifiKept.filter((k) => Math.abs(k.row - row) <= 2 && Math.abs(f - k.f[1] * 1e6) <= (k.f[2] / 2) * 1e6);
-    if (!hit.length) return null;
+    const near = this.wifiKept.filter((k) => Math.abs(k.row - row) <= 2 && Math.abs(f - k.f[1] * 1e6) <= (k.f[2] / 2) * 1e6);
+    const hit = near.filter((k) => isWifi(k.f)), oth = near.filter((k) => !isWifi(k.f));
+    const other = this.otherText(oth.map((k) => k.f));
+    if (!hit.length) return other;
     const by: Record<string, number> = {};
-    for (const k of hit) by[WIFI_NAME[k.f[3]]] = (by[WIFI_NAME[k.f[3]]] ?? 0) + 1;
+    for (const k of hit) {
+      const fmt = k.f[3];
+      if (isWifiFmt(fmt)) by[WIFI_NAME[fmt]] = (by[WIFI_NAME[fmt]] ?? 0) + 1;
+    }
     // (11n/ac frames carry 6 Mb/s in their legacy header whatever their real rate: legacy and 11b rates only)
     const rates = hit.filter((k) => k.f[3] === 'L' || k.f[3] === 'B').map((k) => (k.f[3] === 'B' && k.f[4] === 5 ? 5.5 : k.f[4]));
     const snr = hit.map((k) => k.f[7]).sort((a, b) => a - b);
@@ -689,7 +704,18 @@ export class Display {
     const from: Record<string, number> = {};
     for (const k of hit) if (k.f[8]) from[this.wifiNames.get(k.f[8]) ?? k.f[8]] = (from[this.wifiNames.get(k.f[8]) ?? k.f[8]] ?? 0) + 1;
     const who = Object.entries(from).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k]) => k);
-    return `Wi-Fi ${ch}: ${hit.length} frame${hit.length > 1 ? 's' : ''} (${kinds})${rate} · SNR ${snr[snr.length >> 1].toFixed(0)} dB${who.length ? ` · from ${who.join(', ')}` : ''}`;
+    return `Wi-Fi ${ch}: ${hit.length} frame${hit.length > 1 ? 's' : ''} (${kinds})${rate} · SNR ${snr[snr.length >> 1].toFixed(0)} dB${who.length ? ` · from ${who.join(', ')}` : ''}${other ? ` · ${other}` : ''}`;
+  }
+
+  // e.g. "Bluetooth 3, narrowband 1 · 2426 MHz · 366 µs"
+  private otherText(ms: Mark[]): string | null {
+    if (!ms.length) return null;
+    const by: Record<string, number> = {};
+    for (const m of ms) by[OTHER_NAME[m[3] as OtherSignal[3]]] = (by[OTHER_NAME[m[3] as OtherSignal[3]]] ?? 0) + 1;
+    const kinds = Object.entries(by).map(([k, n]) => (k === OTHER_NAME.M ? k : `${k} ${n}`)).join(', ');
+    const bursts = ms.filter((m) => m[3] !== 'M');
+    const mhz = ms.map((m) => m[1]).sort((a, b) => a - b), us = bursts.map((m) => m[6]).sort((a, b) => a - b);
+    return `${kinds} · ${mhz[mhz.length >> 1].toFixed(0)} MHz${us.length ? ` · ${us[us.length >> 1].toFixed(0)} µs` : ''}`;
   }
 
   private drawSpectrum() {

@@ -11,8 +11,12 @@
 
 namespace studio {
 
+std::mutex &fftw_plan_mutex() {
+  static std::mutex m;
+  return m;
+}
+
 namespace {
-std::mutex g_fftw_plan_mutex; // FFTW planning is not thread-safe
 
 int sext12(uint32_t v) { return static_cast<int>(static_cast<int32_t>(v << 20) >> 20); }
 } // namespace
@@ -30,7 +34,7 @@ struct Spectrum::Path {
   double row_t0 = 0;              // gapped runs: when the current row started (clock)
 
   Path(int idx, int n) : index(idx) {
-    std::lock_guard<std::mutex> l(g_fftw_plan_mutex);
+    std::lock_guard<std::mutex> l(fftw_plan_mutex());
     in = fftwf_alloc_complex(n);
     out = fftwf_alloc_complex(n);
     plan = fftwf_plan_dft_1d(n, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
@@ -40,7 +44,7 @@ struct Spectrum::Path {
     one.assign(bins, 0.f);
   }
   ~Path() {
-    std::lock_guard<std::mutex> l(g_fftw_plan_mutex);
+    std::lock_guard<std::mutex> l(fftw_plan_mutex());
     fftwf_destroy_plan(plan);
     fftwf_free(in);
     fftwf_free(out);

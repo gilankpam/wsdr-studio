@@ -657,7 +657,7 @@ json Engine::devices_json(const std::vector<DeviceInfo> &d) {
 // {"type":"wifi","frames":[[t, centre MHz, width MHz, format, rate Mb/s, length, airtime us, SNR dB
 // (, sender, BSSID, network name, channel: 6 Mb/s frames decoded whole)]...],
 // "other":[[t, centre MHz, width MHz, kind (T Bluetooth, N narrowband, M microwave oven, E BLE
-// advertising), us (, E: address, random, name)]...],
+// advertising, C steady carrier), us (, E: address, random, name; C: null, null, null, comb kHz)]...],
 // "dropped": banks skipped because this thread fell behind}.
 void Engine::wifi_loop() {
   wifi::Decoder dec;
@@ -724,6 +724,8 @@ void Engine::wifi_loop() {
           e.push_back(o.addr);
           e.push_back(o.random);
           e.push_back(o.name);
+        } else if (o.kind == 'C') { // a steady carrier: the comb around it
+          e.insert(e.end(), {nullptr, nullptr, nullptr, std::round(o.comb_khz * 10) / 10});
         }
         oth.push_back(e);
       }

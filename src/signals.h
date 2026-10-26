@@ -2,7 +2,9 @@
 // Signals other than Wi-Fi in the raw I/Q, tagged by cheap rules (after the Airshark idea): narrow
 // bursts from a short-time spectrum (Bluetooth when they hop, else "narrowband"), and a microwave
 // oven from the span's activity switching with the mains. A narrow burst on a BLE advertising channel
-// is decoded (its device address and name). Receive only.
+// is decoded (its device address and name). A narrow line that stays (a steady carrier) is reported
+// with the spacing of the comb around it, if any (a video line rate: a display clock's harmonic).
+// Receive only.
 #pragma once
 
 #include <complex>
@@ -22,8 +24,9 @@ struct Burst {
   double bw_mhz = 0; // width
   double dur_us = 0;
   // 'T' Bluetooth (narrow bursts hopping), 'N' other narrowband, 'M' microwave oven, 'E' BLE advertising
-  // (decoded: CRC good)
+  // (decoded: CRC good), 'C' a steady carrier (every 200 ms while it lasts)
   char kind = 'N';
+  double comb_khz = 0; // 'C': the spacing of evenly spaced lines around it (0: none)
   std::string addr;  // 'E': the advertiser's address (aa:bb:..., as shown by phones)
   bool random = false; // 'E': a random (often rotating) address rather than a public one
   std::string name;  // 'E': its name, if it sends one (UTF-8 checked)
@@ -67,6 +70,7 @@ private:
   std::vector<Burst> _held;          // narrow bursts on an advertising channel, until its decodes are in
   std::vector<std::pair<double, double>> _decoded; // decoded packets' times (s): a burst over one is it
   void oven(std::vector<Burst> &out); // every 200 ms
+  void carriers(std::vector<Burst> &out); // every 200 ms
   double time_of(uint64_t sample) const { return _t_end - static_cast<double>(_abs_end - sample) / _fs; }
   double bin_hz(double k) const { return _centre + (k - 0.5 * _nf) * _fs / _nf; }
 
@@ -76,8 +80,10 @@ private:
   std::vector<cf> _carry;            // samples from _carry_at on, not yet in a column
   uint64_t _carry_at = 0;
   std::vector<float> _win, _p, _floor; // window; this column's power; each bin's noise floor (20% quantile)
-  fftwf_plan _plan = nullptr;
-  cf *_in = nullptr, *_out = nullptr; // FFTW's buffers
+  fftwf_plan _plan = nullptr, _fplan = nullptr;
+  cf *_in = nullptr, *_out = nullptr, *_fin = nullptr, *_fout = nullptr; // FFTW's buffers (the fine one 8192)
+  std::vector<float> _fwin;          // its window
+  std::vector<std::pair<int, unsigned>> _steady; // fine-spectrum lines: bin, seen in which of the last 4 windows
   std::vector<uint8_t> _occ;
 
   struct Track {

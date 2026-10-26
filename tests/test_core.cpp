@@ -716,6 +716,51 @@ static void test_signals() {
     if (m < 4 || other)
       std::printf("  (oven: %d windows tagged, %d other bursts)\n", m, other);
   }
+  // a carrier switched on and off at 67.5 kHz (a 1080p60 display's line rate) at 5773.1 MHz, centre
+  // 5770: a steady carrier with that comb; a steady line at 5760 MHz (n x 40 MHz: the adapter's own
+  // crystal) is not reported
+  {
+    std::vector<std::complex<float>> x;
+    double ph = 0, ph2 = 0;
+    for (size_t i = 0; i < 40000000; i++) {
+      ph = std::remainder(ph + 2 * M_PI * 3.1e6 / fs, 2 * M_PI);
+      ph2 = std::remainder(ph2 + 2 * M_PI * -10e6 / fs, 2 * M_PI);
+      const bool on = std::fmod(static_cast<double>(i) / fs * 67.5e3, 1.0) < 0.3;
+      x.push_back((on ? std::polar(0.05f, static_cast<float>(ph)) : std::complex<float>(0)) + std::polar(0.03f, static_cast<float>(ph2)) +
+                  std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+    }
+    const auto got = run(5770e6, x);
+    int c = 0, wrong = 0;
+    for (const auto &b : got) {
+      if (b.kind != 'C')
+        continue;
+      if (std::abs(b.mhz - 5773.1) < 0.01 && std::abs(b.comb_khz - 67.5) < 1)
+        c++;
+      else
+        wrong++;
+    }
+    CHECK(c >= 3 && wrong == 0);
+    if (c < 3 || wrong)
+      std::printf("  (carrier: %d right, %d wrong of %zu)\n", c, wrong, got.size());
+    // the same carrier at 20 MS/s (half the samples a window: the comb must still come out right)
+    std::vector<std::complex<float>> h;
+    for (size_t i = 0; i < x.size(); i += 2)
+      h.push_back(x[i]);
+    sig::Finder f20;
+    f20.reset(20e6, 5770e6);
+    std::vector<sig::Burst> o20;
+    for (size_t i = 0; i < h.size(); i += 8192) {
+      const size_t n = std::min<size_t>(8192, h.size() - i);
+      f20.feed(&h[i], n, static_cast<double>(i + n) / 20e6, o20);
+    }
+    int c20 = 0, w20 = 0;
+    for (const auto &b : o20)
+      if (b.kind == 'C')
+        (std::abs(b.mhz - 5773.1) < 0.01 && std::abs(b.comb_khz - 67.5) < 1 ? c20 : w20)++;
+    CHECK(c20 >= 2 && w20 == 0); // (1 s: about three windows past the 3-of-4 rule)
+    if (c20 < 2 || w20)
+      std::printf("  (carrier at 20 MS/s: %d right, %d wrong)\n", c20, w20);
+  }
   // Wi-Fi frames (6 Mb/s, ~1.5 ms each) back to back for 10 ms of every 20: loud and switching like
   // an oven, but 20 MHz wide: no oven, no narrow bursts
   {
@@ -889,6 +934,8 @@ static int wifi_scan(const char *path) {
   for (const auto &o : other) {
     char k[64];
     std::snprintf(k, sizeof k, "%c %.0f MHz %s%s%s", o.kind, o.mhz, o.addr.c_str(), o.random ? " (random)" : "", o.name.empty() ? "" : (" " + o.name).c_str());
+    if (o.kind == 'C')
+      std::snprintf(k, sizeof k, "C %.3f MHz comb %.1f kHz", o.mhz, o.comb_khz);
     kinds[k]++;
   }
   std::printf("other signals (found in %.2f s): %zu\n", ssecs, other.size());

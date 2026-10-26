@@ -15,14 +15,14 @@ try {
   // Start the way the user does: the Station's button (its replug logic is what is under test)
   await c.ev(`[...document.querySelectorAll('button')].find((b) => /Start/.test(b.textContent) && !b.disabled).click()`);
   await c.until(`__e2e.rows > 50`, 120000, 'streaming');
-  console.log('>>> UNPLUG the dongle now (waiting up to 60 s)');
-  await c.until(`__e2e.events.some((e) => e.type === 'alert' && e.kind === 'lost')`, 60000, 'the adapter is reported lost');
+  console.log('>>> UNPLUG the dongle now (waiting up to 10 min)');
+  await c.until(`__e2e.events.some((e) => e.type === 'alert' && e.kind === 'lost')`, 600000, 'the adapter is reported lost');
   check(true, 'unplugged: the view says the adapter is lost');
   const shown = await c.ev(`document.body.innerText.match(/disconnected|unplugged|plug it back/i)?.[0] ?? ''`);
   check(!!shown, `the page says so ("${shown}")`);
-  console.log('>>> PLUG it back in now (waiting up to 120 s: bring-up takes ~40 s)');
+  console.log('>>> PLUG it back in now (waiting up to 10 min: bring-up takes ~40 s)');
   const before = await c.ev('__e2e.rows');
-  await c.until(`__e2e.rows > ${before} + 50`, 120000, 'streaming again by itself');
+  await c.until(`__e2e.rows > ${before} + 50`, 600000, 'streaming again by itself');
   const r = await rx();
   check(r?.state === 'streaming', `streaming again by itself (${r?.state})`);
 } catch (e) {

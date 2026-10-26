@@ -4,8 +4,10 @@
 // HT, VHT). Receive only: this reads samples the adapter already captured.
 #pragma once
 
+#include <array>
 #include <complex>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace wifi {
@@ -21,6 +23,16 @@ struct Frame {
   int length = 0;        // L-SIG length (bytes)
   double dur_us = 0;     // airtime from L-SIG (covers the whole PPDU, also HT/VHT)
   float snr_db = 0;      // from the two LTF copies
+  // 6 Mb/s legacy frames (beacons, ACKs, RTS/CTS, ...) are decoded whole; with a good CRC their MAC
+  // header is read (only addresses and, for beacons and probe responses, the network's name and
+  // channel: payloads are not kept)
+  bool mac = false;      // decoded, CRC good
+  int type = -1, subtype = -1; // 0 management, 1 control, 2 data
+  bool has_ta = false;   // the sender's address (control frames ACK and CTS carry none)
+  std::array<uint8_t, 6> ta{}, bssid{};
+  bool beacon = false;   // a beacon or probe response: bssid, ssid, channel
+  std::string ssid;      // as sent (UTF-8 checked; empty: hidden network)
+  int channel = 0;       // from its DS parameter set (0: none)
 };
 
 class Decoder {
@@ -34,11 +46,21 @@ public:
 
   // One 20 MS/s snippet starting 2 us before the detector's plateau: decode its header (tests). f.t is
   // set to the frame's start relative to where it was expected (seconds).
-  static bool decode20(const cf *x, size_t n, Frame &f);
+  // payload: also decode a 6 Mb/s legacy frame whole when the snippet holds all of it.
+  static bool decode20(const cf *x, size_t n, Frame &f, bool payload = false);
 
 private:
   void scan(std::vector<Frame> &out);
   void frame_at(uint64_t pos, std::vector<Frame> &out);
+  // to 20 MS/s on the channel `off` Hz from the centre: len samples from absolute index `from`
+  std::vector<cf> snippet(uint64_t from, uint64_t len, double off) const;
+  void finish(std::vector<Frame> &out); // pending payloads whose samples have arrived
+  struct Pending {
+    uint64_t pos, end; // where its snippet starts (absolute), the sample after the frame
+    double off;        // its channel's offset from the centre
+    Frame f;
+  };
+  std::vector<Pending> _pend;
 
   double _fs = 0, _centre = 0;
   int _lag = 0, _win = 0, _dec = 1;

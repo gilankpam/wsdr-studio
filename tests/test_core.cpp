@@ -476,6 +476,31 @@ static int wifi_scan(const char *path) {
               fs / 1e6, fc / 1e6, got.size(), secs, static_cast<double>(done) / fs / secs);
   for (const auto &[k, n] : by)
     std::printf("  %-28s %d\n", k.c_str(), n);
+  int six = 0, mac = 0;
+  std::map<std::string, int> nets, senders;
+  auto hex = [](const std::array<uint8_t, 6> &a) {
+    char b[18];
+    std::snprintf(b, sizeof b, "%02x:%02x:%02x:%02x:%02x:%02x", a[0], a[1], a[2], a[3], a[4], a[5]);
+    return std::string(b);
+  };
+  for (const auto &fr : got) {
+    if (fr.rate_mbps != 6 || fr.fmt != 'L')
+      continue;
+    six++;
+    if (!fr.mac)
+      continue;
+    mac++;
+    if (fr.beacon)
+      nets["\"" + fr.ssid + "\" " + hex(fr.bssid) + " ch " + std::to_string(fr.channel)]++;
+    if (fr.has_ta)
+      senders[hex(fr.ta)]++;
+  }
+  std::printf("6 Mb/s legacy frames: %d, decoded whole (CRC good): %d\n", six, mac);
+  for (const auto &[k, n] : nets)
+    std::printf("  network %s  x%d\n", k.c_str(), n);
+  for (const auto &[k, n] : senders)
+    if (n >= 3)
+      std::printf("  sender %s  x%d\n", k.c_str(), n);
   return 0;
 }
 

@@ -6,7 +6,7 @@ import { createPortal } from 'react-dom';
 import { channelAt } from './channels';
 import { Display, type Source } from './display';
 import type { Hub } from './hub';
-import type { Caps, Device, DspSettings, Rate, RxSettings, Row, Status } from './protocol';
+import type { Caps, Device, DspSettings, Rate, RxSettings, Row, Status, WifiFrame } from './protocol';
 import { Seg } from './ui';
 import {
   ANT_COLOUR, LOCKED, SLOT_NAME, UDEV_CMD, isDual, VIEW_COLOUR, bandOf, baseName, bytes, chanShort, devKey, devLabel, devTitle, fmtClock,
@@ -52,6 +52,7 @@ export type Link = {
   report: (slot: number, v: ViewInfo) => void;
   autoFit: () => void;                                         // refit the shared scale (both views' pictures)
   survey: (r: Row) => void;                                    // the band ruler's per-channel survey
+  wifi: (frames: WifiFrame[]) => void;                         // networks heard (the band ruler names them)
 };
 
 export function Station(p: {
@@ -313,6 +314,7 @@ export function Station(p: {
             break;
           case 'wifi':
             d.addWifi(e.frames);
+            link.wifi(e.frames);
             if (wifiDropped >= 0 && e.dropped > wifiDropped) setWifiSkipped(Date.now()); // the backend fell behind: some samples not searched
             wifiDropped = e.dropped;
             break;

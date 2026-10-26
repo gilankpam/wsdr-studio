@@ -84,6 +84,7 @@ export class Display {
   private rowNo = 0;
   private wifiPending: WifiFrame[] = [];
   private wifiKept: { f: WifiFrame; row: number }[] = [];
+  private wifiNames = new Map<string, string>(); // BSSID -> network name, from the beacons seen here
   private hover: number | null = null; // CSS x
   private hoverWfY = -1;               // CSS y over the waterfall (-1: over the spectrum)
   private sepRows = -1;                // rows since the newest span separator (older rows: another span)
@@ -626,6 +627,7 @@ export class Display {
   addWifi(frames: WifiFrame[]) {
     if (!this.opts.wifi || this.opts.stitch || this.opts.dim) return; // (stopped: the picture is kept as it was)
     for (const f of frames) {
+      if (f[9] && f[10] != null) this.wifiNames.set(f[9], f[10] || '(hidden)');
       if (!this.rowT.length || f[0] > this.rowT[0].t) {
         this.wifiPending.push(f);
         continue;
@@ -677,7 +679,11 @@ export class Display {
     const chans: Record<string, number> = {};
     for (const k of hit) chans[`${k.f[1].toFixed(0)} MHz${k.f[2] > 20 ? ` (${k.f[2]} MHz)` : ''}`] = (chans[`${k.f[1].toFixed(0)} MHz${k.f[2] > 20 ? ` (${k.f[2]} MHz)` : ''}`] ?? 0) + 1;
     const ch = Object.entries(chans).sort((a, b) => b[1] - a[1]).map(([k]) => k).join(' / ');
-    return `Wi-Fi ${ch}: ${hit.length} frame${hit.length > 1 ? 's' : ''} (${kinds})${rate} · SNR ${snr[snr.length >> 1].toFixed(0)} dB`;
+    // who sent them (6 Mb/s frames decoded whole): a network's name for its access point, else the address
+    const from: Record<string, number> = {};
+    for (const k of hit) if (k.f[8]) from[this.wifiNames.get(k.f[8]) ?? k.f[8]] = (from[this.wifiNames.get(k.f[8]) ?? k.f[8]] ?? 0) + 1;
+    const who = Object.entries(from).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k]) => k);
+    return `Wi-Fi ${ch}: ${hit.length} frame${hit.length > 1 ? 's' : ''} (${kinds})${rate} · SNR ${snr[snr.length >> 1].toFixed(0)} dB${who.length ? ` · from ${who.join(', ')}` : ''}`;
   }
 
   private drawSpectrum() {

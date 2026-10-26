@@ -653,7 +653,8 @@ json Engine::devices_json(const std::vector<DeviceInfo> &d) {
 }
 
 // Wi-Fi frames from the samples the DSP thread hands over: found frames go out in batches as
-// {"type":"wifi","frames":[[t, centre MHz, width MHz, format, rate Mb/s, length, airtime us, SNR dB]...],
+// {"type":"wifi","frames":[[t, centre MHz, width MHz, format, rate Mb/s, length, airtime us, SNR dB
+// (, sender, BSSID, network name, channel: 6 Mb/s frames decoded whole)]...],
 // "dropped": banks skipped because this thread fell behind}.
 void Engine::wifi_loop() {
   wifi::Decoder dec;
@@ -692,9 +693,22 @@ void Engine::wifi_loop() {
     const uint64_t d = _wifi_dropped.load();
     if ((!found.empty() || d != dropped) && (now - sent > 0.2 || found.size() > 400)) {
       json arr = json::array();
-      for (const auto &f : found)
-        arr.push_back({std::round(f.t * 1e6) / 1e6, f.centre_hz / 1e6, f.bw_mhz, std::string(1, f.fmt), f.rate_mbps, f.length,
-                       std::round(f.dur_us), std::round(f.snr_db * 10) / 10});
+      auto hex = [](const std::array<uint8_t, 6> &a) {
+        char b[18];
+        std::snprintf(b, sizeof b, "%02x:%02x:%02x:%02x:%02x:%02x", a[0], a[1], a[2], a[3], a[4], a[5]);
+        return std::string(b);
+      };
+      for (const auto &f : found) {
+        json e = {std::round(f.t * 1e6) / 1e6, f.centre_hz / 1e6, f.bw_mhz, std::string(1, f.fmt), f.rate_mbps, f.length,
+                  std::round(f.dur_us), std::round(f.snr_db * 10) / 10};
+        if (f.mac) { // decoded whole: sender, and for beacons the network
+          e.push_back(f.has_ta ? json(hex(f.ta)) : json(nullptr));
+          e.push_back(f.beacon ? json(hex(f.bssid)) : json(nullptr));
+          e.push_back(f.beacon ? json(f.ssid) : json(nullptr));
+          e.push_back(f.channel);
+        }
+        arr.push_back(e);
+      }
       _cb.event({{"type", "wifi"}, {"frames", arr}, {"dropped", d}});
       found.clear();
       dropped = d;

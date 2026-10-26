@@ -5,7 +5,7 @@
 // keeps the views' distance).
 import { useEffect, useRef, useState } from 'react';
 import { Hub } from './hub';
-import type { Device, RxSettings } from './protocol';
+import type { Device, RxSettings, WifiFrame } from './protocol';
 import { Station, type Link, type StationHandle, type ViewInfo } from './Station';
 import { RANGES, planId, sweepPlan, type Range } from './bands';
 import { BandRuler } from './BandRuler';
@@ -98,6 +98,11 @@ export default function App() {
   const handles = useRef<(StationHandle | null)[]>([null, null]);
   const leaving = useRef(0); // "Stop B" sent (and a few seconds after): B's recording note goes to A
   const [surveyMap] = useState<Survey>(() => new Map()); // grows in place; the ruler redraws it itself
+  // networks heard this session (beacons decoded from the samples): BSSID -> name and channel; the
+  // ruler's names per channel follow at most once a second
+  const netsRef = useRef(new Map<string, { ssid: string; ch: number }>());
+  const [nets, setNets] = useState<Map<number, string[]>>(() => new Map());
+  const netsDirty = useRef(false);
   const { mode, locks } = prefs;
   const dual = isDual(mode);
   const inMap = mode === 'map';
@@ -197,7 +202,27 @@ export default function App() {
     survey: (r) => {
       survey(surveyMap, r);
     },
+    wifi: (frames: WifiFrame[]) => {
+      for (const f of frames) {
+        if (!f[9] || f[10] == null) continue; // not a beacon
+        const ch = f[11] || (f[1] < 3000 ? Math.round((f[1] - 2407) / 5) : Math.round((f[1] - 5000) / 5));
+        const old = netsRef.current.get(f[9]);
+        if (old && old.ssid === f[10] && old.ch === ch) continue;
+        netsRef.current.set(f[9], { ssid: f[10], ch });
+        netsDirty.current = true;
+      }
+    },
   }));
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      if (!netsDirty.current) return;
+      netsDirty.current = false;
+      const by = new Map<number, string[]>();
+      for (const n of netsRef.current.values()) by.set(n.ch, [...(by.get(n.ch) ?? []), n.ssid || '(hidden)']);
+      setNets(by);
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, []);
   // the latest state and functions for those callbacks, after every render
   useEffect(() => {
     now.current = { mode, locks, views };
@@ -754,6 +779,7 @@ export default function App() {
             sel={sel}
             compact={mode === 'compare'}
             survey={surveyMap}
+            nets={nets}
             linkLabel={dual && locks.freq && distLabel ? distLabel.slice(3) : null}
             otherBusy={dual && views[sel ^ 1]?.recording ? `${SLOT_NAME[sel ^ 1]} paused: recording` : null}
             onTune={(f) => (inMap ? pickFromMap(f) : handles.current[sel]?.tune(f))}

@@ -272,8 +272,12 @@ void Finder::end_track(size_t i, std::vector<Burst> &out) {
   b.dur_us = static_cast<double>(cols * static_cast<uint64_t>(_hop)) / _fs * 1e6;
   // Bluetooth hops: at 2.4 GHz, bursts of at most 3 ms, at least 4 within 100 ms on 3 frequencies
   b.kind = 'N';
+  bool adv = false; // on an advertising channel: held until its decodes are in (it may be one of them)
+  for (const auto &a : _advch)
+    adv = adv || std::abs(b.mhz - a.mhz) < 1.2;
   if (b.mhz > 2400 && b.mhz < 2484 && b.dur_us <= 3000) {
-    _narrow.push_back({b.t, b.mhz});
+    if (!adv) // (advertising bursts would make one advertiser look like hopping)
+      _narrow.push_back({b.t, b.mhz});
     while (!_narrow.empty() && _narrow.front().t < b.t - 0.1)
       _narrow.erase(_narrow.begin());
     std::vector<long> f;
@@ -283,12 +287,10 @@ void Finder::end_track(size_t i, std::vector<Burst> &out) {
     if (_narrow.size() >= 4 && std::unique(f.begin(), f.end()) - f.begin() >= 3)
       b.kind = 'T';
   }
-  for (const auto &a : _advch) // (held until that channel's decodes are in: it may be one of them)
-    if (std::abs(b.mhz - a.mhz) < 1.2) {
-      _held.push_back(b);
-      return;
-    }
-  out.push_back(b);
+  if (adv)
+    _held.push_back(b);
+  else
+    out.push_back(b);
 }
 
 // A microwave oven's magnetron runs on half-wave rectified mains: at 2.4 GHz the span is loud with a
@@ -357,7 +359,7 @@ bool Finder::ble(uint64_t s0, uint64_t s1, const AdvChan &a, Burst &b) const {
       acc += x[o + k] * a.taps[k];
     z.push_back(acc * std::polar(1.f, static_cast<float>(std::remainder(a.step * static_cast<double>(o), 2 * kPi))));
   }
-  std::vector<float> d(z.size() - 1);
+  std::vector<float> d(z.size() - 1); // (the window is 450 us: z is never empty)
   for (size_t i = 0; i + 1 < z.size(); i++)
     d[i] = std::arg(z[i + 1] * std::conj(z[i]));
   static const uint32_t kAA = 0x8E89BED6;

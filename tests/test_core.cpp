@@ -808,7 +808,8 @@ static void test_ble() {
     }
   CHECK(e == 1 && out.size() == 1);
   if (e != 1 || out.size() != 1)
-    std::printf("  (BLE: %zu reported, %d decoded)\n", out.size(), e);  // 10 ms of a carrier on that channel (longer than the samples kept): no packet, no crash
+    std::printf("  (BLE: %zu reported, %d decoded)\n", out.size(), e);
+  // 10 ms of a carrier on that channel (longer than the samples kept): no packet, no crash
   std::vector<std::complex<float>> y;
   for (int i = 0; i < 800000; i++)
     y.emplace_back(0.05f * g(rng), 0.05f * g(rng));

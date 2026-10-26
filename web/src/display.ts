@@ -35,10 +35,10 @@ const WIFI_NAME = { L: 'legacy', H: '11n', V: '11ac', B: '11b' } as const;
 // other signals share one colour (aquamarine); the hover names their kind
 export const OTHER_COLOUR = '#7fffd4';
 const OTHER_NAME = { T: 'Bluetooth', N: 'narrowband', M: 'microwave oven', E: 'BLE advertising', C: 'steady carrier' } as const;
-// video line rates (kHz: PAL/NTSC, 480p, 1080i/p30, 800x600 and 720p50, 720p60, 1024x768, 1080p50,
+// video line rates (kHz: PAL/NTSC, 480p, 1080i/p30, 720p50, 800x600, 720p60, 1024x768, 1080p50,
 // 1280x1024, 1080p60, 1440p60, 4K60): a steady carrier with a comb at one of these is most likely a
 // display's pixel clock harmonic
-const LINE_RATES = [15.625, 15.734, 31.469, 33.75, 37.879, 45, 48.363, 56.25, 63.981, 67.5, 88.8, 135];
+const LINE_RATES = [15.625, 15.734, 31.469, 33.75, 37.5, 37.879, 45, 48.363, 56.25, 63.981, 67.5, 88.8, 135];
 // a mark on the waterfall: a Wi-Fi frame, or another signal in the same shape (rate and length 0)
 type Mark = [t: number, mhz: number, bw: number, fmt: WifiFrame[3] | OtherSignal[3], rate: number, len: number, us: number, snr: number,
   ta?: string | null, bssid?: string | null, ssid?: string | null, ch?: number];

@@ -33,6 +33,27 @@ try {
   check(st?.rx?.restarts === 0 && st?.ring_dropped === 0, `no restarts, no dropped banks (${st?.rx?.restarts}, ${st?.ring_dropped})`);
   summary.dsp_load = st?.dsp_load;
 
+  // slot B with one adapter: the only one is A's; there is no 8812BU
+  const b1 = await req('open', { slot: 1, pid: PID_CU });
+  check(b1.type === 'error' && b1.kind === 'busy', `slot B on A's adapter: busy (${b1.msg})`);
+  const b2 = await req('open', { slot: 1, pid: 0xb812 });
+  check(b2.type === 'error' && b2.kind === 'not_found', `slot B, no 8812BU: not_found (${b2.msg})`);
+  check(await c.ev(`['Panorama', 'Compare'].every((m) => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent === m); return b?.disabled && b.title === 'Needs a second adapter'; })`),
+    'Panorama and Compare: disabled, "Needs a second adapter"');
+
+  // a second tab while this one streams: Chrome will not let it claim the adapter
+  const tab = await c.openTab('/?e2e');
+  await tab.until('window.__hub', 20000, 'second tab: __hub');
+  await tab.ev(`(window.__ev = [], __hub.subscribe({ slot: null, event: (e) => __ev.push(e) }), 1)`);
+  await tab.until(`__ev.some((e) => e.type === 'devices' && e.devices.length)`, 20000, 'second tab: adapter listed');
+  const t2 = await tab.ev(`__hub.request('open', { slot: 0, pid: ${PID_CU} }).then((r) => r, (e) => ({ type: 'error', msg: e.message, kind: e.kind }))`);
+  check(t2.type === 'error' && t2.kind === 'busy' && String(t2.msg).startsWith('Chrome could not claim the adapter'), `second tab: busy, with the Chrome hint (${t2.msg})`);
+  await tab.close();
+  const r1 = await c.ev('__e2e.rows[0]');
+  await c.sleep(3000);
+  st = await lastStatus();
+  check(st?.rx?.restarts === 0 && (await c.ev('__e2e.rows[0]')) - r1 >= 60, `first tab still streaming (restarts ${st?.rx?.restarts})`);
+
   // Wi-Fi (the finder runs on continuous 20/40 MS/s only: on the 8812CU, gapped, it finds nothing)
   check((await req('dsp', { wifi: true })).type === 'ack', 'Wi-Fi marks on: acked');
   check((await req('set', { freq: 2437e6, rate_sel: 2, allow_gapped: true })).type === 'ack', 'set 2437 MHz, 20 MHz gapped: acked');

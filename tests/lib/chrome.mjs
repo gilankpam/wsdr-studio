@@ -27,7 +27,45 @@ export async function startChrome({ root, path = "/", port = 8080, cdpPort = 933
     if (!targets) await sleep(200);
   }
   if (!targets) throw new Error('Chrome did not start');
-  const ws = new WebSocket(targets[0].webSocketDebuggerUrl);
+  const tab = await session(targets[0].webSocketDebuggerUrl);
+  const { ws, send, ev } = tab;
+  const url = `http://localhost:${port}${path}`;
+  const load = async (u = url) => {
+    await send('Page.enable');
+    await send('Page.navigate', { url: u });
+    for (let i = 0; i < 100 && (await ev('document.readyState').catch(() => '')) !== 'complete'; i++) await sleep(100);
+  };
+  await load();
+  return {
+    ev, send, sleep, url, load,
+    reload: () => load(),
+    until: (expr, ms, what) => until(ev, expr, ms, what),
+    // A second tab on the same Chrome (same profile, same origin): {ev, until, close}.
+    openTab: async (p = path) => {
+      const t = await (await fetch(`http://127.0.0.1:${cdpPort}/json/new?${encodeURIComponent(`http://localhost:${port}${p}`)}`, { method: 'PUT' })).json();
+      const s = await session(t.webSocketDebuggerUrl);
+      for (let i = 0; i < 100 && (await s.ev('document.readyState').catch(() => '')) !== 'complete'; i++) await sleep(100);
+      return { ev: s.ev, until: (expr, ms, what) => until(s.ev, expr, ms, what), close: () => { s.ws.close(); return fetch(`http://127.0.0.1:${cdpPort}/json/close/${t.id}`); } };
+    },
+    close: () => { ws.close(); chrome.kill(); server.kill(); },
+    keepOpen: () => { ws.close(); }, // --pair: leave Chrome for the user
+  };
+}
+
+// Wait until expr is truthy (polled), or throw after ms.
+async function until(ev, expr, ms, what = expr) {
+  const t = Date.now();
+  while (Date.now() - t < ms) {
+    const v = await ev(expr).catch(() => undefined);
+    if (v) return v;
+    await sleep(250);
+  }
+  throw new Error(`timed out (${ms} ms): ${what}`);
+}
+
+// A DevTools session on one target: send(method, params), ev(expression).
+async function session(wsUrl) {
+  const ws = new WebSocket(wsUrl);
   await new Promise((r) => (ws.onopen = r));
   let n = 0;
   const pend = new Map();
@@ -45,29 +83,7 @@ export async function startChrome({ root, path = "/", port = 8080, cdpPort = 933
     if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description ?? r.result.exceptionDetails.text);
     return r.result?.result?.value;
   };
-  const url = `http://localhost:${port}${path}`;
-  const load = async (u = url) => {
-    await send('Page.enable');
-    await send('Page.navigate', { url: u });
-    for (let i = 0; i < 100 && (await ev('document.readyState').catch(() => '')) !== 'complete'; i++) await sleep(100);
-  };
-  await load();
-  return {
-    ev, send, sleep, url, load,
-    reload: () => load(),
-    // Wait until expr is truthy (polled), or throw after ms.
-    until: async (expr, ms, what = expr) => {
-      const t = Date.now();
-      while (Date.now() - t < ms) {
-        const v = await ev(expr).catch(() => undefined);
-        if (v) return v;
-        await sleep(250);
-      }
-      throw new Error(`timed out (${ms} ms): ${what}`);
-    },
-    close: () => { ws.close(); chrome.kill(); server.kill(); },
-    keepOpen: () => { ws.close(); }, // --pair: leave Chrome for the user
-  };
+  return { ws, send, ev };
 }
 
 // --pair: open a page with a Pair button and leave Chrome running for the user.

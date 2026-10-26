@@ -13,7 +13,7 @@ dongles it shows two views side by side on one axis (Panorama) or stacked on the
   - 8812BU on USB 3: spans of 2.5–40 MHz, and the full 40 MHz band at 40 MS/s.
   - 8812BU on USB 2, or the 8812CU: 2.5 and 5 MHz continuous (the 8812BU is normally switched to USB 3
     at Start, see below).
-  - 8812CU (and an 8812BU left at USB 2), gapped: 10, 20 and 40 MHz spans listed as "gapped" in Span / rate. The dongle captures
+  - 8812CU (and an 8812BU left at USB 2), gapped: 10, 20 and 40 MHz spans listed as "gapped" in the Span list. The dongle captures
     one 8192-sample slice, ships it over USB 2 (~1.5 ms), and repeats: 35 / 21 / 12 % of the time is
     sampled. Good for watching a band; short bursts can fall in the gaps, and recording needs a
     continuous span. Gapped spans are only used when picked.
@@ -25,6 +25,33 @@ dongles it shows two views side by side on one axis (Panorama) or stacked on the
   - Fixed gain or the chip's AGC, and raw IQ recording (SigMF).
 - **Receive only.** The app never transmits.
 - **Platform:** Linux, x86-64, glibc ≥ 2.34 (Ubuntu 22.04 or newer and similar).
+
+## Quick start
+
+1. **Download** `wsdr-studio-x86_64.AppImage` from the
+   [Releases](https://github.com/snokvist/wsdr-studio/releases) page and make it executable:
+   ```sh
+   chmod +x wsdr-studio-x86_64.AppImage
+   ```
+2. **Allow your user to open the dongles** (once, needs root), then unplug and replug the dongle:
+   ```sh
+   sudo tee /etc/udev/rules.d/99-wsdr.rules > /dev/null <<'RULES'
+   SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="b812", TAG+="uaccess", MODE="0660", GROUP="plugdev"
+   SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="c812", TAG+="uaccess", MODE="0660", GROUP="plugdev"
+   RULES
+   sudo udevadm control --reload
+   ```
+3. **Optional: keep the kernel's Wi-Fi driver off the dongles.** Start takes a dongle over from the
+   kernel driver anyway, but the driver grabs it again at every plug-in. If you don't use these
+   dongles as normal Wi-Fi adapters, block that driver:
+   ```sh
+   printf 'blacklist rtw88_8822bu\nblacklist rtw88_8822cu\n' | sudo tee /etc/modprobe.d/wsdr-studio.conf
+   sudo modprobe -r rtw88_8822bu rtw88_8822cu 2>/dev/null; true
+   ```
+   (Delete that file to undo it.)
+4. **Run it:** `./wsdr-studio-x86_64.AppImage`. Pick the dongle under **Adapter** in the sidebar,
+   press **▶ Start**, then click a channel on the band ruler above the plots. Press **?** for the
+   keyboard shortcuts.
 
 ## Run it
 
@@ -42,22 +69,23 @@ ship the setuid helper that replaces them. Where they are blocked (Ubuntu 24.04+
 runs without that sandbox. The window only ever loads the app's own page from 127.0.0.1 (navigation,
 new windows and permissions are locked down), so no outside web content is ever shown in it.
 
-**One-time setup** (needs root):
-- **USB access:** install the udev rule from wifi-sdr, then replug the dongle:
-  ```sh
-  sudo cp tools/99-wsdr.rules /etc/udev/rules.d/ && sudo udevadm control --reload
-  ```
-  Without it the app shows a "cannot open it" card with this command and a Copy button.
+**One-time setup** (needs root; see the quick start):
+- **USB access:** the udev rule above (the same as wifi-sdr's `tools/99-wsdr.rules`). Without it the
+  app shows a "cannot open it" card with the command to run and a Copy button.
 - **Kernel drivers:** the in-kernel drivers (rtw88_8822bu/cu) claim the dongle on plug-in; Start
-  takes it over. wifi-sdr's `tools/rtw88_guard.sh on` keeps them away for good.
+  takes it over. The blacklist in the quick start (or wifi-sdr's `tools/rtw88_guard.sh on`) keeps
+  them away for good.
 - **USB 3 on the 8812BU:** this dongle enumerates at USB 2 after a plain replug. Start switches it to
   USB 3 the way the kernel driver does (a few register writes, lost when it is unplugged; nothing is
   written to the dongle permanently). In a port or cable without USB 3 it stays at USB 2 and the app
   says so; then 10-40 MHz spans are offered gapped. `--no-usb3` leaves it at USB 2.
 
-Recordings go to `~/.local/share/wsdr-studio/recordings/` as `.sigmf-data` (int16 I/Q,
-12-bit samples << 4, at the hardware centre frequency) plus `.sigmf-meta`. A retune, a span change or
-a stream restart ends the current file, so each file has one centre and one rate and no gaps.
+**Recording:** press **● Rec** (or Ctrl+R) in a view's header while it streams a continuous span;
+press it again to stop. Recordings go to `~/.local/share/wsdr-studio/recordings/` as `.sigmf-data`
+(int16 I/Q, 12-bit samples << 4, at the hardware centre frequency) plus `.sigmf-meta` (SigMF: any
+tool that reads complex int16 I/Q can open the data file). A retune, a span change or a stream restart ends
+the current file, so each file has one centre and one rate and no gaps; the view says why a file
+ended. The sidebar shows the rate (160 MB/s at 40 MS/s) and how many minutes the disk has room for.
 
 ## Using it
 
@@ -82,6 +110,22 @@ The window needs at least 1280 × 720.
   frequency, A / B select the view, Space Start/Stop, Ctrl+R record.
 - **Unplugged** while streaming: the view says so, keeps its picture and starts again by itself when
   the dongle is back (an 8812BU comes back at USB 3 and its span).
+
+## Troubleshooting
+
+- **"cannot open it" / no permission:** the udev rule is missing, or the dongle was not replugged
+  after adding it.
+- **No adapter listed:** check `lsusb` for `0bda:b812` (8812BU) or `0bda:c812` (8812CU); the app
+  looks again every few seconds.
+- **The 8812BU stays at USB 2** ("The 8812BU stayed at USB 2: this port or cable may not carry USB 3";
+  only 2.5 and 5 MHz continuous): use a USB 3 port and cable (SuperSpeed, often blue), then replug.
+  Until then the wider spans are offered as "gapped" only.
+- **"stream restarted after a fault"** in a view's footer: the stream stopped and was started again
+  by itself (a short gap). It disappears a minute after the last one; if it keeps coming, replug the
+  dongle.
+- **Unplugged by accident:** plug it back in; the view starts again by itself.
+- **The two dongles' levels differ** in Compare: two units of the same model can read several dB
+  apart. The app shows each as it is.
 
 ## Build
 

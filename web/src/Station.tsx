@@ -77,6 +77,7 @@ export function Station(p: {
   // rates: the open adapter's (caps), set as events arrive, so a handle used in the same commit is current
   const live = useRef({
     open: false, recording: false, opening: false, freq: 5180e6, rateSel: 4, want: null as number | null, wantId: 0, rates: null as Rate[] | null,
+    wifi: false, // the backend finds Wi-Fi frames for this view
   });
   const autoOn = useRef(loadPrefs().scale === null); // Auto scale on (mirrors prefs.scale === null; storage may be blocked)
   const view = useRef({ ghost: false, other: p.otherSel, map: mode === 'map' }); // for the socket callbacks
@@ -107,6 +108,8 @@ export function Station(p: {
   // stream faults in the last minute (the core restarts the stream by itself; a fault long gone is
   // not shown, its count since Start would stay forever)
   const [recentFaults, setRecentFaults] = useState(0);
+  const [wifiSkipped, setWifiSkipped] = useState(0); // when the Wi-Fi finder last fell behind (ms)
+  const wantWifiRef = useRef(false); // (for the event handler: this window wants Wi-Fi frames found)
   const [hadPicture, setHadPicture] = useState(false);
   // unplugged while running: the adapter (pid, picker key) to start again when it is back
   // gone: a scan has shown it missing; before: the adapters there were when it was lost; tries: restarts
@@ -162,6 +165,8 @@ export function Station(p: {
     let opened: { pid: number; key: string } | null = null; // the adapter of the current run
     let lastRx: RxSettings | null = null;
     let lastRestarts = 0;
+    let wifiDropped = -1; // the backend's count is since it started: the first event is the baseline
+    let firstDsp = true;
     let faultTimes: number[] = [];
     let lastPaths = 'a';
     let lastFft = 0;
@@ -256,6 +261,13 @@ export function Station(p: {
                 if (!e.dsp.paths.includes('b')) d.dropPath(1);
                 lastPaths = e.dsp.paths;
               }
+              live.current.wifi = !!e.dsp.wifi;
+              // the first settings after connecting: an open view may come up searching while this
+              // window does not want it (or the other way round)
+              if (firstDsp) {
+                firstDsp = false;
+                if (live.current.open && live.current.wifi !== wantWifiRef.current) req('dsp', { wifi: wantWifiRef.current }).catch(() => {});
+              }
               setDsp(e.dsp);
             }
             break;
@@ -298,6 +310,11 @@ export function Station(p: {
             break;
           case 'notice': // backend news for the user (e.g. the USB 3 switch)
             addBanner(String(e.text ?? ''));
+            break;
+          case 'wifi':
+            d.addWifi(e.frames);
+            if (wifiDropped >= 0 && e.dropped > wifiDropped) setWifiSkipped(Date.now()); // the backend fell behind: some samples not searched
+            wifiDropped = e.dropped;
             break;
           case 'recorded':
             setSaved({ file: e.file, bytes: e.bytes, seconds: e.seconds, reason: e.reason, error: e.error });
@@ -398,11 +415,20 @@ export function Station(p: {
         ...scale, wfMode: prefs.wfMode, smooth: prefs.smooth, overlay, dim: !open,
         wfPath: dsp.paths === 'b' ? 1 : 0, marker, markerLabel, chipNotch, notchWide,
         colour: VIEW_COLOUR[slot], pathColours: twoPaths ? ANT_COLOUR : null, ghostColour: VIEW_COLOUR[slot ^ 1],
-        showAvg: prefs.showAvg, showPeak: prefs.showPeak,
+        showAvg: prefs.showAvg, showPeak: prefs.showPeak, wifi: prefs.wifiMarks,
         staleText: rxState === 'starting' ? 'Applying settings…' : 'No data from the adapter',
       }),
-    [scale, prefs.wfMode, prefs.smooth, prefs.showAvg, prefs.showPeak, overlay, open, dsp.paths, marker, markerLabel, chipNotch, notchWide, rxState, slot, twoPaths],
+    [scale, prefs.wfMode, prefs.smooth, prefs.showAvg, prefs.showPeak, prefs.wifiMarks, overlay, open, dsp.paths, marker, markerLabel, chipNotch, notchWide, rxState, slot, twoPaths],
   );
+  // Wi-Fi frames are found in the backend only while this view shows them (its own waterfall: not in
+  // Panorama's stitched plot or the map)
+  const wantWifi = prefs.wifiMarks && mode !== 'panorama' && mode !== 'map';
+  wantWifiRef.current = wantWifi;
+  // (sent when this window's wish changes, not when the setting does: two windows that disagree must
+  // not keep switching it back and forth)
+  useEffect(() => {
+    if (connected && open && !!live.current.wifi !== wantWifi) req('dsp', { wifi: wantWifi }).catch(() => {});
+  }, [wantWifi, connected, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A settings change: sent now when streaming, kept as a draft until Start otherwise.
   const set = (a: Partial<RxSettings>) => {
@@ -600,6 +626,7 @@ export function Station(p: {
   const warn: string[] = [...dropWarn];
   if (open && st) {
     if (recentFaults > 0) warn.push(`stream restarted after a fault (${recentFaults}× in the last minute)`);
+    if (Date.now() - wifiSkipped < 60000) warn.push('Wi-Fi marks: some samples were not searched (the computer could not keep up)');
     if (status!.dsp_load > 0.8) warn.push(`DSP ${(status!.dsp_load * 100).toFixed(0)} %`);
     if (rxState === 'streaming' && st.fs && !st.gapped && msps > 0 && msps < 0.95 * (st.fs / 1e6)) warn.push(`input ${msps.toFixed(2)} MS/s`);
   }

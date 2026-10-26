@@ -9,6 +9,7 @@ import type { Device, RxSettings } from './protocol';
 import { Station, type Link, type StationHandle, type ViewInfo } from './Station';
 import { RANGES, planId, sweepPlan, type Range } from './bands';
 import { BandRuler } from './BandRuler';
+import { WIFI_COLOUR } from './display';
 import { Panorama } from './Panorama';
 import { SpectralMap } from './SpectralMap';
 import { survey, type Survey } from './survey';
@@ -670,6 +671,32 @@ export default function App() {
                     <span className="muted">dBFS</span>
                   </span>
                 </div>
+                {!inMap && mode !== 'panorama' && (
+                  <button
+                    className={prefs.wifiMarks ? 'toggle on' : 'toggle'}
+                    role="switch"
+                    aria-checked={prefs.wifiMarks}
+                    onClick={() => updatePrefs({ wifiMarks: !prefs.wifiMarks })}
+                    title="Finds Wi-Fi OFDM frames (a/g/n/ac) in the samples themselves (continuous 20 and 40 MHz spans) and marks each at its channel's centre on the waterfall; hover the waterfall for what they were. 802.11b frames are not found."
+                  >
+                    <span className="tlabel">
+                      Mark Wi-Fi frames
+                      <small>
+                        {views[sel] && (views[sel]!.gapped || (views[sel]!.fsNow !== 20e6 && views[sel]!.fsNow !== 40e6)) ? (
+                          'needs a continuous 20 or 40 MHz span'
+                        ) : (
+                          <>
+                            <i className="wkey" style={{ background: WIFI_COLOUR.L }} /> legacy <i className="wkey" style={{ background: WIFI_COLOUR.H }} /> 11n{' '}
+                            <i className="wkey" style={{ background: WIFI_COLOUR.V }} /> 11ac
+                          </>
+                        )}
+                      </small>
+                    </span>
+                    <span className="switch" aria-hidden="true">
+                      <i />
+                    </span>
+                  </button>
+                )}
                 <div className="kv">
                   <span>{inMap ? 'Map shows' : 'Waterfall'}</span>
                   <Seg

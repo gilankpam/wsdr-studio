@@ -37,6 +37,7 @@ struct DspConfig {
   double rows_per_s = 25; // display rows per second (1..30)
   int paths = 1;          // bit 0 = path A, bit 1 = path B (8812CU)
   bool dc_remove = true;
+  bool wifi = false;      // find Wi-Fi frames in the samples (engine.cpp: its own thread)
 };
 
 struct Row {

@@ -22,7 +22,7 @@ find_package(nlohmann_json 3 REQUIRED)
 find_package(Boost 1.74 REQUIRED CONFIG COMPONENTS headers)
 find_package(Threads REQUIRED)
 
-add_library(studio_core STATIC src/dsp.cpp src/protocol.cpp src/device_scan.cpp src/recorder.cpp src/engine.cpp)
+add_library(studio_core STATIC src/dsp.cpp src/protocol.cpp src/device_scan.cpp src/recorder.cpp src/engine.cpp src/wifi.cpp)
 target_include_directories(studio_core PUBLIC src)
 target_link_libraries(studio_core PUBLIC wsdrcore iqdsp PkgConfig::FFTW3F nlohmann_json::nlohmann_json Threads::Threads)
 target_compile_options(studio_core PRIVATE -Wall -Wextra)

@@ -106,6 +106,12 @@ The window needs at least 1280 × 720.
 - **Spectral Map**: pick the range and how long each step is listened to (120 ms, 250 ms, 1 s) in
   the sidebar. Each channel is heard only while the sweep is on it; the header says how long of how
   often. A click on a channel leaves the map onto it; leaving puts both views back as they were.
+- **Mark Wi-Fi frames** (Display, Single and Compare, 20 and 40 MHz spans): the app finds Wi-Fi frames in
+  the samples themselves (their preamble, then the legacy header: rate, length, airtime, and whether
+  it is 802.11n or ac) and marks each on the waterfall at its channel's centre (white legacy, magenta
+  11n, lavender 11ac); hover the waterfall for what was there. Nothing is transmitted; it costs about a
+  third of a CPU core at 40 MS/s. It finds OFDM frames (802.11a/g/n/ac) with a clear preamble;
+  802.11b frames (many 2.4 GHz beacons) and very weak frames get no mark.
 - **Keyboard** (? shows the list): ←/→ tune 5 MHz (Shift 20), [ ] span, digits or Enter type a
   frequency, A / B select the view, Space Start/Stop, Ctrl+R record.
 - **Unplugged** while streaming: the view says so, keeps its picture and starts again by itself when

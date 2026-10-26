@@ -17,6 +17,7 @@
 #include "dsp.h"
 #include "protocol.h"
 #include "receiver.h"
+#include "signals.h"
 #include "wifi.h"
 
 #include <nlohmann/json.hpp>
@@ -629,6 +630,114 @@ static void test_dsss_beacon() {
   }
 }
 
+// Signals other than Wi-Fi, at 40 MS/s around 2422 MHz (2452 for the oven): Bluetooth's hops,
+// a device fixed on one frequency, a microwave oven, and Wi-Fi switching with the same rhythm (not an
+// oven).
+static void test_signals() {
+  std::mt19937 rng(5);
+  std::normal_distribution<float> g(0, 1);
+  std::uniform_int_distribution<int> bit(0, 1);
+  const double fs = 40e6;
+  auto run = [&](double centre, const std::vector<std::complex<float>> &x) {
+    sig::Finder f;
+    f.reset(fs, centre);
+    std::vector<sig::Burst> out;
+    for (size_t i = 0; i < x.size(); i += 8192) {
+      const size_t n = std::min<size_t>(8192, x.size() - i);
+      f.feed(&x[i], n, static_cast<double>(i + n) / fs, out);
+    }
+    return out;
+  };
+  auto noise = [&](std::vector<std::complex<float>> &x, size_t n) {
+    for (size_t i = 0; i < n; i++)
+      x.emplace_back(0.05f * g(rng), 0.05f * g(rng));
+  };
+  // GFSK-like bursts (1 Mb/s, +-250 kHz), 366 us (one slot), every 1250 us, on `chans` (MHz) in turn
+  auto bursts = [&](const std::vector<double> &chans, double centre) {
+    std::vector<std::complex<float>> x;
+    noise(x, 800000); // 20 ms (the finder reports nothing for its first ~13 ms)
+    double ph = 0;
+    for (double c : chans) {
+      const size_t n0 = x.size();
+      int b = 0;
+      for (size_t i = 0; i < 14640; i++) { // 366 us
+        if (i % 40 == 0)
+          b = bit(rng);
+        ph += 2 * M_PI * ((c * 1e6 - centre) + (b ? 250e3 : -250e3)) / fs;
+        x.push_back(std::polar(0.3f, static_cast<float>(ph)) + std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+      }
+      noise(x, 50000 - (x.size() - n0)); // to 1250 us
+    }
+    noise(x, 40000);
+    return x;
+  };
+  {
+    std::vector<double> hop;
+    for (int k = 0; k < 24; k++)
+      hop.push_back(2404 + (k * 13) % 35); // 2404..2438
+    const auto got = run(2422e6, bursts(hop, 2422e6));
+    int t = 0, near = 0;
+    for (const auto &b : got) {
+      t += b.kind == 'T';
+      near += std::abs(b.dur_us - 366) < 25 && b.bw_mhz <= 2.5;
+    }
+    for (const auto &b : got) if (getenv("DBG")) std::printf("DBG %c %.2f MHz bw %.2f dur %.0f snr %.1f t %.4f\n", b.kind, b.mhz, b.bw_mhz, b.dur_us, b.snr_db, b.t);
+    CHECK(got.size() == hop.size());
+    CHECK(t >= 20 && near >= 20); // (the first few are only "narrowband": not yet seen hopping)
+  }
+  {
+    const auto got = run(2422e6, bursts(std::vector<double>(24, 2433), 2422e6));
+    int n = 0;
+    for (const auto &b : got)
+      n += b.kind == 'N' && std::abs(b.mhz - 2433) < 0.5;
+    CHECK(n == 24 && got.size() == 24);
+  }
+  // an oven: a carrier wobbling +-3 MHz around 2455 MHz, on 10 ms of every 20 ms, for 1 s
+  {
+    std::vector<std::complex<float>> x;
+    double ph = 0;
+    for (size_t i = 0; i < 40000000; i++) {
+      const double t = static_cast<double>(i) / fs;
+      const bool on = std::fmod(t, 0.02) < 0.01;
+      ph += 2 * M_PI * (3e6 + 3e6 * std::sin(2 * M_PI * 700 * t)) / fs;
+      x.push_back((on ? std::polar(0.5f, static_cast<float>(ph)) : std::complex<float>(0)) +
+                  std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+    }
+    const auto got = run(2452e6, x);
+    int m = 0, other = 0;
+    for (const auto &b : got) {
+      if (b.kind == 'M') {
+        m++;
+        CHECK(b.mhz > 2451 && b.mhz < 2459);
+      } else {
+        other++;
+      }
+    }
+    CHECK(m >= 3);
+    if (m < 3)
+      std::printf("  (oven: %d windows tagged, %d other bursts)\n", m, other);
+  }
+  // Wi-Fi frames (6 Mb/s, ~1.5 ms each) back to back for 10 ms of every 20: loud and switching like
+  // an oven, but 20 MHz wide: no oven, no narrow bursts
+  {
+    std::vector<std::complex<float>> x;
+    while (x.size() < 30000000) {
+      const size_t n0 = x.size();
+      while (x.size() - n0 < 400000) {
+        const auto fr = ofdm_frame(0b1101, 1100, -10e6, false, 0, rng);
+        for (const auto &v : fr)
+          x.push_back(v * 8.9f + std::complex<float>(0.05f * g(rng), 0.05f * g(rng)));
+        noise(x, 640); // 16 us
+      }
+      noise(x, 800000 - (x.size() - n0));
+    }
+    const auto got = run(2422e6, x);
+    CHECK(got.empty());
+    if (!got.empty())
+      std::printf("  (Wi-Fi: %zu bursts, first '%c' %.1f MHz %.0f us)\n", got.size(), got[0].kind, got[0].mhz, got[0].dur_us);
+  }
+}
+
 // Network names: whatever bytes a beacon carries, the text is valid UTF-8 the JSON writer accepts.
 static void test_ssid_text() {
   auto t = [](const std::string &b) { return wifi::ssid_text(reinterpret_cast<const uint8_t *>(b.data()), b.size()); };
@@ -671,15 +780,31 @@ static int wifi_scan(const char *path) {
   std::vector<int16_t> raw(2 * 8192);
   std::vector<std::complex<float>> x(8192);
   std::vector<wifi::Frame> got;
+  sig::Finder sf;
+  sf.reset(fs, fc);
+  std::vector<sig::Burst> other;
   uint64_t done = 0;
-  const auto t0 = std::chrono::steady_clock::now();
+  double secs = 0, ssecs = 0;
   while (f.read(reinterpret_cast<char *>(raw.data()), static_cast<std::streamsize>(raw.size() * 2))) {
     for (size_t i = 0; i < 8192; i++)
       x[i] = {raw[2 * i] / 16.f, raw[2 * i + 1] / 16.f};
     done += 8192;
+    const auto t0 = std::chrono::steady_clock::now();
     dec.feed(x.data(), 8192, static_cast<double>(done) / fs, got);
+    const auto t1 = std::chrono::steady_clock::now();
+    sf.feed(x.data(), 8192, static_cast<double>(done) / fs, other);
+    secs += std::chrono::duration<double>(t1 - t0).count();
+    ssecs += std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
   }
-  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::map<std::string, int> kinds;
+  for (const auto &o : other) {
+    char k[64];
+    std::snprintf(k, sizeof k, "%c %.0f MHz", o.kind, o.mhz);
+    kinds[k]++;
+  }
+  std::printf("other signals (found in %.2f s): %zu\n", ssecs, other.size());
+  for (const auto &[k, n] : kinds)
+    std::printf("  %-14s %d\n", k.c_str(), n);
   std::map<std::string, int> by;
   for (const auto &fr : got) {
     char k[64];
@@ -737,6 +862,7 @@ int main(int argc, char **argv) {
   test_wifi_frames();
   test_ssid_text();
   test_dsss_beacon();
+  test_signals();
   std::printf(g_fail ? "%d FAILED\n" : "all tests passed\n", g_fail);
   return g_fail ? 1 : 0;
 }

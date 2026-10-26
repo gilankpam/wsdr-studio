@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "dsp.h"
 
-#include <fftw3.h>
+#include "fft.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <mutex>
 #include <stdexcept>
 
 namespace studio {
 
 namespace {
-std::mutex g_fftw_plan_mutex; // FFTW planning is not thread-safe
 
 int sext12(uint32_t v) { return static_cast<int>(static_cast<int32_t>(v << 20) >> 20); }
 } // namespace
@@ -20,8 +18,7 @@ int sext12(uint32_t v) { return static_cast<int>(static_cast<int32_t>(v << 20) >
 struct Spectrum::Path {
   int index = 0;
   wsdr::DcBlock dc;
-  fftwf_complex *in = nullptr, *out = nullptr;
-  fftwf_plan plan = nullptr;
+  Fft fft;
   int fill = 0;                   // samples in `in`
   std::vector<float> sum, max;    // linear power per DISPLAY bin (fftshifted, <= kMaxBins)
   std::vector<float> one;         // this FFT's power per display bin
@@ -29,21 +26,11 @@ struct Spectrum::Path {
   double row_samples = 0;         // samples consumed in the current row
   double row_t0 = 0;              // gapped runs: when the current row started (clock)
 
-  Path(int idx, int n) : index(idx) {
-    std::lock_guard<std::mutex> l(g_fftw_plan_mutex);
-    in = fftwf_alloc_complex(n);
-    out = fftwf_alloc_complex(n);
-    plan = fftwf_plan_dft_1d(n, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+  Path(int idx, int n) : index(idx), fft(n) {
     const int bins = std::min(n, kMaxBins);
     sum.assign(bins, 0.f);
     max.assign(bins, 0.f);
     one.assign(bins, 0.f);
-  }
-  ~Path() {
-    std::lock_guard<std::mutex> l(g_fftw_plan_mutex);
-    fftwf_destroy_plan(plan);
-    fftwf_free(in);
-    fftwf_free(out);
   }
 };
 
@@ -139,8 +126,7 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       const size_t take = std::min<size_t>(ns - i, static_cast<size_t>(n - p.fill));
       for (size_t k = 0; k < take; k++) {
         const float w = _win[p.fill + k];
-        p.in[p.fill + k][0] = _tmp[i + k].real() * w;
-        p.in[p.fill + k][1] = _tmp[i + k].imag() * w;
+        p.fft.in()[p.fill + k] = _tmp[i + k] * w;
       }
       p.fill += static_cast<int>(take);
       i += take;
@@ -148,7 +134,7 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       if (p.fill < n)
         continue;
       p.fill = 0;
-      fftwf_execute(p.plan);
+      p.fft.run();
       _ffts++;
       // Power per display bin for this FFT (fftshift; above kMaxBins, `dec` FFT bins summed), then the
       // row's average (sum) and peak (max) both from those same values: one unit for both traces.
@@ -157,7 +143,7 @@ void Spectrum::process(const uint8_t *bank, size_t bytes, const wsdr::BankMeta &
       float *one = p.one.data(), *sum = p.sum.data(), *mx = p.max.data();
       std::fill(p.one.begin(), p.one.end(), 0.f);
       for (int k = 0; k < n; k++) {
-        const float re = p.out[k][0], im = p.out[k][1];
+        const float re = p.fft.out()[k].real(), im = p.fft.out()[k].imag();
         one[((k + n / 2) % n) / dec] += re * re + im * im;
       }
       for (int b = 0; b < bins; b++) {

@@ -5,3 +5,4 @@ build*/
 compile_commands.json
 __pycache__/
 .superpowers/
+docs/superpowers/

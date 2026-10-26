@@ -1,12 +1,8 @@
 # The web version (wasm/, web/ in web mode) on GitHub Pages: Settings -> Pages -> Source: GitHub Actions.
-# Pull requests into main deploy too (the github-pages environment allows every branch), so a PR can be
-# tried on the live URL before it is merged; the next push to main deploys main again.
 name: Web version (GitHub Pages)
 
 on:
   push:
-    branches: [main]
-  pull_request:
     branches: [main]
   workflow_dispatch:
 

@@ -658,6 +658,7 @@ json Engine::devices_json(const std::vector<DeviceInfo> &d) {
 void Engine::wifi_loop() {
   wifi::Decoder dec;
   uint32_t gen = ~0u;
+  uint64_t next = 0;
   double fs = 0, centre = 0, sent = 0;
   std::vector<wifi::Frame> found;
   uint64_t dropped = 0;
@@ -674,12 +675,14 @@ void Engine::wifi_loop() {
       }
     }
     if (!w.x.empty()) {
-      if (w.gen != gen || w.fs != fs || w.centre != centre) { // a new run: no frame spans it
+      // a new run, or a gap in the samples (banks dropped): no frame spans it
+      if (w.gen != gen || w.fs != fs || w.centre != centre || w.seq != next) {
         gen = w.gen;
         fs = w.fs;
         centre = w.centre;
         dec.reset(fs, centre);
       }
+      next = w.seq + 1;
       dec.feed(w.x.data(), w.x.size(), w.t_end, found);
       std::lock_guard<std::mutex> l(_wm);
       if (_wpool.size() < 8)
@@ -748,12 +751,18 @@ void Engine::dsp_loop() {
       // samples are processed, here, so a frame lands in the row that holds it)
       if (_wifi_on && !b->meta.gapped && (std::abs(b->meta.fs - 40e6) < 1e3 || std::abs(b->meta.fs - 20e6) < 1e3)) {
         WifiChunk w;
+        bool room = true;
         {
           std::lock_guard<std::mutex> l(_wm);
-          if (!_wpool.empty()) {
+          room = _wq.size() < 256; // ~50 ms at 40 MS/s
+          if (room && !_wpool.empty()) {
             w.x = std::move(_wpool.back());
             _wpool.pop_back();
           }
+        }
+        if (!room) {
+          _wifi_dropped++;
+          goto wifi_done;
         }
         w.x.resize(b->bytes / 8);
         Spectrum::unpack(b->data.data(), w.x.size(), 0, w.x.data());
@@ -761,14 +770,12 @@ void Engine::dsp_loop() {
         w.fs = b->meta.fs;
         w.centre = b->meta.centre_hz;
         w.gen = b->meta.gen;
+        w.seq = b->meta.seq;
         std::lock_guard<std::mutex> l(_wm);
-        if (_wq.size() < 64) {
-          _wq.push_back(std::move(w));
-          _wcv.notify_one();
-        } else {
-          _wifi_dropped++;
-        }
+        _wq.push_back(std::move(w));
+        _wcv.notify_one();
       }
+    wifi_done:;
       // Every file has one centre, one rate and no gaps. Banks of the run the recording belongs to go
       // in; older ones (still queued from before a retune) are skipped; a newer run, or a gap in the
       // bank sequence (the DSP fell behind and the ring dropped banks), ends the file.

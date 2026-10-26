@@ -406,6 +406,11 @@ static void test_wifi_frames() {
   std::vector<Want> want = {{0b1001, 24, 100, 10e6, false, 0}, {0b1101, 6, 1500, -10e6, true, 0}, {0b1101, 6, 14, 10e6, false, 0}};
   noise(30000, 0.05f);
   for (auto &w : want) {
+    if (&w == &want[1]) { // a long burst at the frame's power just before (an A-MPDU): the noise floor must not rise to it
+      for (size_t i = 0; i < 120000; i++) // 3 ms
+        x.emplace_back(0.7f * g(rng), 0.7f * g(rng));
+      noise(800, 0.05f); // 20 us
+    }
     w.at = x.size();
     auto f = ofdm_frame(w.code, w.len, w.off, w.ht, 6, rng);
     const double cfo = 60e3; // like two adapters' crystals apart

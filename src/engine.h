@@ -130,6 +130,7 @@ private:
     std::vector<std::complex<float>> x;
     double t_end = 0, fs = 0, centre = 0;
     uint32_t gen = 0;
+    uint64_t seq = 0; // the bank's: a gap (dropped here or in the ring) starts the finder again
   };
   void wifi_loop();
   std::mutex _wm;

@@ -32,12 +32,13 @@ public:
   void feed(const cf *x, size_t n, double t_end, std::vector<Frame> &out);
   double fs() const { return _fs; }
 
-  // One 20 MS/s snippet starting near a frame's short training field: decode its header (tests).
+  // One 20 MS/s snippet starting 2 us before the detector's plateau: decode its header (tests). f.t is
+  // set to the frame's start relative to where it was expected (seconds).
   static bool decode20(const cf *x, size_t n, Frame &f);
 
 private:
   void scan(std::vector<Frame> &out);
-  void frame_at(size_t pos, std::vector<Frame> &out);
+  void frame_at(uint64_t pos, std::vector<Frame> &out);
 
   double _fs = 0, _centre = 0;
   int _lag = 0, _win = 0, _dec = 1;
@@ -49,7 +50,10 @@ private:
   bool _in = false;          // inside a plateau of the detector
   uint64_t _pstart = 0;      // where it started
   uint64_t _quiet_until = 0; // no new detection before this (the frame just found)
-  double _noise = 0;         // running noise power per sample
+  double _noise = 0;         // noise power per sample: a low quantile of _lvl
+  std::vector<float> _lvl, _lvl_tmp; // window power every 256 samples, the last ~100 ms (a ring)
+  size_t _lvl_at = 0, _lvl_n = 0;
+  unsigned _lvl_scans = 0;
   std::vector<float> _lp;    // channel filter (40 MS/s -> 20 MS/s)
   std::vector<double> _cands; // 20 MHz channel centres inside the span
 };

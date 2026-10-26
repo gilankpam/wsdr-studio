@@ -107,7 +107,8 @@ std::vector<uint8_t> viterbi(const std::vector<float> &llr) {
     }
     pm = nm;
   }
-  int s = 0; // the tail bits end the trellis in state 0
+  // from the best end state (the tail bits should have brought it to 0: the caller checks them)
+  int s = static_cast<int>(std::max_element(pm.begin(), pm.end()) - pm.begin());
   std::vector<uint8_t> bits(n);
   for (size_t i = n; i-- > 0;) {
     const int c = dec[i][s];
@@ -204,7 +205,9 @@ bool Decoder::decode20(const cf *in, size_t n, Frame &f) {
   // the long training field: two copies 64 apart
   size_t l1 = 0;
   float best = -1;
-  for (size_t p = 0; p + 128 + 80 * 3 + 16 <= n && p < 480; p++) {
+  // (the snippet starts 2 us before the detector's plateau, which starts near the short training
+  // field: the first LTF copy belongs ~232 samples in; a few us either way)
+  for (size_t p = 150; p + 128 + 80 * 3 + 16 <= n && p < 330; p++) {
     float a = 0, b = 0;
     cf s1 = 0, s2 = 0;
     for (int k = 0; k < 64; k++) {
@@ -249,9 +252,13 @@ bool Decoder::decode20(const cf *in, size_t n, Frame &f) {
   std::array<float, 64> w{};
   for (int k = 0; k < 64; k++) {
     float s = 0;
+    int m = 0;
     for (int j = -2; j <= 2; j++)
-      s += nk[(k + j + 64) % 64];
-    w[k] = s / 5;
+      if (t.ltf_f[(k + j + 64) % 64] != 0) { // (DC and the guard bins carry no noise estimate)
+        s += nk[(k + j + 64) % 64];
+        m++;
+      }
+    w[k] = m ? s / static_cast<float>(m) : 0;
   }
   std::array<float, 48> wd;
   for (int i = 0; i < 48; i++)
@@ -287,6 +294,9 @@ bool Decoder::decode20(const cf *in, size_t n, Frame &f) {
   f.rate_mbps = rate;
   f.length = len;
   f.dur_us = 20 + 4 * std::ceil((16 + 8.0 * len + 6) / (4.0 * rate));
+  if (f.dur_us > 5484) // longer than any PPDU may be
+    return false;
+  f.t = (static_cast<double>(l1) - 232) / 20e6; // the frame's start relative to where it was looked for
   // HT-SIG: two QBPSK symbols; VHT-SIG-A: BPSK then QBPSK (both only after a 6 Mb/s L-SIG)
   f.fmt = 'L';
   if (rate == 6) {
@@ -317,6 +327,9 @@ void Decoder::reset(double fs, double centre_hz) {
   _in = false;
   _pstart = _quiet_until = 0;
   _noise = 0;
+  _lvl.assign(std::max<size_t>(64, static_cast<size_t>(0.1 * fs / 256)), 0.f);
+  _lvl_at = _lvl_n = 0;
+  _lvl_scans = 0;
   _cands.clear();
   for (double c : channels())
     if (_dec && std::abs(c - centre_hz) <= (_dec == 2 ? 11.5e6 : 1.5e6))
@@ -362,11 +375,13 @@ void Decoder::scan(std::vector<Frame> &out) {
     p1 += std::norm(at(k));
     p2 += std::norm(at(k + L));
   }
-  std::vector<float> lvl;
   const uint64_t min_plateau = 50 * static_cast<uint64_t>(_dec), max_plateau = 400 * static_cast<uint64_t>(_dec);
   for (uint64_t i = _scan; i < limit; i++) {
-    if ((i & 255) == 0)
-      lvl.push_back(static_cast<float>(p2 / static_cast<double>(W)));
+    if ((i & 255) == 0) {
+      _lvl[_lvl_at] = static_cast<float>(p2 / static_cast<double>(W));
+      _lvl_at = (_lvl_at + 1) % _lvl.size();
+      _lvl_n = std::min(_lvl_n + 1, _lvl.size());
+    }
     const double m = std::norm(c) / (p1 * p2 + 1e-30);
     const bool on = m > 0.5 && _noise > 0 && p2 / static_cast<double>(W) > 2 * _noise && i >= _quiet_until;
     if (on && !_in) {
@@ -378,7 +393,8 @@ void Decoder::scan(std::vector<Frame> &out) {
         _quiet_until = i + max_plateau;
       } else if (i - _pstart >= min_plateau) {
         frame_at(_pstart, out);
-        _quiet_until = i + 200 * static_cast<uint64_t>(_dec);
+        // past its L-SIG (a later plateau inside the same preamble is not another frame)
+        _quiet_until = std::max(i + 200 * static_cast<uint64_t>(_dec), _pstart + 520 * static_cast<uint64_t>(_dec));
       }
     }
     // slide
@@ -389,21 +405,23 @@ void Decoder::scan(std::vector<Frame> &out) {
     p2 += std::norm(bL) - std::norm(aL);
   }
   _scan = limit;
-  // the noise floor: a low quantile of the window power, followed slowly
-  if (!lvl.empty()) {
-    std::nth_element(lvl.begin(), lvl.begin() + static_cast<long>(lvl.size() / 5), lvl.end());
-    const double q = lvl[lvl.size() / 5];
-    _noise = _noise > 0 ? 0.9 * _noise + 0.1 * q : q;
+  // the noise floor: a low quantile of the window power over the last ~100 ms (a long frame, an
+  // A-MPDU of a few ms, must not become the floor), every 16 scans (~3 ms)
+  if (_lvl_n >= 16 && ++_lvl_scans % 16 == 1) {
+    _lvl_tmp.assign(_lvl.begin(), _lvl.begin() + static_cast<long>(_lvl_n));
+    std::nth_element(_lvl_tmp.begin(), _lvl_tmp.begin() + static_cast<long>(_lvl_n / 10), _lvl_tmp.end());
+    _noise = _lvl_tmp[_lvl_n / 10];
   }
   // keep what a frame found later still needs
-  const uint64_t keep = (_in ? std::min(_pstart, _scan) : _scan) - std::min<uint64_t>(pre, _scan);
+  const uint64_t from = _in ? std::min(_pstart, _scan) : _scan;
+  const uint64_t keep = from > pre ? from - pre : 0;
   if (keep > _abs0) {
     _buf.erase(_buf.begin(), _buf.begin() + static_cast<long>(keep - _abs0));
     _abs0 = keep;
   }
 }
 
-void Decoder::frame_at(size_t pos_abs, std::vector<Frame> &out) {
+void Decoder::frame_at(uint64_t pos_abs, std::vector<Frame> &out) {
   const Tables &t = T();
   const uint64_t pos = pos_abs;
   const uint64_t pre = 40 * static_cast<uint64_t>(_dec);
@@ -479,7 +497,7 @@ void Decoder::frame_at(size_t pos_abs, std::vector<Frame> &out) {
   Frame f;
   if (!decode20(z20.data(), z20.size(), f))
     return;
-  f.t = _t_end - static_cast<double>(_abs_end - pos) / _fs;
+  f.t += _t_end - static_cast<double>(_abs_end - pos) / _fs; // (decode20 left the offset from pos)
   f.bw_mhz = forty ? 40 : 20;
   f.centre_hz = forty ? (c + partner(c)) / 2 : c;
   out.push_back(f);

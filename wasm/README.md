@@ -74,7 +74,27 @@ Its C2H packets are the same 16 KiB, so cost scales with the rate. Linear projec
 20 MS/s marginal. Levers: bigger C2H packets (fewer transfers; an on-chip program change), and a
 JS bulk-IN reader instead of libusb for the stream (only the worker's share). Needs an 8812BU on USB 3.
 
+## App on hardware (the web version, 2026-10-26)
+The built app (`web/dist-web`) in Chrome 147 on the 8812CU, `tests/web-e2e.mjs` and `tests/web-core.mjs`:
+
+| Check | Result |
+|---|---|
+| Bring-up from Start | 40 s (as natively) |
+| Single view, 5 MS/s | 24.4 rows/s, 0 restarts, 0 banks dropped, dsp_load 0.07 |
+| Rate change, retune, back (one session) | streaming throughout, 0 restarts |
+| 2437 MHz, 20 MHz gapped | streams; Wi-Fi marks: not exercised (the finder needs continuous 20/40 MS/s) |
+| Spectral Map pattern: 20 retunes, 300 ms apart | all acked, 0 restarts |
+| Reload while open, second slot on the same adapter | released / refused, as natively |
+| CPU, 5 MS/s, UI drawing | renderer 36 %, browser process 24 %, GPU process 9 % of a core |
+
+- **Stream restarts needed a fix.** libusb's WebUSB backend cannot cancel a transfer (its cancel is a
+  no-op), so a stopped stream's queued reads stayed posted and swallowed the next run's first packets
+  (framing faults on every retune). `usb_abort.cpp` (linked with `--wrap`) aborts them the WebUSB way:
+  release and re-claim the interface (~1 ms, nothing sent to the chip).
+- **libusb under WASMFS** needs `libusb/fcntl_shim.c` (WASMFS refuses O_NONBLOCK on libusb's pipe).
+- **DSP and Wi-Fi decoder in WASM:** `tests/test_core.cpp` built as `wsdr-test-core` passes under Node
+  (`build.sh` runs it), the synthetic Wi-Fi frames and SSIDs included.
+
 ## Not yet tested
-DSP (FFT, Wi-Fi frame decoder) in WASM; recording to disk (OPFS / File System Access); two dongles;
-the USB 3 switch and re-enumeration (8812BU); retune while streaming; macOS / Windows (WinUSB) /
-Android Chrome.
+Live Wi-Fi marks (an 8812BU on USB 3); two dongles; the USB 3 switch and re-enumeration (8812BU);
+macOS / Windows (WinUSB) / Android Chrome.

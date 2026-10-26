@@ -30,6 +30,18 @@ try {
   check(st?.ring_dropped === 0, `no banks dropped (${st?.ring_dropped})`);
   check(st?.disk_free === undefined, 'no disk_free on the web');
 
+  // A stream restart inside the session (WebUSB cannot cancel the old run's reads: they must not
+  // swallow the new run's first packets): a rate change, then a retune, then back.
+  for (const [what, args] of [['rate 2.5 MS/s', { rate_sel: 5 }], ['retune 5240 MHz', { freq: 5240e6 }], ['back to 5 MS/s', { rate_sel: 4, freq: 5190e6 }]]) {
+    const r = await c.ev(`core.request(${JSON.stringify({ cmd: 'set', slot: 0, ...args })})`);
+    await c.sleep(4000);
+    const n0 = await c.ev('core.rows[0]');
+    await c.sleep(3000);
+    const s2 = await c.ev(`core.events.filter((e) => e.type === 'status' && e.slot === 0).at(-1)`);
+    check(r.type === 'ack' && s2?.rx?.restarts === 0 && (await c.ev('core.rows[0]')) - n0 >= 60,
+      `${what}: still streaming, no restarts (${s2?.rx?.restarts}${s2?.rx?.error ? ': ' + s2.rx.error : ''})`);
+  }
+
   const b = await open(1);
   check(b.type === 'error' && String(b.msg).startsWith('every adapter of this kind is open'), `slot 1 on the same adapter refused (${b.msg})`);
 

@@ -45,13 +45,27 @@ set_target_properties(wsdr-probe PROPERTIES SUFFIX ".js")
 if(WSDR_ASYNC STREQUAL "jspi")
   include(../src/sources.cmake)
   set(NLOHMANN_INCLUDE "" CACHE PATH "directory holding nlohmann/json.hpp (wasm/build.sh fetches it)")
-  add_executable(wsdr-core core.cpp ${STUDIO_CORE_SOURCES} ../src/fft_pocketfft.cpp)
+  add_executable(wsdr-core core.cpp usb_abort.cpp ${STUDIO_CORE_SOURCES} ../src/fft_pocketfft.cpp)
   target_include_directories(wsdr-core PRIVATE ../src ../external/pocketfft ${NLOHMANN_INCLUDE})
   target_link_libraries(wsdr-core wsdrcore iqdsp)
   target_link_directories(wsdr-core PRIVATE ${LIBUSB_PREFIX}/lib)
   target_compile_options(wsdr-core PRIVATE -Wall -Wextra)
+  # usb_abort.cpp: WebUSB cannot cancel a transfer; a stopped stream's reads are aborted instead
   target_link_options(wsdr-core PRIVATE ${WSDR_WEB_LINK} -sWASMFS -sEXPORT_NAME=createCore
+    -Wl,--wrap=libusb_cancel_transfer -Wl,--wrap=libusb_submit_transfer
     -sEXPORTED_FUNCTIONS=_core_start,_core_client_open,_core_text,_malloc,_free
     -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8)
   set_target_properties(wsdr-core PROPERTIES SUFFIX ".js")
+
+  # tests/test_core.cpp (the DSP and Wi-Fi decoder on synthetic data) as WebAssembly, run under Node:
+  # the engine's maths in the web build, checked where no live 20/40 MS/s stream is available.
+  add_executable(wsdr-test-core ../tests/test_core.cpp usb_abort.cpp ${STUDIO_CORE_SOURCES} ../src/fft_pocketfft.cpp)
+  target_include_directories(wsdr-test-core PRIVATE ../src ../external/pocketfft ${NLOHMANN_INCLUDE})
+  target_link_libraries(wsdr-test-core wsdrcore iqdsp)
+  target_link_directories(wsdr-test-core PRIVATE ${LIBUSB_PREFIX}/lib)
+  target_link_options(wsdr-test-core PRIVATE ${WSDR_EXC_FLAGS} ${WSDR_ASYNC_LINK} -lembind -sENVIRONMENT=node,worker
+    -sINITIAL_MEMORY=512MB -sSTACK_SIZE=1MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB -sPTHREAD_POOL_SIZE=16 -sWASMFS
+    -sPROXY_TO_PTHREAD -sEXIT_RUNTIME -sNODERAWFS=0
+    -Wl,--wrap=libusb_cancel_transfer -Wl,--wrap=libusb_submit_transfer)
+  set_target_properties(wsdr-test-core PROPERTIES SUFFIX ".js")
 endif()

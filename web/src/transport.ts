@@ -13,6 +13,7 @@ export interface Transport {
   connect(): void;
   close(): void;
   request(cmd: string, args?: Record<string, unknown>): Promise<any>;
+  setFolder?(handle: FileSystemDirectoryHandle): void; // web: where recordings end up
 }
 
 export type TransportEnv = {

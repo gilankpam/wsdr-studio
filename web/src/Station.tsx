@@ -8,6 +8,7 @@ import { Display, type Source } from './display';
 import type { Hub } from './hub';
 import { Constellation } from './Constellation';
 import { PAIR_TITLE, pairAdapter, type UsbLike } from './pairing';
+import { ensureFolder, idbFolderStore, pickFolder } from './recordFolder';
 import type { Caps, Device, DspSettings, FramePoints, Rate, RxSettings, Row, Status, WifiFrame } from './protocol';
 import { Seg } from './ui';
 import {
@@ -658,6 +659,12 @@ export function Station(p: {
   };
   const toggleRecord = async () => {
     try {
+      if (web && !recording) {
+        // the folder first (this click / key press is the gesture its prompt or picker needs)
+        const folder = await ensureFolder(idbFolderStore(), pickFolder);
+        if (!folder) return addBanner('Recording needs a folder: none was chosen.', 'error');
+        hub.setRecordFolder(folder);
+      }
       await req('record', { action: recording ? 'stop' : 'start' });
       if (!recording) setSaved(null);
     } catch {

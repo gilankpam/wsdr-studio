@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // The web build's transport: protocol v1 with wsdr-core (the engine in WebAssembly) in a worker
-// (core/worker.ts). Page -> worker: {t:'open'} once it is ready, {t:'text', text} per command.
+// (core/worker.ts). Page -> worker: {t:'open'} once it is ready, {t:'text', text} per command,
+// {t:'folder', handle} (the recordings folder).
 // Worker -> page: {t:'ready'}, {t:'fatal', msg}, {t:'text', text}, {t:'bin', buf}, {t:'log', text}.
 import { decodeRow, onText, type Pending, type Row } from './protocol';
 
@@ -51,6 +52,11 @@ export class WorkerClient {
     this.ready = false;
     for (const p of this.pending.values()) p.reject(new Error('connection closed'));
     this.pending.clear();
+  }
+
+  // Where finished recordings go (the worker moves them there from the page's storage).
+  setFolder(handle: FileSystemDirectoryHandle) {
+    this.w?.postMessage({ t: 'folder', handle });
   }
 
   request(cmd: string, args: Record<string, unknown> = {}): Promise<any> {

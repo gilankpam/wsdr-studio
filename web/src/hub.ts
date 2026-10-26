@@ -97,6 +97,11 @@ export class Hub {
     return () => this.subs.delete(s);
   }
 
+  // Web build: the folder finished recordings are moved into.
+  setRecordFolder(handle: FileSystemDirectoryHandle) {
+    this.client?.setFolder?.(handle);
+  }
+
   request(cmd: string, args: Record<string, unknown> = {}): Promise<any> {
     return this.client ? this.client.request(cmd, args) : Promise.reject(new Error('not connected'));
   }

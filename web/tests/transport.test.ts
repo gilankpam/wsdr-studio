@@ -3,7 +3,7 @@
 // protocol: ready/open, requests and their replies, rows, a fatal load.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { NEEDS_CHROME, openTransport } from '../src/transport';
+import { NEEDS_CHROME, NEEDS_ISOLATION, openTransport } from '../src/transport';
 import { WorkerClient, type WorkerLike } from '../src/workerClient';
 
 class FakeWorker implements WorkerLike {
@@ -29,9 +29,14 @@ test('openTransport: WebUSB, isolation and JSPI mean the worker', async () => {
   assert.equal(t.kind, 'web');
 });
 
+test('openTransport: a capable browser in a page not yet isolated is told so, not sent to another browser', async () => {
+  await assert.rejects(openTransport({ usb: {}, isolated: false, jspi: true, makeWorker: () => new FakeWorker() }), { message: NEEDS_ISOLATION });
+  assert.match(NEEDS_ISOLATION, /reload/i);
+  assert.doesNotMatch(NEEDS_ISOLATION, /version 137/);
+});
+
 test('openTransport: anything else says which browser is needed', async () => {
   await assert.rejects(openTransport({}), { message: NEEDS_CHROME });
-  await assert.rejects(openTransport({ usb: {}, isolated: false, jspi: true, makeWorker: () => new FakeWorker() }), { message: NEEDS_CHROME });
   await assert.rejects(openTransport({ usb: {}, isolated: true, jspi: false, makeWorker: () => new FakeWorker() }), { message: NEEDS_CHROME });
   assert.equal(NEEDS_CHROME, 'wsdr-studio needs Chrome or Chromium (version 137 or newer) on a desktop computer.');
 });

@@ -26,12 +26,19 @@ export type TransportEnv = {
 };
 
 export const NEEDS_CHROME = 'wsdr-studio needs Chrome or Chromium (version 137 or newer) on a desktop computer.';
+// The browser can, but the page is not cross-origin isolated yet: on hosts without COOP/COEP (GitHub
+// Pages) coi-serviceworker reloads the page once to add them; this shows only if that did not happen.
+export const NEEDS_ISOLATION =
+  'The page is reloading once to finish setting up. If this stays, reload it; if it still stays, this browser blocks the service worker the page needs (private windows can).';
 
 let desktop: Promise<Client> | null = null; // one session per page (the shell hands out one token)
 
 export function openTransport(env: TransportEnv = browserEnv()): Promise<Transport> {
   if (env.bridge && env.location) return (desktop ??= Client.fromBridge(env.bridge, env.location));
-  if (env.usb && env.isolated && env.jspi && env.makeWorker) return Promise.resolve(new WorkerClient(env.makeWorker));
+  if (env.usb && env.jspi && env.makeWorker) {
+    if (!env.isolated) return Promise.reject(new Error(NEEDS_ISOLATION));
+    return Promise.resolve(new WorkerClient(env.makeWorker));
+  }
   return Promise.reject(new Error(NEEDS_CHROME));
 }
 

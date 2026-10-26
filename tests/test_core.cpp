@@ -4,8 +4,10 @@
 #include <array>
 #include <chrono>
 #include <complex>
+#include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <random>
 #include <cmath>
 #include <cstdio>
@@ -17,6 +19,7 @@
 #include "dsp.h"
 #include "protocol.h"
 #include "receiver.h"
+#include "studio.h"
 #include "wifi.h"
 
 #include <nlohmann/json.hpp>
@@ -532,6 +535,45 @@ static int wifi_scan(const char *path) {
   return 0;
 }
 
+
+// Studio: the two-slot dispatch (no adapter needed: only the replies and the first client's greeting).
+static void test_studio_dispatch() {
+  std::vector<std::string> bc;
+  std::mutex bm;
+  Studio st({[&](std::string t) {
+               std::lock_guard<std::mutex> l(bm);
+               bc.push_back(std::move(t));
+             },
+             [](std::vector<uint8_t> &&) {}},
+            (std::filesystem::temp_directory_path() / "wsdr-test-rec").string(), true, "/home/x");
+  std::vector<nlohmann::json> sent;
+  st.client_open([&](std::string t) { sent.push_back(nlohmann::json::parse(t)); });
+  CHECK(sent.size() >= 7);
+  if (sent.size() >= 7) {
+    CHECK(sent[0]["type"] == "hello");
+    CHECK(sent[0]["slots"] == 2);
+    CHECK(sent[0]["version"] == 1);
+    CHECK(sent[0]["home"] == "/home/x");
+    for (const char *type : {"caps", "settings", "status"})
+      for (int slot : {0, 1}) {
+        bool seen = false;
+        for (size_t i = 1; i < 7; i++)
+          seen |= sent[i]["type"] == type && sent[i]["slot"] == slot;
+        CHECK(seen);
+      }
+  }
+  nlohmann::json r;
+  const auto reply = [&](std::string t) { r = nlohmann::json::parse(t); };
+  st.client_text("[1]", reply);
+  CHECK(r["type"] == "error" && r["kind"] == "bad_request" && r["msg"] == "not a JSON object");
+  r = nullptr;
+  st.client_text(R"({"cmd":"_lost","id":7})", reply);
+  CHECK(r["msg"] == "unknown command" && r["id"] == 7);
+  r = nullptr;
+  st.client_text(R"({"cmd":"status","slot":2,"id":3})", reply);
+  CHECK(r["msg"] == "slot must be 0 or 1" && r["id"] == 3);
+}
+
 int main(int argc, char **argv) {
   if (argc > 2 && std::string(argv[1]) == "--wifi")
     return wifi_scan(argv[2]);
@@ -546,6 +588,7 @@ int main(int argc, char **argv) {
   test_crop();
   test_wifi_frames();
   test_ssid_text();
+  test_studio_dispatch();
   std::printf(g_fail ? "%d FAILED\n" : "all tests passed\n", g_fail);
   return g_fail ? 1 : 0;
 }

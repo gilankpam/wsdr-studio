@@ -85,6 +85,9 @@ The built app (`web/dist-web`) in Chrome 147 on the 8812CU, `tests/web-e2e.mjs` 
 | 2437 MHz, 20 MHz gapped | streams; Wi-Fi marks: not exercised (the finder needs continuous 20/40 MS/s) |
 | Spectral Map pattern: 20 retunes, 300 ms apart | all acked, 0 restarts |
 | Reload while open, second slot on the same adapter | released / refused, as natively |
+| Slot B with one adapter | busy (A's) / not_found (no 8812BU); Panorama and Compare disabled ("Needs a second adapter") |
+| A second tab while streaming | its Start fails with the Chrome hint (rtw88 / other program); the first tab streams on |
+| 10 s recording, 5 MS/s | 200.1 MB + meta in the picked folder, nothing left in the page storage |
 | CPU, 5 MS/s, UI drawing | renderer 36 %, browser process 24 %, GPU process 9 % of a core |
 
 - **Stream restarts needed a fix.** libusb's WebUSB backend cannot cancel a transfer (its cancel is a
@@ -96,5 +99,10 @@ The built app (`web/dist-web`) in Chrome 147 on the 8812CU, `tests/web-e2e.mjs` 
   (`build.sh` runs it), the synthetic Wi-Fi frames and SSIDs included.
 
 ## Not yet tested
-Live Wi-Fi marks (an 8812BU on USB 3); two dongles; the USB 3 switch and re-enumeration (8812BU);
-macOS / Windows (WinUSB) / Android Chrome.
+- **Two dongles** (Panorama, Compare, two engines streaming at once): only one 8812CU was available.
+- **The 8812BU:** the USB 3 switch (the dongle re-enumerates; Chrome must still see it as paired, which
+  needs a serial number), 10–40 MS/s continuous (projected CPU-bound at 40 MS/s, above), and live Wi-Fi
+  marks (they need continuous 20/40 MS/s).
+- **Other platforms:** macOS (no driver to fight: should just work), Windows (the dongle needs the WinUSB
+  driver, e.g. via Zadig), Android Chrome (OTG; USB 3 varies by phone).
+- **Unplug / replug** while streaming: `tests/web-unplug.mjs` guides a person through it.

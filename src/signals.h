@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Signals other than Wi-Fi in the raw I/Q, tagged by cheap rules (after the Airshark idea): narrow
 // bursts from a short-time spectrum (Bluetooth when they hop, else "narrowband"), and a microwave
-// oven from the span's activity switching with the mains. Close enough to tag what the waterfall
-// shows, not a decoder. Receive only.
+// oven from the span's activity switching with the mains. A narrow burst on a BLE advertising channel
+// is decoded (its device address and name). Receive only.
 #pragma once
 
 #include <complex>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 typedef struct fftwf_plan_s *fftwf_plan;
@@ -20,7 +21,12 @@ struct Burst {
   double mhz = 0;    // centre
   double bw_mhz = 0; // width
   double dur_us = 0;
-  char kind = 'N';   // 'T' Bluetooth (narrow bursts hopping), 'N' other narrowband, 'M' microwave oven
+  // 'T' Bluetooth (narrow bursts hopping), 'N' other narrowband, 'M' microwave oven, 'E' BLE advertising
+  // (decoded: CRC good)
+  char kind = 'N';
+  std::string addr;  // 'E': the advertiser's address (aa:bb:..., as shown by phones)
+  bool random = false; // 'E': a random (often rotating) address rather than a public one
+  std::string name;  // 'E': its name, if it sends one (UTF-8 checked)
 };
 
 class Finder {
@@ -39,6 +45,27 @@ private:
   void release();
   void column(const cf *x, std::vector<Burst> &out);
   void end_track(size_t i, std::vector<Burst> &out);
+  // the advertising channels inside the span: activity in their three bins, gaps up to 64 us bridged
+  struct AdvChan {
+    int chan, bin;                   // 37..39; the bin at its centre
+    double mhz;
+    bool on = false;
+    uint64_t c0 = 0, c1 = 0;         // first and last active column
+    std::vector<cf> taps;            // the channel to 0 Hz and ~600 kHz wide (mixer and filter in one)
+    double step = 0;                 // the mixer's phase step per sample
+    std::vector<uint8_t> white;      // its whitening sequence
+  };
+  std::vector<AdvChan> _advch;
+  int _bdec = 0;                     // to 4 MS/s: 10 or 5
+  struct Adv {
+    uint64_t s0;                     // where the activity started
+    size_t ch;                       // its channel (_advch)
+    Burst b;
+  };
+  std::vector<Adv> _adv;             // activity on an advertising channel, waiting for its samples
+  bool ble(uint64_t s0, uint64_t s1, const AdvChan &a, Burst &b) const; // decode samples [s0, s1)
+  std::vector<Burst> _held;          // narrow bursts on an advertising channel, until its decodes are in
+  std::vector<std::pair<double, double>> _decoded; // decoded packets' times (s): a burst over one is it
   void oven(std::vector<Burst> &out); // every 200 ms
   double time_of(uint64_t sample) const { return _t_end - static_cast<double>(_abs_end - sample) / _fs; }
   double bin_hz(double k) const { return _centre + (k - 0.5 * _nf) * _fs / _nf; }

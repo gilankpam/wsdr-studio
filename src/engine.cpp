@@ -656,7 +656,8 @@ json Engine::devices_json(const std::vector<DeviceInfo> &d) {
 // Wi-Fi frames from the samples the DSP thread hands over: found frames go out in batches as
 // {"type":"wifi","frames":[[t, centre MHz, width MHz, format, rate Mb/s, length, airtime us, SNR dB
 // (, sender, BSSID, network name, channel: 6 Mb/s frames decoded whole)]...],
-// "other":[[t, centre MHz, width MHz, kind (T Bluetooth, N narrowband, M microwave oven), us]...],
+// "other":[[t, centre MHz, width MHz, kind (T Bluetooth, N narrowband, M microwave oven, E BLE
+// advertising), us (, E: address, random, name)]...],
 // "dropped": banks skipped because this thread fell behind}.
 void Engine::wifi_loop() {
   wifi::Decoder dec;
@@ -716,9 +717,16 @@ void Engine::wifi_loop() {
         arr.push_back(e);
       }
       json oth = json::array();
-      for (const auto &o : other)
-        oth.push_back({std::round(o.t * 1e6) / 1e6, std::round(o.mhz * 100) / 100, std::round(o.bw_mhz * 100) / 100, std::string(1, o.kind),
-                       std::round(o.dur_us)});
+      for (const auto &o : other) {
+        json e = {std::round(o.t * 1e6) / 1e6, std::round(o.mhz * 100) / 100, std::round(o.bw_mhz * 100) / 100, std::string(1, o.kind),
+                  std::round(o.dur_us)};
+        if (o.kind == 'E') { // a decoded BLE advertisement: who sent it
+          e.push_back(o.addr);
+          e.push_back(o.random);
+          e.push_back(o.name);
+        }
+        oth.push_back(e);
+      }
       try {
         _cb.event({{"type", "wifi"}, {"frames", arr}, {"other", oth}, {"dropped", d}});
       } catch (const std::exception &) {

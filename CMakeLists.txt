@@ -25,9 +25,9 @@ find_package(Threads REQUIRED)
 # FFT backend: FFTW here; pocketfft (header-only, external/pocketfft) is what the web build uses, and
 # test_core_pocketfft runs the same tests against it.
 set(WSDR_FFT "fftw" CACHE STRING "FFT backend: fftw | pocketfft")
+include(src/sources.cmake)
 function(studio_core_lib name fft)
-  add_library(${name} STATIC src/dsp.cpp src/protocol.cpp src/device_scan.cpp src/recorder.cpp src/engine.cpp
-              src/wifi.cpp src/signals.cpp src/studio.cpp src/fft_${fft}.cpp)
+  add_library(${name} STATIC ${STUDIO_CORE_SOURCES} src/fft_${fft}.cpp)
   target_include_directories(${name} PUBLIC src)
   target_link_libraries(${name} PUBLIC wsdrcore iqdsp nlohmann_json::nlohmann_json Threads::Threads)
   if(fft STREQUAL "fftw")
@@ -38,9 +38,6 @@ function(studio_core_lib name fft)
   target_compile_options(${name} PRIVATE -Wall -Wextra)
 endfunction()
 studio_core_lib(studio_core ${WSDR_FFT})
-# The finder's complex arithmetic without Annex G: no NaN/Inf recovery (nothing there relies on it),
-# so a complex product is four multiplies instead of a library call per sample (GCC 11 made every one).
-set_source_files_properties(src/wifi.cpp src/signals.cpp PROPERTIES COMPILE_OPTIONS -fcx-limited-range)
 
 add_executable(wsdr-studiod src/main.cpp src/server.cpp)
 target_link_libraries(wsdr-studiod studio_core Boost::headers)

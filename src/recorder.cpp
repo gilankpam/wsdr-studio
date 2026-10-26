@@ -17,8 +17,8 @@ namespace studio {
 
 namespace {
 constexpr size_t kMaxQueued = 64u << 20;    // int16 values (128 MiB) queued before samples are dropped
-constexpr uint64_t kFlushBlock = 16u << 20; // writeback granularity (bytes)
-constexpr uint64_t kFlushLag = 6;           // wait for the block this far behind (~96 MiB in flight)
+[[maybe_unused]] constexpr uint64_t kFlushBlock = 16u << 20; // writeback granularity (bytes)
+[[maybe_unused]] constexpr uint64_t kFlushLag = 6;           // wait for the block this far behind (~96 MiB in flight)
 // At 40 MS/s (160 MB/s) the queue plus the blocks in flight ride out ~1.4 s of disk stall.
 }
 
@@ -121,7 +121,7 @@ void Recorder::push(const int16_t *iq, size_t samples) {
 }
 
 void Recorder::writer() {
-  uint64_t flushed = 0; // 16 MiB blocks handed to writeback
+  [[maybe_unused]] uint64_t flushed = 0; // 16 MiB blocks handed to writeback
   int fd;
   {
     std::lock_guard<std::mutex> l(_m);
@@ -158,6 +158,7 @@ void Recorder::writer() {
       left -= static_cast<size_t>(w);
       _bytes += static_cast<uint64_t>(w); // only what reached the file
     }
+#ifndef __EMSCRIPTEN__ // (the web build writes to OPFS: no page cache to bound)
     // Flush behind: start writeback of each finished 16 MiB block and wait for the one kFlushLag blocks
     // before it, so dirty pages stay bounded (no huge fsync at stop) while short stalls are absorbed.
     // A writeback error is reported to these calls (and then not again to fsync): treat it as a write
@@ -180,6 +181,7 @@ void Recorder::writer() {
       }
       flushed++;
     }
+#endif
     if (left)
       _dropped += (left + 3) / 4;
   }

@@ -17,6 +17,17 @@ const req = (cmd, args = {}) => c.ev(`__hub.request(${JSON.stringify(cmd)}, ${JS
 const lastStatus = () => c.ev(`__e2e.events.filter((e) => e.type === 'status' && e.slot === 0).at(-1)`);
 try {
   await c.until('window.__hub', 20000, 'the app exposes __hub (?e2e)');
+  // a recording left in the page storage by an earlier session (a closed tab): planted, then a fresh start
+  await c.ev(`(async () => {
+    const root = await navigator.storage.getDirectory();
+    for (const ext of ['.sigmf-data', '.sigmf-meta']) {
+      const w = await (await root.getFileHandle('wsdr-e2e-leftover' + ext, { create: true })).createWritable();
+      await w.write(new Uint8Array(4096).fill(7));
+      await w.close();
+    }
+  })()`);
+  await c.reload();
+  await c.until('window.__hub', 20000, 'the app exposes __hub after reload');
   await c.ev(`(window.__e2e = { events: [], rows: [0, 0] }, __hub.subscribe({ slot: null, event: (e) => __e2e.events.push(e), all: (r) => __e2e.rows[r.slot]++ }), 1)`);
   await c.until(`__e2e.events.some((e) => e.type === 'devices' && e.devices.some((d) => d.pid === ${PID_CU}))`, 20000, 'the 8812CU is listed');
 
@@ -108,6 +119,17 @@ try {
   check(Math.abs(got.data - 200e6) <= 0.02 * 200e6, `data file ${(got.data / 1e6).toFixed(1)} MB (200 MB +- 2 %)`);
   check(got.rate === 5000000, `meta core:sample_rate ${got.rate}`);
   check(got.left.length === 0, `the recording left the page storage (${got.left.join(', ')})`);
+
+  // the earlier session's recording was moved into the folder too, and the user was told
+  check(await c.ev(`__e2e.events.some((e) => e.type === 'notice' && /earlier session/.test(e.text) && /wsdr-e2e-leftover/.test(e.text))`), 'notice: a recording from an earlier session moved');
+  check(await c.ev(`__picked.getFileHandle('wsdr-e2e-leftover.sigmf-data').then((h) => h.getFile()).then((f) => f.size === 4096, () => false)`), 'the leftover is in the folder');
+
+  // the move ran on the engine worker's thread: the stream must not have suffered
+  const h0 = await c.ev('__e2e.rows[0]');
+  await c.sleep(3000);
+  st = await lastStatus();
+  check((await c.ev('__e2e.rows[0]')) - h0 >= 60 && st?.rx?.restarts === 0 && st?.ring_dropped === 0,
+    `still streaming after the move (restarts ${st?.rx?.restarts}, dropped ${st?.ring_dropped})`);
 
   check((await req('close')).type === 'ack', 'close acked');
   await c.sleep(1000);

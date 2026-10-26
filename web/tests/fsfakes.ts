@@ -32,6 +32,9 @@ export class FakeDir {
     return new FakeFileHandle(this, name);
   }
   async removeEntry(name: string) { this.files.delete(name); }
+  async *entries(): AsyncGenerator<[string, FakeFileHandle]> {
+    for (const n of [...this.files.keys()]) yield [n, new FakeFileHandle(this, n)];
+  }
   async queryPermission() { return this.permission; }
   async requestPermission() { this.requested++; return (this.permission = this.afterRequest); }
 }

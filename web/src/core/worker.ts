@@ -6,9 +6,11 @@
 //
 // Recordings: the engine writes into the page's storage (OPFS, mounted at /recordings); each finished
 // one ("recorded") is moved into the folder the user picked ({t:'folder', handle}) before the event goes
-// on, and paths in events name that folder instead of /recordings.
+// on, and paths in events name that folder instead of /recordings. Recordings already there when the
+// worker starts (a tab closed while recording, a move that failed) go into the folder too, once there
+// is one, with a notice.
 /// <reference lib="webworker" />
-import { moveRecording } from './move';
+import { leftoverRecordings, moveRecording } from './move';
 type Core = {
   _core_start(dir: number): number;
   _core_client_open(): void;
@@ -21,6 +23,21 @@ const post = (m: unknown, transfer: Transferable[] = []) => (self as unknown as 
 const queue: any[] = [];
 let core: Core | null = null;
 let folder: FileSystemDirectoryHandle | null = null;
+let leftovers: string[] = []; // listed before the engine could start a recording
+
+async function moveLeftovers(to: FileSystemDirectoryHandle) {
+  const bases = leftovers.splice(0);
+  if (!bases.length) return;
+  const root = await navigator.storage.getDirectory();
+  const errors: string[] = [];
+  for (const b of bases) {
+    const r = await moveRecording(root, to, b);
+    if (r.error) errors.push(r.error);
+  }
+  const text = `Moved ${bases.length === 1 ? 'a recording' : `${bases.length} recordings`} from an earlier session into ${to.name}: ${bases.join(', ')}` +
+    (errors.length ? `. Some could not be moved (${errors.join('; ')}).` : '.');
+  post({ t: 'text', text: JSON.stringify({ type: 'notice', text }) });
+}
 const DIR = '/recordings';
 
 // "/recordings/x" in an event -> "<folder>/x" (JSON-escaped)
@@ -41,7 +58,10 @@ async function onCoreText(text: string) {
 }
 
 function handle(m: any) {
-  if (m.t === 'folder') return void (folder = m.handle);
+  if (m.t === 'folder') {
+    folder = m.handle;
+    return void moveLeftovers(m.handle).catch(() => {});
+  }
   if (!core) return void queue.push(m);
   if (m.t === 'open') core._core_client_open();
   else if (m.t === 'text') {
@@ -60,6 +80,7 @@ async function start(url: string) {
       print: (text: string) => post({ t: 'log', text }),
       printErr: (text: string) => post({ t: 'log', text }),
     });
+    leftovers = await leftoverRecordings(await navigator.storage.getDirectory()).catch(() => []);
     const dir = m.stringToNewUTF8(DIR);
     const rc = m._core_start(dir);
     m._free(dir);

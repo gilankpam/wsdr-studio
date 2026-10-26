@@ -21,3 +21,15 @@ export async function moveRecording(from: FileSystemDirectoryHandle, to: FileSys
   }
   return errors.length ? { moved, error: errors.join('; ') } : { moved };
 }
+
+// Recordings still in the page's storage (base names, sorted): from a tab closed or crashed while
+// recording, or a move that failed. The worker lists them at startup, before any new recording starts,
+// and moves them into the folder once there is one.
+export async function leftoverRecordings(dir: FileSystemDirectoryHandle): Promise<string[]> {
+  const bases = new Set<string>();
+  for await (const [name] of (dir as unknown as { entries(): AsyncIterable<[string, unknown]> }).entries()) {
+    const ext = EXTS.find((e) => name.endsWith(e));
+    if (ext) bases.add(name.slice(0, -ext.length));
+  }
+  return [...bases].sort();
+}

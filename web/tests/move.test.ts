@@ -2,7 +2,7 @@
 // Moving a finished recording (data + meta) from the page's storage into the user's folder.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { moveRecording } from '../src/core/move';
+import { leftoverRecordings, moveRecording } from '../src/core/move';
 import { FakeDir } from './fsfakes';
 
 const base = 'wsdr-20261026-113254-5180.000MHz-5Msps';
@@ -32,4 +32,11 @@ test('moveRecording: move failure keeps file and reports', async () => {
   assert.match(r.error ?? '', new RegExp(`${base}\\.sigmf-meta`));
   assert.ok(from.files.has(`${base}.sigmf-meta`));
   assert.ok(!from.files.has(`${base}.sigmf-data`));
+});
+
+test('leftoverRecordings: recordings left in the page storage (a closed tab, a failed move), by name', async () => {
+  const d = new FakeDir('opfs');
+  for (const n of ['b.sigmf-data', 'a.sigmf-meta', 'a.sigmf-data', 'notes.txt', 'c.sigmf-meta']) d.files.set(n, new Uint8Array([1]));
+  assert.deepEqual(await leftoverRecordings(d as any), ['a', 'b', 'c']);
+  assert.deepEqual(await leftoverRecordings(new FakeDir('empty') as any), []);
 });

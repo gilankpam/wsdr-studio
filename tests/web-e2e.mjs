@@ -102,7 +102,10 @@ try {
   const r0n = await c.ev(`__e2e.events.length`);
   const rs = await req('record', { action: 'start' });
   check(rs.type === 'ack', `record start ${rs.file ?? rs.msg ?? ''}`);
-  await c.sleep(10000);
+  await c.sleep(5000);
+  // the web build has no free-space figure: no "disk nearly full" from an unknown
+  check(!(await c.ev(`document.body.innerText.includes('disk nearly full')`)), 'recording: no false "disk nearly full"');
+  await c.sleep(5000);
   check((await req('record', { action: 'stop' })).type === 'ack', 'record stop');
   const rec = await c.until(`__e2e.events.slice(${r0n}).find((e) => e.type === 'recorded')`, 60000, 'recorded event');
   check(!rec.error, `recorded without error ${rec.error ?? ''}`);

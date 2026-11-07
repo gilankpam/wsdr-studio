@@ -1,3 +1,4 @@
 [submodule "external/wifi-sdr"]
 	path = external/wifi-sdr
-	url = https://github.com/snokvist/wifi-sdr.git
+	url = https://github.com/gilankpam/wifi-sdr.git
+	branch = tplink-t4u

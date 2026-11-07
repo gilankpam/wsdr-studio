@@ -5,6 +5,7 @@ export const USB_FILTERS = [
   { vendorId: 0x0bda, productId: 0xb812 }, // RTL8812BU
   { vendorId: 0x0bda, productId: 0xc812 }, // RTL8812CU
   { vendorId: 0x0bda, productId: 0xa81a }, // RTL8812EU
+  { vendorId: 0x2357, productId: 0x0115 }, // TP-Link Archer T4U v3 (RTL8812BU)
 ];
 
 export type UsbLike = { requestDevice(o: { filters: typeof USB_FILTERS }): Promise<unknown> };

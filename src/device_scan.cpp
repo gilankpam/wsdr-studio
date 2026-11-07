@@ -34,14 +34,16 @@ std::vector<DeviceInfo> scan_devices() {
   const ssize_t n = libusb_get_device_list(ctx, &list);
   for (ssize_t i = 0; i < n; i++) {
     libusb_device_descriptor d{};
-    if (libusb_get_device_descriptor(list[i], &d) != 0 || d.idVendor != 0x0bda ||
-        (d.idProduct != wsdr::kPid8812bu && !wsdr::jaguar3_pid(d.idProduct)))
+    if (libusb_get_device_descriptor(list[i], &d) != 0 || !wsdr::model_pid(d.idVendor, d.idProduct))
       continue;
     DeviceInfo info;
-    info.pid = d.idProduct;
+    info.pid = wsdr::model_pid(d.idVendor, d.idProduct);
+    char id[16];
+    std::snprintf(id, sizeof id, "%04x:%04x", d.idVendor, d.idProduct);
+    info.usb_id = id;
     // Jaguar3 (8812CU, 8812EU): USB 2, 5 MS/s continuous, 40 MS/s gapped, the 8822C code throughout
-    const bool cu = wsdr::jaguar3_pid(d.idProduct);
-    const bool eu = d.idProduct == wsdr::kPid8812eu;
+    const bool cu = wsdr::jaguar3_pid(info.pid);
+    const bool eu = info.pid == wsdr::kPid8812eu;
     info.model = eu ? "RTL8812EU" : cu ? "RTL8812CU" : "RTL8812BU";
     info.chip = eu ? "RTL8822E" : cu ? "RTL8822C" : "RTL8822B";
     info.five_ghz_only = eu; // measured: at 2.4 GHz it streams the ADC floor (wifi-sdr notes/cu-custom-code.md)

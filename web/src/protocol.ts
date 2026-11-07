@@ -6,6 +6,7 @@
 export type Rate = { rate_sel: number; fs: number; gapped?: boolean; hw_fs?: number }; // hw_fs: captured rate (offset tuning)
 export type Device = {
   pid: number; model: string; chip: string; bus: number; port: string; speed_mbps: number;
+  usb_id?: string; // its own USB id ("0bda:b812"; a board maker's, e.g. "2357:0115", for the same chip)
   controller: string; driver: string; can_open: boolean; max_msps: number;
   gapped_msps?: number; // widest span in gapped mode (40 on the 8812CU / 8812EU, 80 on the 8812BU), 0 = none
   bands?: ('2.4' | '5')[]; // what its front end receives (the 8812EU: 5 GHz only); missing = both

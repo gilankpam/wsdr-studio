@@ -10,7 +10,8 @@
 namespace studio {
 
 struct DeviceInfo {
-  uint16_t pid = 0;
+  uint16_t pid = 0;       // the adapter (wsdr::model_pid): 0xb812 also for an 8812BU under a board maker's id
+  std::string usb_id;     // its own USB id, "0bda:b812" or e.g. "2357:0115" (TP-Link Archer T4U v3)
   std::string model;      // "RTL8812BU" / "RTL8812CU" / "RTL8812EU"
   std::string chip;       // "RTL8822B" / "RTL8822C" / "RTL8822E"
   int bus = 0;

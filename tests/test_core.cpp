@@ -1583,6 +1583,16 @@ static void test_ble() {
 }
 
 // Network names: whatever bytes a beacon carries, the text is valid UTF-8 the JSON writer accepts.
+// USB ids to adapters: Realtek's own, a board maker's for the same chip, and the rest refused.
+static void test_model_pid() {
+  CHECK(wsdr::model_pid(0x0bda, 0xb812) == wsdr::kPid8812bu);
+  CHECK(wsdr::model_pid(0x0bda, 0xc812) == wsdr::kPid8812cu);
+  CHECK(wsdr::model_pid(0x0bda, 0xa81a) == wsdr::kPid8812eu);
+  CHECK(wsdr::model_pid(0x2357, 0x0115) == wsdr::kPid8812bu); // TP-Link Archer T4U v3
+  CHECK(wsdr::model_pid(0x0bda, 0x8812) == 0);                // RTL8812AU: not ours
+  CHECK(wsdr::model_pid(0x2357, 0xb812) == 0);                // a Realtek pid under another vendor
+}
+
 static void test_ssid_text() {
   auto t = [](const std::string &b) { return wifi::ssid_text(reinterpret_cast<const uint8_t *>(b.data()), b.size()); };
   CHECK(t("homelab") == "homelab");
@@ -1753,6 +1763,7 @@ int main(int argc, char **argv) {
   test_wifi_points();
   test_ht_points();
   test_ssid_text();
+  test_model_pid();
   test_dsss_beacon();
   test_signals();
   test_video();

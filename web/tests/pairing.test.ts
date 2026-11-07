@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { USB_FILTERS, pairAdapter } from '../src/pairing';
 
-test('pairAdapter asks for the three Realtek adapters and reports a pairing', async () => {
+test('pairAdapter asks for the Realtek adapters (and the TP-Link 8812BU) and reports a pairing', async () => {
   let asked: unknown = null;
   const r = await pairAdapter({ requestDevice: async (o: any) => ((asked = o.filters), {} as any) } as any);
   assert.equal(r, 'paired');
@@ -12,6 +12,7 @@ test('pairAdapter asks for the three Realtek adapters and reports a pairing', as
     { vendorId: 0x0bda, productId: 0xb812 },
     { vendorId: 0x0bda, productId: 0xc812 },
     { vendorId: 0x0bda, productId: 0xa81a },
+    { vendorId: 0x2357, productId: 0x0115 },
   ]);
   assert.deepEqual(USB_FILTERS, asked);
 });

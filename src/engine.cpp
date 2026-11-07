@@ -704,7 +704,7 @@ double Engine::disk_free() const {
 json Engine::devices_json(const std::vector<DeviceInfo> &d) {
   json arr = json::array();
   for (const auto &x : d)
-    arr.push_back({{"pid", x.pid}, {"model", x.model}, {"chip", x.chip}, {"bus", x.bus}, {"port", x.port},
+    arr.push_back({{"pid", x.pid}, {"usb_id", x.usb_id}, {"model", x.model}, {"chip", x.chip}, {"bus", x.bus}, {"port", x.port},
                    {"speed_mbps", x.speed_mbps}, {"controller", x.controller}, {"driver", x.driver},
                    {"can_open", x.can_open}, {"max_msps", x.max_msps}, {"gapped_msps", x.gapped_msps},
                    {"bands", x.five_ghz_only ? json::array({"5"}) : json::array({"2.4", "5"})}});

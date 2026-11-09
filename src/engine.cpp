@@ -33,6 +33,17 @@ const char *open_kind(wsdr::OpenError::Kind k) {
   }
 }
 
+// What a failed open tells the user. In the browser, a busy adapter is one Chrome could not claim:
+// WebUSB cannot detach a kernel driver.
+std::string open_msg(const wsdr::OpenError &e) {
+#ifdef __EMSCRIPTEN__
+  if (e.kind == wsdr::OpenError::Busy)
+    return "Chrome could not claim the adapter: another program or the kernel driver holds it. On Linux: "
+           "sudo modprobe -r rtw88_8822bu rtw88_8822cu (or blacklist them, see the README).";
+#endif
+  return e.what();
+}
+
 struct CmdError : std::runtime_error {
   std::string kind;
   CmdError(std::string k, const std::string &m) : std::runtime_error(m), kind(std::move(k)) {}
@@ -464,10 +475,27 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
           } else if (d.speed_mbps < 5000 && d.bus == dev.bus && d.port == dev.port) {
             back = true; // re-enumerated at USB 2 on the same port: no USB 3 here
           }
+#ifdef __EMSCRIPTEN__
+          // WebUSB has no port: d.port is the backend's id for this USBDevice, a new one after the
+          // re-enumeration. A new 8812BU at USB 2 is the one we switched, back on a USB 2 port.
+          else if (d.speed_mbps < 5000) {
+            bus = d.bus;
+            port = d.port;
+            back = true;
+          }
+#endif
         }
       }
+#ifdef __EMSCRIPTEN__
+      // (the chip remembers the attempt until it loses power: after pairing it again, Start opens it
+      // at whatever speed it came back at; a replug would only repeat the switch)
+      if (!super && !back)
+        fail("not_found", "the 8812BU re-enumerated for the USB 3 switch and this page lost access to it: "
+                          "press Pair adapter…, choose it again, then Start (no need to replug)");
+#else
       if (!super && !back)
         fail("not_found", "the 8812BU did not come back after the USB 3 switch; replug it");
+#endif
       _cb.event({{"type", "notice"},
                  {"text", super ? "The 8812BU now runs at USB 3 (until it is unplugged)"
                                 : "The 8812BU stayed at USB 2: this port or cable may not carry USB 3"}});
@@ -497,7 +525,7 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
   try {
     r->open(pid, hw_for(s), bus, port);
   } catch (const wsdr::OpenError &e) {
-    fail(open_kind(e.kind), e.what());
+    fail(open_kind(e.kind), open_msg(e));
   } catch (const std::exception &e) {
     fail("bringup", std::string("bring-up failed: ") + e.what());
   }
@@ -679,6 +707,9 @@ json Engine::status() const {
 
 // free space where recordings go (the nearest existing directory); -1 when unknown
 double Engine::disk_free() const {
+#ifdef __EMSCRIPTEN__
+  return -1; // the browser has no free-space figure for the folder recordings end up in
+#endif
   std::error_code ec;
   std::filesystem::path d = _rec.dir();
   while (!d.empty() && !std::filesystem::exists(d, ec) && d.has_parent_path() && d != d.parent_path())
@@ -690,7 +721,7 @@ double Engine::disk_free() const {
 json Engine::devices_json(const std::vector<DeviceInfo> &d) {
   json arr = json::array();
   for (const auto &x : d)
-    arr.push_back({{"pid", x.pid}, {"model", x.model}, {"chip", x.chip}, {"bus", x.bus}, {"port", x.port},
+    arr.push_back({{"pid", x.pid}, {"usb_id", x.usb_id}, {"model", x.model}, {"chip", x.chip}, {"bus", x.bus}, {"port", x.port},
                    {"speed_mbps", x.speed_mbps}, {"controller", x.controller}, {"driver", x.driver},
                    {"can_open", x.can_open}, {"max_msps", x.max_msps}, {"gapped_msps", x.gapped_msps},
                    {"bands", x.five_ghz_only ? json::array({"5"}) : json::array({"2.4", "5"})}});

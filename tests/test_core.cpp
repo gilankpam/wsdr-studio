@@ -8,6 +8,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <random>
 #include <cmath>
 #include <cstdio>
@@ -23,6 +24,7 @@
 #include <filesystem>
 #include <unistd.h>
 #include "signals.h"
+#include "studio.h"
 #include "wifi.h"
 
 #include <nlohmann/json.hpp>
@@ -1581,6 +1583,16 @@ static void test_ble() {
 }
 
 // Network names: whatever bytes a beacon carries, the text is valid UTF-8 the JSON writer accepts.
+// USB ids to adapters: Realtek's own, a board maker's for the same chip, and the rest refused.
+static void test_model_pid() {
+  CHECK(wsdr::model_pid(0x0bda, 0xb812) == wsdr::kPid8812bu);
+  CHECK(wsdr::model_pid(0x0bda, 0xc812) == wsdr::kPid8812cu);
+  CHECK(wsdr::model_pid(0x0bda, 0xa81a) == wsdr::kPid8812eu);
+  CHECK(wsdr::model_pid(0x2357, 0x0115) == wsdr::kPid8812bu); // TP-Link Archer T4U v3
+  CHECK(wsdr::model_pid(0x0bda, 0x8812) == 0);                // RTL8812AU: not ours
+  CHECK(wsdr::model_pid(0x2357, 0xb812) == 0);                // a Realtek pid under another vendor
+}
+
 static void test_ssid_text() {
   auto t = [](const std::string &b) { return wifi::ssid_text(reinterpret_cast<const uint8_t *>(b.data()), b.size()); };
   CHECK(t("homelab") == "homelab");
@@ -1693,6 +1705,45 @@ static int wifi_scan(const char *path) {
   return 0;
 }
 
+
+// Studio: the two-slot dispatch (no adapter needed: only the replies and the first client's greeting).
+static void test_studio_dispatch() {
+  std::vector<std::string> bc;
+  std::mutex bm;
+  Studio st({[&](std::string t) {
+               std::lock_guard<std::mutex> l(bm);
+               bc.push_back(std::move(t));
+             },
+             [](std::vector<uint8_t> &&) {}},
+            (std::filesystem::temp_directory_path() / "wsdr-test-rec").string(), true, "/home/x");
+  std::vector<nlohmann::json> sent;
+  st.client_open([&](std::string t) { sent.push_back(nlohmann::json::parse(t)); });
+  CHECK(sent.size() >= 7);
+  if (sent.size() >= 7) {
+    CHECK(sent[0]["type"] == "hello");
+    CHECK(sent[0]["slots"] == 2);
+    CHECK(sent[0]["version"] == 1);
+    CHECK(sent[0]["home"] == "/home/x");
+    for (const char *type : {"caps", "settings", "status"})
+      for (int slot : {0, 1}) {
+        bool seen = false;
+        for (size_t i = 1; i < 7; i++)
+          seen |= sent[i]["type"] == type && sent[i]["slot"] == slot;
+        CHECK(seen);
+      }
+  }
+  nlohmann::json r;
+  const auto reply = [&](std::string t) { r = nlohmann::json::parse(t); };
+  st.client_text("[1]", reply);
+  CHECK(r["type"] == "error" && r["kind"] == "bad_request" && r["msg"] == "not a JSON object");
+  r = nullptr;
+  st.client_text(R"({"cmd":"_lost","id":7})", reply);
+  CHECK(r["msg"] == "unknown command" && r["id"] == 7);
+  r = nullptr;
+  st.client_text(R"({"cmd":"status","slot":2,"id":3})", reply);
+  CHECK(r["msg"] == "slot must be 0 or 1" && r["id"] == 3);
+}
+
 int main(int argc, char **argv) {
   if (argc > 2 && std::string(argv[1]) == "--wifi")
     return wifi_scan(argv[2]);
@@ -1712,11 +1763,13 @@ int main(int argc, char **argv) {
   test_wifi_points();
   test_ht_points();
   test_ssid_text();
+  test_model_pid();
   test_dsss_beacon();
   test_signals();
   test_video();
   test_video_follow();
   test_ble();
+  test_studio_dispatch();
   std::printf(g_fail ? "%d FAILED\n" : "all tests passed\n", g_fail);
   return g_fail ? 1 : 0;
 }

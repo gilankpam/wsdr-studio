@@ -6,6 +6,7 @@
 export type Rate = { rate_sel: number; fs: number; gapped?: boolean; hw_fs?: number }; // hw_fs: captured rate (offset tuning)
 export type Device = {
   pid: number; model: string; chip: string; bus: number; port: string; speed_mbps: number;
+  usb_id?: string; // its own USB id ("0bda:b812"; a board maker's, e.g. "2357:0115", for the same chip)
   controller: string; driver: string; can_open: boolean; max_msps: number;
   gapped_msps?: number; // widest span in gapped mode (40 on the 8812CU / 8812EU, 80 on the 8812BU), 0 = none
   bands?: ('2.4' | '5')[]; // what its front end receives (the 8812EU: 5 GHz only); missing = both
@@ -83,11 +84,27 @@ export function decodeRow(buf: ArrayBuffer): Row | null {
   };
 }
 
-let sessionPromise: Promise<string> | null = null;
+export type Pending = { resolve: (r: any) => void; reject: (e: Error) => void };
 
-type Pending = { resolve: (r: any) => void; reject: (e: Error) => void };
+// One text frame from the backend: settles the request it answers (ack / error with a pending id), or is
+// an event. Shared by both transports.
+export function onText(text: string, pending: Map<number, Pending>, onEvent: (e: any) => void) {
+  const e = JSON.parse(text);
+  if ((e.type === 'ack' || e.type === 'error') && typeof e.id === 'number' && pending.has(e.id)) {
+    const p = pending.get(e.id)!;
+    pending.delete(e.id);
+    if (e.type === 'ack') p.resolve(e);
+    else p.reject(Object.assign(new Error(e.msg ?? 'error'), { kind: e.kind as string | undefined }));
+    return;
+  }
+  onEvent(e);
+}
 
+export type Bridge = { session(): Promise<{ token: string }> };
+
+// The desktop app's transport: the backend's WebSocket on 127.0.0.1.
 export class Client {
+  readonly kind = 'desktop' as const;
   private ws: WebSocket | null = null;
   private nextId = 1;
   private pending = new Map<number, Pending>();
@@ -105,17 +122,10 @@ export class Client {
   }
 
   // The session token comes from the desktop shell (preload bridge, over IPC): it is never in a URL.
-  static fromLocation(): Promise<Client> {
-    sessionPromise ??= Client.session();
-    return sessionPromise.then((url) => new Client(url));
-  }
-
-  private static async session(): Promise<string> {
-    const bridge = (window as { wsdr?: { session(): Promise<{ token: string }> } }).wsdr;
-    if (!bridge) throw new Error('This page runs inside the wsdr-studio app. Start wsdr-studio to use it.');
+  static async fromBridge(bridge: Bridge, loc: { protocol: string; host: string }): Promise<Client> {
     const { token } = await bridge.session();
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${location.host}/ws?t=${encodeURIComponent(token)}`;
+    const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+    return new Client(`${proto}//${loc.host}/ws?t=${encodeURIComponent(token)}`);
   }
 
   connect() {
@@ -146,15 +156,7 @@ export class Client {
         if (r) this.onRow(r);
         return;
       }
-      const e = JSON.parse(m.data as string);
-      if ((e.type === 'ack' || e.type === 'error') && typeof e.id === 'number' && this.pending.has(e.id)) {
-        const p = this.pending.get(e.id)!;
-        this.pending.delete(e.id);
-        if (e.type === 'ack') p.resolve(e);
-        else p.reject(Object.assign(new Error(e.msg ?? 'error'), { kind: e.kind as string | undefined }));
-        return;
-      }
-      this.onEvent(e);
+      onText(m.data as string, this.pending, this.onEvent);
     };
     this.ws = ws;
   }

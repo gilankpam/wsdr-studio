@@ -26,10 +26,18 @@ export const spanLabel = (fs: number) => `${fs / 1e6} MHz`;
 export const devKey = (d: Device) => `${d.bus}-${d.port}`;
 export const devLabel = (d: Device) => `${d.model} · ${d.speed_mbps >= 5000 ? 'USB 3' : 'USB 2'} · bus ${d.bus}`;
 export const devTitle = (d: Device) =>
-  `${d.model} (${d.chip}), bus ${d.bus} port ${d.port}, ${d.speed_mbps} Mbit/s${d.controller ? `, host controller ${d.controller}` : ''}`;
+  `${d.model} (${d.chip}${d.usb_id ? `, USB ${d.usb_id}` : ''}), bus ${d.bus} port ${d.port}, ${d.speed_mbps} Mbit/s${d.controller ? `, host controller ${d.controller}` : ''}`;
 export const bytes = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e11 ? 0 : 2)} GB` : `${(n / 1e6).toFixed(0)} MB`);
 export const baseName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
 export const chanShort = (c: Channel) => `ch ${c.width === 40 ? c.ch + 2 : c.label}`;
+// While recording: the warning when less than a minute of room is left, or null. Free space unknown
+// (undefined: the web build has no figure for the folder it records into) is not "none left".
+export function diskWarning(diskFree: number | undefined, bytesPerS: number): string | null {
+  if (diskFree === undefined || !(bytesPerS > 0)) return null;
+  const left = diskFree / bytesPerS;
+  return left < 60 ? `disk nearly full: ${fmtDur(left)} left` : null;
+}
+
 export const fmtDur = (s: number) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : s >= 60 ? `${Math.floor(s / 60)} min` : `${Math.max(0, Math.floor(s))} s`);
 export const fmtClock = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 // The radio tunes 2.4 GHz channels 1-13 (2412-2472, 5 MHz apart) and 14 (2484), and 5 GHz in 5 MHz
@@ -50,8 +58,10 @@ export const bandsOf = (d: Device | undefined): ('2.4' | '5')[] => d?.bands ?? [
 export const hears = (d: Device | undefined, f: number) => bandsOf(d).includes(bandOf(f));
 // The udev rule (the same as the README's): self-contained, so it works from the AppImage. Its number
 // sorts before 73-seat-late.rules, where uaccess is applied (a later rule never gets it).
-export const UDEV_RULES = [0xb812, 0xc812, 0xa81a]
-  .map((pid) => `SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="${pid.toString(16)}", TAG+="uaccess", MODE="0660", GROUP="plugdev"`)
+// (2357:0115: TP-Link Archer T4U v3, an 8812BU under TP-Link's id)
+export const UDEV_RULES = ['0bda:b812', '0bda:c812', '0bda:a81a', '2357:0115']
+  .map((id) => id.split(':'))
+  .map(([vid, pid]) => `SUBSYSTEM=="usb", ATTRS{idVendor}=="${vid}", ATTRS{idProduct}=="${pid}", TAG+="uaccess", MODE="0660", GROUP="plugdev"`)
   .join('\n');
 export const UDEV_CMD = `printf '%s\\n' '${UDEV_RULES.split('\n').join("' '")}' | sudo tee /etc/udev/rules.d/70-wsdr.rules > /dev/null && sudo udevadm control --reload`;
 export const LOCKED = 'End the recording to change tuning or gain';

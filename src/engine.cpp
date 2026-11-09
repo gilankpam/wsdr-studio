@@ -475,10 +475,27 @@ void Engine::open_adapter(uint16_t pid, const json &c) {
           } else if (d.speed_mbps < 5000 && d.bus == dev.bus && d.port == dev.port) {
             back = true; // re-enumerated at USB 2 on the same port: no USB 3 here
           }
+#ifdef __EMSCRIPTEN__
+          // WebUSB has no port: d.port is the backend's id for this USBDevice, a new one after the
+          // re-enumeration. A new 8812BU at USB 2 is the one we switched, back on a USB 2 port.
+          else if (d.speed_mbps < 5000) {
+            bus = d.bus;
+            port = d.port;
+            back = true;
+          }
+#endif
         }
       }
+#ifdef __EMSCRIPTEN__
+      // (the chip remembers the attempt until it loses power: after pairing it again, Start opens it
+      // at whatever speed it came back at; a replug would only repeat the switch)
+      if (!super && !back)
+        fail("not_found", "the 8812BU re-enumerated for the USB 3 switch and this page lost access to it: "
+                          "press Pair adapter…, choose it again, then Start (no need to replug)");
+#else
       if (!super && !back)
         fail("not_found", "the 8812BU did not come back after the USB 3 switch; replug it");
+#endif
       _cb.event({{"type", "notice"},
                  {"text", super ? "The 8812BU now runs at USB 3 (until it is unplugged)"
                                 : "The 8812BU stayed at USB 2: this port or cable may not carry USB 3"}});
